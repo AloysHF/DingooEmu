@@ -1,0 +1,6 @@
+tmp/
+target/
+.codegraph/
+.claude/
+.vscode/
+CLAUDE.md
