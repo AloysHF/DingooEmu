@@ -1,0 +1,19 @@
+[package]
+name = "dingooemu-core"
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+crc32fast.workspace = true
+byteorder = "1"
+
+[dev-dependencies]
+env_logger.workspace = true
+cargo-husky = { version = "=1.5.0", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy"] }

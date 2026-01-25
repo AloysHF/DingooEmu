@@ -1,0 +1,18 @@
+[package]
+name = "dingooemu"
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dingoo-emu"
+path = "src/main.rs"
+
+[dependencies]
+dingooemu-core.workspace = true
+clap.workspace = true
+minifb.workspace = true
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
