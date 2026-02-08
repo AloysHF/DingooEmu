@@ -8,13 +8,20 @@ const RAM_SIZE: u32 = 32 * 1024 * 1024; // 32 MB
 pub struct Memory {
     /// Main RAM (32 MB)
     ram: Box<[u8]>,
+    /// Heap pointer (next allocation address)
+    heap_ptr: u32,
+    /// Heap allocations (addr -> size)
+    allocations: std::collections::HashMap<u32, u32>,
 }
 
 impl Memory {
     /// Create a new memory instance with all RAM zeroed
     pub fn new() -> Self {
+        // Heap starts in the middle of RAM (16MB offset)
         Self {
             ram: vec![0u8; RAM_SIZE as usize].into_boxed_slice(),
+            heap_ptr: 0x0100_0000, // 16MB
+            allocations: std::collections::HashMap::new(),
         }
     }
 
@@ -91,6 +98,93 @@ impl Memory {
     /// Get a mutable slice of memory (for direct access)
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.ram
+    }
+
+    /// Allocate memory from the heap
+    pub fn malloc(&mut self, size: u32) -> u32 {
+        if size == 0 {
+            return 0;
+        }
+
+        // Align to 4 bytes
+        let aligned_size = (size + 3) & !3;
+        let ptr = self.heap_ptr;
+
+        // Check if allocation would exceed RAM
+        if ptr + aligned_size > RAM_BASE + RAM_SIZE {
+            log::warn!("malloc failed: not enough memory");
+            return 0;
+        }
+
+        self.heap_ptr = self.heap_ptr.wrapping_add(aligned_size);
+        self.allocations.insert(ptr, aligned_size);
+        ptr
+    }
+
+    /// Free previously allocated memory
+    pub fn free(&mut self, ptr: u32) {
+        if ptr != 0 {
+            self.allocations.remove(&ptr);
+        }
+    }
+
+    /// Reallocate memory
+    pub fn realloc(&mut self, ptr: u32, new_size: u32) -> u32 {
+        if ptr == 0 {
+            return self.malloc(new_size);
+        }
+
+        if new_size == 0 {
+            self.free(ptr);
+            return 0;
+        }
+
+        // Allocate new block and copy data
+        let new_ptr = self.malloc(new_size);
+        if let Some(&old_size) = self.allocations.get(&ptr) {
+            let copy_size = old_size.min(new_size);
+            // Copy old data to new location
+            let old_data: Vec<u8> = (0..copy_size)
+                .filter_map(|i| self.read_u8(ptr.wrapping_add(i)).ok())
+                .collect();
+            for (i, &byte) in old_data.iter().enumerate() {
+                let _ = self.write_u8(new_ptr.wrapping_add(i as u32), byte);
+            }
+        }
+        self.free(ptr);
+        new_ptr
+    }
+
+    /// Set memory to a value
+    pub fn memset(&mut self, ptr: u32, value: u8, size: u32) {
+        for i in 0..size {
+            let _ = self.write_u8(ptr.wrapping_add(i), value);
+        }
+    }
+
+    /// Copy memory (handles overlapping regions)
+    pub fn memcpy(&mut self, dest: u32, src: u32, size: u32) -> Result<()> {
+        // Read source data first to handle overlapping regions
+        let data: Vec<u8> = (0..size)
+            .filter_map(|i| self.read_u8(src.wrapping_add(i)).ok())
+            .collect();
+
+        for (i, &byte) in data.iter().enumerate() {
+            self.write_u8(dest.wrapping_add(i as u32), byte)?;
+        }
+        Ok(())
+    }
+
+    /// Read a null-terminated string length
+    pub fn read_string_len(&self, ptr: u32) -> u32 {
+        let mut len = 0;
+        while let Ok(b) = self.read_u8(ptr.wrapping_add(len)) {
+            if b == 0 {
+                break;
+            }
+            len += 1;
+        }
+        len
     }
 }
 
