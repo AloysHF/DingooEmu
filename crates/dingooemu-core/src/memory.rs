@@ -4,6 +4,9 @@ use crate::error::{Result, SimulatorError};
 const RAM_BASE: u32 = 0x0000_0000;
 const RAM_SIZE: u32 = 32 * 1024 * 1024; // 32 MB
 
+/// MIPS KSEG0 mask (strip top 3 bits for cached segment)
+const KSEG0_MASK: u32 = 0x1FFF_FFFF;
+
 /// Memory manager for the Dingoo A320
 pub struct Memory {
     /// Main RAM (32 MB)
@@ -25,10 +28,24 @@ impl Memory {
         }
     }
 
+    /// Translate MIPS virtual address to physical address
+    /// Handles KSEG0 (0x80000000-0x9FFFFFFF) and KSEG1 (0xA0000000-0xBFFFFFFF)
+    fn translate_address(&self, addr: u32) -> u32 {
+        match addr {
+            // KSEG0: Cached, maps to 0x00000000-0x1FFFFFFF
+            0x8000_0000..=0x9FFF_FFFF => addr & KSEG0_MASK,
+            // KSEG1: Uncached, maps to 0x00000000-0x1FFFFFFF
+            0xA000_0000..=0xBFFF_FFFF => addr & KSEG0_MASK,
+            // KSEG2/KSEG3: Not commonly used, pass through
+            _ => addr,
+        }
+    }
+
     /// Read a byte from memory
     pub fn read_u8(&self, addr: u32) -> Result<u8> {
-        if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&addr) {
-            Ok(self.ram[(addr - RAM_BASE) as usize])
+        let phys_addr = self.translate_address(addr);
+        if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&phys_addr) {
+            Ok(self.ram[(phys_addr - RAM_BASE) as usize])
         } else {
             Err(SimulatorError::MemoryError {
                 addr,
@@ -55,8 +72,9 @@ impl Memory {
 
     /// Write a byte to memory
     pub fn write_u8(&mut self, addr: u32, value: u8) -> Result<()> {
-        if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&addr) {
-            self.ram[(addr - RAM_BASE) as usize] = value;
+        let phys_addr = self.translate_address(addr);
+        if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&phys_addr) {
+            self.ram[(phys_addr - RAM_BASE) as usize] = value;
             Ok(())
         } else {
             Err(SimulatorError::MemoryError {

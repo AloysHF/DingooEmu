@@ -41,7 +41,14 @@ impl Emulator {
         let executable = app.executable().to_vec();
         memory.load_data(load_base, &executable)?;
 
-        let cpu = Cpu::new(app.entry_point());
+        let mut cpu = Cpu::new(app.entry_point());
+
+        // Initialize stack pointer to a reasonable value in RAM
+        // Stack grows downward from top of RAM (32MB)
+        cpu.regs.write(29, 0x01FF_FFF0); // $sp = top of RAM - 16
+
+        // Initialize global pointer if needed
+        // cpu.regs.write(28, 0x0100_0000); // $gp
 
         // Try to find framebuffer address from imports
         let framebuffer_addr = find_framebuffer_addr(&app).unwrap_or(0x0300_0000);
