@@ -100,10 +100,39 @@ impl Emulator {
             self.cpu.step(&mut self.memory)?;
         }
 
+        // Sync framebuffer from guest memory to video subsystem
+        self.sync_framebuffer();
+
         self.video.advance_frame();
         self.frame_count += 1;
 
         Ok(())
+    }
+
+    /// Sync framebuffer from guest memory to video subsystem
+    fn sync_framebuffer(&mut self) {
+        let addr = self.video.framebuffer_addr();
+        let size = crate::video::FRAMEBUFFER_SIZE;
+
+        // Try to read framebuffer from guest memory
+        let mut fb_data = vec![0u8; size];
+        let mut all_ok = true;
+
+        for (i, byte) in fb_data.iter_mut().enumerate() {
+            match self.memory.read_u8(addr.wrapping_add(i as u32)) {
+                Ok(b) => *byte = b,
+                Err(_) => {
+                    all_ok = false;
+                    break;
+                }
+            }
+        }
+
+        if all_ok {
+            // Copy to video subsystem
+            let dst = self.video.framebuffer_mut();
+            dst.copy_from_slice(&fb_data);
+        }
     }
 
     /// Set the button state

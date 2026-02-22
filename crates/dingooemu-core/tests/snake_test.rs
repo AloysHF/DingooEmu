@@ -19,54 +19,42 @@ fn test_snake_app() {
 
     eprintln!("Game loaded successfully!");
     eprintln!("Entry point: {:#010x}", emu.cpu.regs.pc);
+    eprintln!(
+        "Frame buffer address: {:#010x}",
+        emu.video.framebuffer_addr()
+    );
 
-    // Dump first few instructions at entry point
-    eprintln!("Instructions at entry point:");
-    for i in 0..10 {
-        let addr = emu.cpu.regs.pc + i * 4;
-        match emu.memory.read_u32(addr) {
-            Ok(instr) => eprintln!("  {:#010x}: {:#010x}", addr, instr),
-            Err(e) => eprintln!("  {:#010x}: Error: {:?}", addr, e),
+    // Check imports for framebuffer-related functions
+    if let Some(app) = emu.app() {
+        eprintln!("Imports ({} total):", app.imports.len());
+        for import in app.imports.iter().take(20) {
+            eprintln!("  {:#010x}: {}", import.address, import.name);
         }
     }
 
     // Start emulation
     emu.start();
 
-    // Run for 100 frames with detailed logging
+    // Run for 100 frames
     for frame in 0..100 {
-        // Log before tick
-        if frame < 5 {
-            eprintln!(
-                "Frame {} - Before tick: PC={:#010x}, $sp={:#010x}, $ra={:#010x}",
-                frame,
-                emu.cpu.regs.pc,
-                emu.cpu.regs.read(29),
-                emu.cpu.regs.read(31)
-            );
-        }
-
         match emu.tick() {
             Ok(_) => {
-                if frame < 5 {
+                if frame % 20 == 0 {
+                    // Check framebuffer content
+                    let fb = emu.video.framebuffer();
+                    let non_zero = fb.iter().filter(|&&b| b != 0).count();
                     eprintln!(
-                        "Frame {} - After tick: PC={:#010x}, instructions={}",
-                        frame, emu.cpu.regs.pc, emu.cpu.instruction_count
+                        "Frame {}: PC={:#010x}, instructions={}, fb_non_zero={}",
+                        frame, emu.cpu.regs.pc, emu.cpu.instruction_count, non_zero
                     );
                 }
             }
             Err(e) => {
                 eprintln!("Frame {} - Error: {:?}", frame, e);
-                eprintln!("PC at error: {:#010x}", emu.cpu.regs.pc);
-                eprintln!("Registers at error:");
-                for i in 0..32 {
-                    eprintln!("  ${:2} = {:#010x}", i, emu.cpu.regs.read(i));
-                }
                 break;
             }
         }
 
-        // Stop if CPU stops running
         if !emu.cpu.is_running() {
             eprintln!("CPU stopped at frame {}", frame);
             break;
@@ -77,7 +65,6 @@ fn test_snake_app() {
     eprintln!("Final PC: {:#010x}", emu.cpu.regs.pc);
     eprintln!("Total instructions: {}", emu.cpu.instruction_count);
 
-    // Verify that some instructions were executed
     assert!(
         emu.cpu.instruction_count > 0,
         "CPU should have executed some instructions"

@@ -216,17 +216,35 @@ impl SdkHle {
     // ========================================================================
 
     /// lcd_get_frame() -> framebuffer_ptr
+    /// Returns KSEG0 address of the framebuffer (physical addr + 0x80000000)
     fn handle_lcd_get_frame(ctx: &mut SdkContext) -> Result<()> {
-        ctx.cpu.regs.write(2, ctx.video_addr); // $v0 = addr
-        log::trace!("SDK: lcd_get_frame() = {:#010x}", ctx.video_addr);
+        // Return KSEG0 address (physical address mapped to cached segment)
+        let kseg0_addr = ctx.video_addr | 0x8000_0000;
+        ctx.cpu.regs.write(2, kseg0_addr); // $v0 = KSEG0 addr
+        log::trace!(
+            "SDK: lcd_get_frame() = {:#010x} (physical: {:#010x})",
+            kseg0_addr,
+            ctx.video_addr
+        );
         Ok(())
     }
 
     /// lcd_set_frame(addr)
+    /// Sets the framebuffer address (can be KSEG0 or physical)
     fn handle_lcd_set_frame(ctx: &mut SdkContext) -> Result<()> {
         let addr = ctx.cpu.regs.read(4); // $a0 = addr
-        ctx.video_addr = addr;
-        log::trace!("SDK: lcd_set_frame({:#010x})", addr);
+                                         // Convert KSEG0 to physical if needed
+        let physical_addr = if (0x8000_0000..0xA000_0000).contains(&addr) {
+            addr & 0x1FFF_FFFF
+        } else {
+            addr
+        };
+        ctx.video_addr = physical_addr;
+        log::trace!(
+            "SDK: lcd_set_frame({:#010x}) -> physical: {:#010x}",
+            addr,
+            physical_addr
+        );
         Ok(())
     }
 
