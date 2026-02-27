@@ -28,6 +28,11 @@ impl Video {
         self.framebuffer_addr
     }
 
+    /// Set the framebuffer base address
+    pub fn set_framebuffer_addr(&mut self, addr: u32) {
+        self.framebuffer_addr = addr;
+    }
+
     /// Get a reference to the framebuffer
     pub fn framebuffer(&self) -> &[u8] {
         &self.framebuffer
