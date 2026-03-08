@@ -29,39 +29,75 @@ fn test_snake_app() {
 
     // Dump instructions at the loop addresses
     eprintln!("Instructions at loop addresses:");
-    for addr in [0x80a0033cu32, 0x80a00338, 0x80a00344, 0x80a00340] {
+    for addr in [
+        0x80a00330u32,
+        0x80a00334,
+        0x80a00338,
+        0x80a0033c,
+        0x80a00340,
+        0x80a00344,
+        0x80a00348,
+        0x80a0034c,
+        0x80a00350,
+    ] {
         let instr = emu.memory.read_u32(addr).unwrap_or(0);
-        let next = emu.memory.read_u32(addr + 4).unwrap_or(0);
-        eprintln!("  {:#010x}: {:#010x} {:#010x}", addr, instr, next);
+        eprintln!("  {:#010x}: {:#010x}", addr, instr);
     }
+
+    // Analyze the code flow
+    eprintln!("\nCode analysis:");
+    eprintln!("0x80a00324: JAL malloc - allocate memory");
+    eprintln!("0x80a0032c: JAL malloc - allocate MORE memory");
+    eprintln!("0x80a00334: SW $zero, 0($a0) - clear memory loop");
+    eprintln!("0x80a00338: ADDIU $a0, $a0, 4 - next word");
+    eprintln!("0x80a0033c: BNE $a0, $v0, -12 - loop until $a0 == $v0");
+    eprintln!(
+        "$v0 = {:#010x} (should be end of allocated buffer)",
+        emu.cpu.regs.read(2)
+    );
+    eprintln!(
+        "$a0 = {:#010x} (current clear address)",
+        emu.cpu.regs.read(4)
+    );
 
     emu.start();
 
-    // Run just 1 frame and dump PC trace
-    for frame in 0..5 {
-        let start_pc = emu.cpu.regs.pc;
-        let start_instr = emu.cpu.instruction_count;
+    // Run and track framebuffer address changes
+    let mut last_fb_addr = emu.video.framebuffer_addr();
+    for frame in 0..20 {
         match emu.tick() {
             Ok(_) => {
-                let end_pc = emu.cpu.regs.pc;
-                let end_instr = emu.cpu.instruction_count;
-                eprintln!(
-                    "Frame {}: PC {:#010x} -> {:#010x}, {} instructions executed",
-                    frame,
-                    start_pc,
-                    end_pc,
-                    end_instr - start_instr
-                );
+                let fb_addr = emu.video.framebuffer_addr();
+                if fb_addr != last_fb_addr {
+                    eprintln!(
+                        "Frame {}: FB address changed {:#010x} -> {:#010x}",
+                        frame, last_fb_addr, fb_addr
+                    );
+                    last_fb_addr = fb_addr;
 
-                // Check if we're stuck in a loop
-                if end_pc == start_pc {
-                    eprintln!("  WARNING: PC didn't change! Might be stuck.");
-                    // Dump instructions around current PC
-                    for i in 0..5 {
-                        let addr = end_pc.wrapping_add(i * 4);
-                        let instr = emu.memory.read_u32(addr).unwrap_or(0);
-                        eprintln!("  {:#010x}: {:#010x}", addr, instr);
+                    // Scan this new address for content
+                    let mut non_zero = 0u32;
+                    let size = 320 * 240 * 2;
+                    for i in 0..size {
+                        if let Ok(b) = emu.memory.read_u8(fb_addr + i) {
+                            if b != 0 {
+                                non_zero += 1;
+                            }
+                        }
                     }
+                    eprintln!("  New FB: {}/{} non-zero bytes", non_zero, size);
+                }
+
+                if frame % 5 == 0 {
+                    let fb = emu.video.framebuffer();
+                    let non_zero = fb.iter().filter(|&&b| b != 0).count();
+                    eprintln!(
+                        "Frame {}: PC={:#010x}, fb_addr={:#010x}, fb_non_zero={}",
+                        frame,
+                        emu.cpu.regs.pc,
+                        emu.video.framebuffer_addr(),
+                        non_zero
+                    );
                 }
             }
             Err(e) => {
@@ -72,6 +108,39 @@ fn test_snake_app() {
         if !emu.cpu.is_running() {
             eprintln!("CPU stopped at frame {}", frame);
             break;
+        }
+    }
+
+    // Final memory scan
+    let fb_addr = emu.video.framebuffer_addr();
+    eprintln!("Final FB address: {:#010x}", fb_addr);
+    eprintln!("Scanning memory around FB address:");
+    for offset in [
+        0u32,
+        0x0100_0000,
+        0x0200_0000,
+        0x0300_0000,
+        0x0400_0000,
+        0x0500_0000,
+    ] {
+        let scan_addr = fb_addr.wrapping_add(offset);
+        let mut non_zero = 0u32;
+        let size = 320 * 240 * 2;
+        for i in 0..size {
+            if let Ok(b) = emu.memory.read_u8(scan_addr + i) {
+                if b != 0 {
+                    non_zero += 1;
+                }
+            }
+        }
+        if non_zero > 1000 {
+            eprintln!(
+                "  {:#010x}: {}/{} non-zero ({:.1}%)",
+                scan_addr,
+                non_zero,
+                size,
+                non_zero as f64 / size as f64 * 100.0
+            );
         }
     }
 

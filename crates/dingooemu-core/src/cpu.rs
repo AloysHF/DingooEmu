@@ -96,14 +96,6 @@ impl Cpu {
             return Ok(());
         }
 
-        // Check if we need to apply branch target from a PREVIOUS instruction's branch
-        // (i.e., the delay slot instruction just executed)
-        if self.branch_delay && !self.branch_delay_pending {
-            self.branch_delay = false;
-            self.regs.pc = self.branch_target;
-        }
-        self.branch_delay_pending = false;
-
         // Fetch instruction at PC
         let instr = memory.read_u32(self.regs.pc)?;
 
@@ -112,6 +104,13 @@ impl Cpu {
 
         // Decode and execute
         self.execute_instruction(instr, memory)?;
+
+        // After executing the instruction, check if we need to apply branch target
+        // This happens AFTER the delay slot instruction executes
+        if self.branch_delay {
+            self.branch_delay = false;
+            self.regs.pc = self.branch_target;
+        }
 
         // R0 is always zero
         self.regs.gpr[0] = 0;

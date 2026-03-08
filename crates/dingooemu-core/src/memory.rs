@@ -204,6 +204,11 @@ impl Memory {
         }
         len
     }
+
+    /// Get current heap pointer
+    pub fn heap_ptr(&self) -> u32 {
+        self.heap_ptr
+    }
 }
 
 impl Default for Memory {

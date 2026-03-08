@@ -39,10 +39,16 @@ impl Emulator {
     pub fn from_app(app: AppImage) -> Result<Self> {
         let mut memory = Memory::new();
 
-        // Load executable into memory at the load base address
+        // Load executable into memory at the load base address (KSEG0)
         let load_base = app.load_base();
         let executable = app.executable().to_vec();
         memory.load_data(load_base, &executable)?;
+
+        // Also map at physical address (for games that use physical addressing)
+        let physical_addr = load_base & 0x1FFF_FFFF;
+        if physical_addr != load_base {
+            memory.load_data(physical_addr, &executable)?;
+        }
 
         let mut cpu = Cpu::new(app.entry_point());
 
@@ -58,15 +64,23 @@ impl Emulator {
         let sdk = SdkHle::new();
 
         // Build import address map for SDK hooking
+        // Include both KSEG0 and physical addresses
         let mut import_addrs = HashMap::new();
         for import in &app.imports {
+            // KSEG0 address
             import_addrs.insert(import.address, import.name.clone());
+            // Physical address
+            let phys = import.address & 0x1FFF_FFFF;
+            if phys != import.address {
+                import_addrs.insert(phys, import.name.clone());
+            }
         }
 
         log::info!(
-            "Emulator initialized: entry={:#010x}, base={:#010x}, framebuffer={:#010x}, imports={}",
+            "Emulator initialized: entry={:#010x}, base={:#010x}, physical={:#010x}, framebuffer={:#010x}, imports={}",
             app.entry_point(),
             load_base,
+            physical_addr,
             framebuffer_addr,
             import_addrs.len()
         );
@@ -108,14 +122,40 @@ impl Emulator {
 
             // Check if PC is at an import table address (SDK call)
             let pc = self.cpu.regs.pc;
-            let is_import = self.import_addrs.contains_key(&pc);
-            if is_import {
-                let func_name = self.import_addrs[&pc].clone();
-                // Handle SDK call
+            if let Some(func_name) = self.import_addrs.get(&pc).cloned() {
+                // Handle SDK call directly
                 self.handle_sdk_call(pc, &func_name)?;
             } else {
-                // Normal instruction execution
-                self.cpu.step(&mut self.memory)?;
+                // Check if this is a JAL/J instruction to an import address
+                let instr = self.memory.read_u32(pc).unwrap_or(0);
+                let opcode = (instr >> 26) & 0x3F;
+
+                if opcode == 0x03 || opcode == 0x02 {
+                    // JAL or J instruction - check if target is an import
+                    let target = if opcode == 0x03 {
+                        // JAL: target = (PC & 0xF0000000) | (instr_index << 2)
+                        let instr_index = instr & 0x03FF_FFFF;
+                        (pc & 0xF000_0000) | (instr_index << 2)
+                    } else {
+                        // J: same calculation
+                        let instr_index = instr & 0x03FF_FFFF;
+                        (pc & 0xF000_0000) | (instr_index << 2)
+                    };
+
+                    if let Some(func_name) = self.import_addrs.get(&target).cloned() {
+                        // Execute the delay slot first (the instruction after JAL/J)
+                        self.cpu.step(&mut self.memory)?;
+
+                        // Handle SDK call (this will set $v0 and return to $ra)
+                        self.handle_sdk_call(target, &func_name)?;
+                    } else {
+                        // Normal instruction execution
+                        self.cpu.step(&mut self.memory)?;
+                    }
+                } else {
+                    // Normal instruction execution
+                    self.cpu.step(&mut self.memory)?;
+                }
             }
         }
 
@@ -141,7 +181,12 @@ impl Emulator {
                 let size = self.cpu.regs.read(4); // $a0
                 let ptr = self.memory.malloc(size);
                 self.cpu.regs.write(2, ptr); // $v0
-                log::trace!("  malloc({}) = {:#010x}", size, ptr);
+                log::info!(
+                    "  malloc({}) = {:#010x} (heap_ptr={:#010x})",
+                    size,
+                    ptr,
+                    self.memory.heap_ptr()
+                );
             }
             "free" => {
                 let ptr = self.cpu.regs.read(4); // $a0
