@@ -96,21 +96,27 @@ impl Cpu {
             return Ok(());
         }
 
-        // Fetch instruction at PC
-        let instr = memory.read_u32(self.regs.pc)?;
-
-        // Advance PC
-        self.regs.pc = self.regs.pc.wrapping_add(4);
-
-        // Decode and execute
-        self.execute_instruction(instr, memory)?;
-
-        // After executing the instruction, check if we need to apply branch target
-        // This happens AFTER the delay slot instruction executes
+        // If we have a pending branch (from previous instruction),
+        // the delay slot is the NEXT instruction to execute
         if self.branch_delay {
+            // The delay slot is at PC (which is already pointing to the delay slot)
+            // Execute it first
+            let delay_instr = memory.read_u32(self.regs.pc)?;
+            self.regs.pc = self.regs.pc.wrapping_add(4);
+            self.execute_instruction(delay_instr, memory)?;
+
+            // After delay slot executes, apply the branch target
             self.branch_delay = false;
             self.regs.pc = self.branch_target;
+            self.regs.gpr[0] = 0;
+            self.instruction_count += 1;
+            return Ok(());
         }
+
+        // Normal instruction execution
+        let instr = memory.read_u32(self.regs.pc)?;
+        self.regs.pc = self.regs.pc.wrapping_add(4);
+        self.execute_instruction(instr, memory)?;
 
         // R0 is always zero
         self.regs.gpr[0] = 0;

@@ -24,8 +24,11 @@ pub struct Emulator {
     frame_count: u64,
     /// Parsed app image (for resource access)
     app: Option<AppImage>,
-    /// Import address to function name mapping
+    /// Import address to function name mapping (for diagnostics)
+    #[allow(dead_code)]
     import_addrs: HashMap<u32, String>,
+    /// Hooked addresses (for SDK function interception)
+    hooked_addrs: HashMap<u32, String>,
 }
 
 impl Emulator {
@@ -64,15 +67,19 @@ impl Emulator {
         let sdk = SdkHle::new();
 
         // Build import address map for SDK hooking
-        // Include both KSEG0 and physical addresses
+        // The game uses physical addressing, not KSEG0
+        // So we need to hook physical addresses
         let mut import_addrs = HashMap::new();
+        let mut hooked_addrs = HashMap::new();
         for import in &app.imports {
-            // KSEG0 address
-            import_addrs.insert(import.address, import.name.clone());
-            // Physical address
+            // Physical address (what the game actually uses)
             let phys = import.address & 0x1FFF_FFFF;
+            import_addrs.insert(phys, import.name.clone());
+            hooked_addrs.insert(phys, import.name.clone());
+            // Also hook KSEG0 address (for completeness)
             if phys != import.address {
-                import_addrs.insert(phys, import.name.clone());
+                import_addrs.insert(import.address, import.name.clone());
+                hooked_addrs.insert(import.address, import.name.clone());
             }
         }
 
@@ -94,6 +101,7 @@ impl Emulator {
             frame_count: 0,
             app: Some(app),
             import_addrs,
+            hooked_addrs,
         })
     }
 
@@ -120,42 +128,15 @@ impl Emulator {
                 break;
             }
 
-            // Check if PC is at an import table address (SDK call)
+            // Check if PC is at a hooked address (SDK call)
+            // This is how DingooPie does it - hook the import addresses themselves
             let pc = self.cpu.regs.pc;
-            if let Some(func_name) = self.import_addrs.get(&pc).cloned() {
+            if let Some(func_name) = self.hooked_addrs.get(&pc).cloned() {
                 // Handle SDK call directly
                 self.handle_sdk_call(pc, &func_name)?;
             } else {
-                // Check if this is a JAL/J instruction to an import address
-                let instr = self.memory.read_u32(pc).unwrap_or(0);
-                let opcode = (instr >> 26) & 0x3F;
-
-                if opcode == 0x03 || opcode == 0x02 {
-                    // JAL or J instruction - check if target is an import
-                    let target = if opcode == 0x03 {
-                        // JAL: target = (PC & 0xF0000000) | (instr_index << 2)
-                        let instr_index = instr & 0x03FF_FFFF;
-                        (pc & 0xF000_0000) | (instr_index << 2)
-                    } else {
-                        // J: same calculation
-                        let instr_index = instr & 0x03FF_FFFF;
-                        (pc & 0xF000_0000) | (instr_index << 2)
-                    };
-
-                    if let Some(func_name) = self.import_addrs.get(&target).cloned() {
-                        // Execute the delay slot first (the instruction after JAL/J)
-                        self.cpu.step(&mut self.memory)?;
-
-                        // Handle SDK call (this will set $v0 and return to $ra)
-                        self.handle_sdk_call(target, &func_name)?;
-                    } else {
-                        // Normal instruction execution
-                        self.cpu.step(&mut self.memory)?;
-                    }
-                } else {
-                    // Normal instruction execution
-                    self.cpu.step(&mut self.memory)?;
-                }
+                // Normal instruction execution
+                self.cpu.step(&mut self.memory)?;
             }
         }
 
@@ -421,6 +402,7 @@ impl Default for Emulator {
             frame_count: 0,
             app: None,
             import_addrs: HashMap::new(),
+            hooked_addrs: HashMap::new(),
         }
     }
 }

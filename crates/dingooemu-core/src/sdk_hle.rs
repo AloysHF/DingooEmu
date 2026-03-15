@@ -158,7 +158,12 @@ impl SdkHle {
         let size = ctx.cpu.regs.read(4); // $a0 = size
         let ptr = ctx.memory.malloc(size);
         ctx.cpu.regs.write(2, ptr); // $v0 = ptr
-        log::trace!("SDK: malloc({}) = {:#010x}", size, ptr);
+                                    // Track large allocations (likely framebuffers)
+        if size >= 100_000 {
+            log::info!("SDK: malloc({}) = {:#010x} (likely framebuffer)", size, ptr);
+        } else {
+            log::trace!("SDK: malloc({}) = {:#010x}", size, ptr);
+        }
         Ok(())
     }
 
@@ -240,7 +245,7 @@ impl SdkHle {
             addr
         };
         ctx.video_addr = physical_addr;
-        log::trace!(
+        log::info!(
             "SDK: lcd_set_frame({:#010x}) -> physical: {:#010x}",
             addr,
             physical_addr
