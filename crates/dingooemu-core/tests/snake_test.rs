@@ -91,12 +91,20 @@ fn test_snake_app() {
                 if frame % 5 == 0 {
                     let fb = emu.video.framebuffer();
                     let non_zero = fb.iter().filter(|&&b| b != 0).count();
+                    let fb_addr = emu.video.framebuffer_addr();
+                    // Check if game is writing to this address
+                    let mut mem_non_zero = 0u32;
+                    let size = 320 * 240 * 2;
+                    for i in 0..size {
+                        if let Ok(b) = emu.memory.read_u8(fb_addr + i) {
+                            if b != 0 {
+                                mem_non_zero += 1;
+                            }
+                        }
+                    }
                     eprintln!(
-                        "Frame {}: PC={:#010x}, fb_addr={:#010x}, fb_non_zero={}",
-                        frame,
-                        emu.cpu.regs.pc,
-                        emu.video.framebuffer_addr(),
-                        non_zero
+                        "Frame {}: PC={:#010x}, fb_addr={:#010x}, video_fb={}, mem_fb={}",
+                        frame, emu.cpu.regs.pc, fb_addr, non_zero, mem_non_zero
                     );
                 }
             }
@@ -188,12 +196,12 @@ fn test_snake_app() {
                 "  {:#010x}: {}/{} ({:.1}%) non-zero",
                 region_start, non_zero, size, density
             );
-            // Dump first 64 bytes
-            let bytes: Vec<String> = (0..64)
+            // Check if this looks like RGB565 pixel data
+            let sample: Vec<String> = (0..32)
                 .filter_map(|i| emu.memory.read_u8(region_start + i).ok())
                 .map(|b| format!("{:02x}", b))
                 .collect();
-            eprintln!("    sample: {}", bytes.join(" "));
+            eprintln!("    sample: {}", sample.join(" "));
         }
     }
 

@@ -83,14 +83,20 @@ impl Emulator {
             }
         }
 
-        log::info!(
-            "Emulator initialized: entry={:#010x}, base={:#010x}, physical={:#010x}, framebuffer={:#010x}, imports={}",
+        eprintln!(
+            "Emulator initialized: entry={:#010x}, base={:#010x}, physical={:#010x}, framebuffer={:#010x}, imports={}, hooked={}",
             app.entry_point(),
             load_base,
             physical_addr,
             framebuffer_addr,
-            import_addrs.len()
+            import_addrs.len(),
+            hooked_addrs.len()
         );
+
+        // Debug: print some hooked addresses
+        for (addr, name) in hooked_addrs.iter().take(5) {
+            eprintln!("  Hooked: {:#010x} = {}", addr, name);
+        }
 
         Ok(Self {
             cpu,
@@ -129,9 +135,19 @@ impl Emulator {
             }
 
             // Check if PC is at a hooked address (SDK call)
-            // This is how DingooPie does it - hook the import addresses themselves
             let pc = self.cpu.regs.pc;
+
+            // Debug: print first few PCs
+            if self.cpu.instruction_count < 10 {
+                eprintln!(
+                    "DEBUG: PC={:#010x}, hooked={}",
+                    pc,
+                    self.hooked_addrs.contains_key(&pc)
+                );
+            }
+
             if let Some(func_name) = self.hooked_addrs.get(&pc).cloned() {
+                eprintln!("SDK HOOK: PC={:#010x} = {}", pc, func_name);
                 // Handle SDK call directly
                 self.handle_sdk_call(pc, &func_name)?;
             } else {
@@ -206,9 +222,21 @@ impl Emulator {
 
             // Graphics/LCD
             "_lcd_get_frame" | "lcd_get_frame" | "lcd_get_cframe" => {
-                let kseg0_addr = self.video.framebuffer_addr() | 0x8000_0000;
-                self.cpu.regs.write(2, kseg0_addr); // $v0
-                log::trace!("  lcd_get_frame() = {:#010x}", kseg0_addr);
+                // Allocate a framebuffer if not already allocated
+                if self.video.framebuffer_addr() == 0x80a00130 {
+                    // Default address is the import table, allocate real framebuffer
+                    let fb_size = 320 * 240 * 2; // RGB565
+                    let fb_ptr = self.memory.malloc(fb_size);
+                    self.video.set_framebuffer_addr(fb_ptr);
+                    log::info!(
+                        "  lcd_get_frame() allocated framebuffer at {:#010x}",
+                        fb_ptr
+                    );
+                }
+                // Return physical address (game uses physical addressing)
+                let phys_addr = self.video.framebuffer_addr() & 0x1FFF_FFFF;
+                self.cpu.regs.write(2, phys_addr); // $v0
+                log::trace!("  lcd_get_frame() = {:#010x} (physical)", phys_addr);
             }
             "_lcd_set_frame" | "lcd_set_frame" | "ap_lcd_set_frame" => {
                 let addr = self.cpu.regs.read(4); // $a0
