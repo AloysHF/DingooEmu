@@ -53,15 +53,24 @@ impl Emulator {
             memory.load_data(physical_addr, &executable)?;
         }
 
+        // Map framebuffer at fixed address (like DingooPie)
+        // The game writes directly to this address
+        let fb_addr = crate::video::VM_LCD_FB_ADDRESS;
+        let fb_size = crate::video::FRAMEBUFFER_SIZE;
+        // Reserve space in memory for framebuffer (zero it out)
+        for i in 0..fb_size {
+            let _ = memory.write_u8(fb_addr + i as u32, 0);
+        }
+
         let mut cpu = Cpu::new(app.entry_point());
 
         // Initialize stack pointer to a reasonable value in RAM
         // Stack grows downward from top of RAM (32MB)
         cpu.regs.write(29, 0x01FF_FFF0); // $sp = top of RAM - 16
 
-        // Try to find framebuffer address from imports
-        let framebuffer_addr = find_framebuffer_addr(&app).unwrap_or(0x0300_0000);
-        let video = Video::new(framebuffer_addr);
+        // Use fixed framebuffer address like DingooPie
+        // The game writes directly to this address
+        let video = Video::new();
 
         let input = Input::new();
         let sdk = SdkHle::new();
@@ -88,7 +97,7 @@ impl Emulator {
             app.entry_point(),
             load_base,
             physical_addr,
-            framebuffer_addr,
+            crate::video::VM_LCD_FB_ADDRESS,
             import_addrs.len(),
             hooked_addrs.len()
         );
@@ -136,15 +145,6 @@ impl Emulator {
 
             // Check if PC is at a hooked address (SDK call)
             let pc = self.cpu.regs.pc;
-
-            // Debug: print first few PCs
-            if self.cpu.instruction_count < 10 {
-                eprintln!(
-                    "DEBUG: PC={:#010x}, hooked={}",
-                    pc,
-                    self.hooked_addrs.contains_key(&pc)
-                );
-            }
 
             if let Some(func_name) = self.hooked_addrs.get(&pc).cloned() {
                 eprintln!("SDK HOOK: PC={:#010x} = {}", pc, func_name);
@@ -222,21 +222,11 @@ impl Emulator {
 
             // Graphics/LCD
             "_lcd_get_frame" | "lcd_get_frame" | "lcd_get_cframe" => {
-                // Allocate a framebuffer if not already allocated
-                if self.video.framebuffer_addr() == 0x80a00130 {
-                    // Default address is the import table, allocate real framebuffer
-                    let fb_size = 320 * 240 * 2; // RGB565
-                    let fb_ptr = self.memory.malloc(fb_size);
-                    self.video.set_framebuffer_addr(fb_ptr);
-                    log::info!(
-                        "  lcd_get_frame() allocated framebuffer at {:#010x}",
-                        fb_ptr
-                    );
-                }
-                // Return physical address (game uses physical addressing)
-                let phys_addr = self.video.framebuffer_addr() & 0x1FFF_FFFF;
+                // Return fixed framebuffer address (like DingooPie)
+                // The game writes directly to this address
+                let phys_addr = crate::video::VM_LCD_FB_ADDRESS;
                 self.cpu.regs.write(2, phys_addr); // $v0
-                log::trace!("  lcd_get_frame() = {:#010x} (physical)", phys_addr);
+                log::trace!("  lcd_get_frame() = {:#010x}", phys_addr);
             }
             "_lcd_set_frame" | "lcd_set_frame" | "ap_lcd_set_frame" => {
                 let addr = self.cpu.regs.read(4); // $a0
@@ -245,7 +235,6 @@ impl Emulator {
                 } else {
                     addr
                 };
-                self.video.set_framebuffer_addr(physical_addr);
                 log::info!(
                     "  lcd_set_frame({:#010x}) -> physical: {:#010x}",
                     addr,
@@ -253,7 +242,9 @@ impl Emulator {
                 );
             }
             "lcd_flip" => {
-                log::trace!("  lcd_flip()");
+                // Trigger framebuffer update (like DingooPie's requestFbUpdate)
+                self.sync_framebuffer();
+                log::trace!("  lcd_flip() - framebuffer updated");
             }
             "LcdGetDisMode" => {
                 self.cpu.regs.write(2, 0); // $v0 = 0
@@ -311,6 +302,18 @@ impl Emulator {
                 let ms = self.cpu.regs.read(4); // $a0
                 log::trace!("  delay_ms({})", ms);
             }
+            "StartSwTimer" => {
+                self.cpu.regs.write(2, 0); // $v0 = 0
+                log::trace!("  StartSwTimer() = 0");
+            }
+            "OSTimeDly" => {
+                let ticks = self.cpu.regs.read(4); // $a0
+                log::trace!("  OSTimeDly({})", ticks);
+            }
+            "udelay" => {
+                let us = self.cpu.regs.read(4); // $a0
+                log::trace!("  udelay({})", us);
+            }
 
             // File I/O (stubs)
             "fopen" | "fsys_fopen" => {
@@ -361,17 +364,24 @@ impl Emulator {
     }
 
     /// Sync framebuffer from guest memory to video subsystem
+    /// The game writes directly to the fixed framebuffer address
     fn sync_framebuffer(&mut self) {
-        let addr = self.video.framebuffer_addr();
+        let addr = crate::video::VM_LCD_FB_ADDRESS;
         let size = crate::video::FRAMEBUFFER_SIZE;
 
         // Try to read framebuffer from guest memory
         let mut fb_data = vec![0u8; size];
         let mut all_ok = true;
+        let mut non_zero_count = 0u32;
 
         for (i, byte) in fb_data.iter_mut().enumerate() {
             match self.memory.read_u8(addr.wrapping_add(i as u32)) {
-                Ok(b) => *byte = b,
+                Ok(b) => {
+                    *byte = b;
+                    if b != 0 {
+                        non_zero_count += 1;
+                    }
+                }
                 Err(_) => {
                     all_ok = false;
                     break;
@@ -379,10 +389,15 @@ impl Emulator {
             }
         }
 
-        if all_ok {
+        if all_ok && non_zero_count > 0 {
             // Copy to video subsystem
             let dst = self.video.framebuffer_mut();
             dst.copy_from_slice(&fb_data);
+            log::trace!(
+                "  sync_framebuffer: {}/{} non-zero bytes",
+                non_zero_count,
+                size
+            );
         }
     }
 
@@ -407,24 +422,12 @@ impl Emulator {
     }
 }
 
-/// Try to find framebuffer address from app imports
-fn find_framebuffer_addr(app: &AppImage) -> Option<u32> {
-    // Look for common framebuffer function names
-    for import in &app.imports {
-        let name = import.name.to_lowercase();
-        if name.contains("lcd_get_frame") || name.contains("get_framebuffer") {
-            return Some(import.address);
-        }
-    }
-    None
-}
-
 impl Default for Emulator {
     fn default() -> Self {
         Self {
             cpu: Cpu::new(0x8000_0000),
             memory: Memory::new(),
-            video: Video::new(0x0300_0000),
+            video: Video::new(),
             input: Input::new(),
             sdk: SdkHle::new(),
             frame_count: 0,

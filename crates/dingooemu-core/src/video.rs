@@ -3,34 +3,33 @@ pub const SCREEN_WIDTH: u32 = 320;
 pub const SCREEN_HEIGHT: u32 = 240;
 pub const FRAMEBUFFER_SIZE: usize = (SCREEN_WIDTH * SCREEN_HEIGHT * 2) as usize; // RGB565
 
+/// Fixed framebuffer address (like DingooPie's VM_LCD_FB_ADDRESS)
+/// The game writes directly to this address
+pub const VM_LCD_FB_ADDRESS: u32 = 0x1400_0000;
+
 /// Video subsystem
 pub struct Video {
-    /// Framebuffer in RGB565 format
+    /// Framebuffer in RGB565 format (host-side copy)
     framebuffer: Box<[u8]>,
-    /// Framebuffer base address in guest memory
-    framebuffer_addr: u32,
+    /// Whether the framebuffer has been updated
+    fb_dirty: bool,
     /// Frame count for FPS tracking
     frame_count: u64,
 }
 
 impl Video {
     /// Create a new video subsystem
-    pub fn new(framebuffer_addr: u32) -> Self {
+    pub fn new() -> Self {
         Self {
             framebuffer: vec![0u8; FRAMEBUFFER_SIZE].into_boxed_slice(),
-            framebuffer_addr,
+            fb_dirty: false,
             frame_count: 0,
         }
     }
 
-    /// Get the framebuffer base address
+    /// Get the fixed framebuffer address
     pub fn framebuffer_addr(&self) -> u32 {
-        self.framebuffer_addr
-    }
-
-    /// Set the framebuffer base address
-    pub fn set_framebuffer_addr(&mut self, addr: u32) {
-        self.framebuffer_addr = addr;
+        VM_LCD_FB_ADDRESS
     }
 
     /// Get a reference to the framebuffer
@@ -41,6 +40,21 @@ impl Video {
     /// Get a mutable reference to the framebuffer
     pub fn framebuffer_mut(&mut self) -> &mut [u8] {
         &mut self.framebuffer
+    }
+
+    /// Mark framebuffer as dirty (needs sync from guest memory)
+    pub fn mark_dirty(&mut self) {
+        self.fb_dirty = true;
+    }
+
+    /// Check if framebuffer needs sync
+    pub fn is_dirty(&self) -> bool {
+        self.fb_dirty
+    }
+
+    /// Clear dirty flag after sync
+    pub fn clear_dirty(&mut self) {
+        self.fb_dirty = false;
     }
 
     /// Convert RGB565 framebuffer to XRGB8888 (for rendering)
@@ -83,7 +97,7 @@ impl Video {
 
 impl Default for Video {
     fn default() -> Self {
-        Self::new(0x0300_0000) // Default framebuffer address
+        Self::new()
     }
 }
 
@@ -93,14 +107,14 @@ mod tests {
 
     #[test]
     fn test_video_creation() {
-        let video = Video::new(0x0300_0000);
-        assert_eq!(video.framebuffer_addr(), 0x0300_0000);
+        let video = Video::new();
+        assert_eq!(video.framebuffer_addr(), VM_LCD_FB_ADDRESS);
         assert_eq!(video.framebuffer().len(), FRAMEBUFFER_SIZE);
     }
 
     #[test]
     fn test_rgb565_conversion() {
-        let mut video = Video::new(0);
+        let mut video = Video::new();
         // Set a white pixel (0xFFFF in RGB565)
         video.framebuffer_mut()[0] = 0xFF;
         video.framebuffer_mut()[1] = 0xFF;

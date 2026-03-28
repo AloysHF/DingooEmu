@@ -15,6 +15,8 @@ pub struct Memory {
     heap_ptr: u32,
     /// Heap allocations (addr -> size)
     allocations: std::collections::HashMap<u32, u32>,
+    /// Write tracking: addresses that were written to
+    write_log: Vec<u32>,
 }
 
 impl Memory {
@@ -25,7 +27,13 @@ impl Memory {
             ram: vec![0u8; RAM_SIZE as usize].into_boxed_slice(),
             heap_ptr: 0x0100_0000, // 16MB
             allocations: std::collections::HashMap::new(),
+            write_log: Vec::new(),
         }
+    }
+
+    /// Get a copy of the write log and clear it
+    pub fn consume_write_log(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.write_log)
     }
 
     /// Translate MIPS virtual address to physical address
@@ -75,6 +83,10 @@ impl Memory {
         let phys_addr = self.translate_address(addr);
         if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&phys_addr) {
             self.ram[(phys_addr - RAM_BASE) as usize] = value;
+            // Track ALL writes for debugging
+            if self.write_log.len() < 1000 {
+                self.write_log.push(phys_addr);
+            }
             Ok(())
         } else {
             Err(SimulatorError::MemoryError {
