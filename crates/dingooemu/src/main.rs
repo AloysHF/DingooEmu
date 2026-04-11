@@ -63,7 +63,7 @@ fn main() -> anyhow::Result<()> {
         )?;
 
         // Limit to ~60fps
-        window.limit_update_rate(Some(std::time::Duration::from_micros(16_600)));
+        window.set_target_fps(60);
 
         // Main loop
         while window.is_open() && !window.is_key_down(Key::Escape) {

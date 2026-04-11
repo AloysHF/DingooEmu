@@ -3,9 +3,11 @@ pub const SCREEN_WIDTH: u32 = 320;
 pub const SCREEN_HEIGHT: u32 = 240;
 pub const FRAMEBUFFER_SIZE: usize = (SCREEN_WIDTH * SCREEN_HEIGHT * 2) as usize; // RGB565
 
-/// Fixed framebuffer address (like DingooPie's VM_LCD_FB_ADDRESS)
-/// The game writes directly to this address
-pub const VM_LCD_FB_ADDRESS: u32 = 0x1400_0000;
+/// Rounded LCD framebuffer mapping size.
+pub const FRAMEBUFFER_MAP_SIZE: usize = 0x0002_6000;
+
+/// Fixed framebuffer address returned by the SDK.
+pub const VM_LCD_FB_ADDRESS: u32 = 0x9400_0000;
 
 /// Video subsystem
 pub struct Video {

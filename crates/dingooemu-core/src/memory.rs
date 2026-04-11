@@ -1,4 +1,5 @@
 use crate::error::{Result, SimulatorError};
+use crate::video::FRAMEBUFFER_MAP_SIZE;
 
 /// Dingoo A320 memory regions
 const RAM_BASE: u32 = 0x0000_0000;
@@ -7,10 +8,20 @@ const RAM_SIZE: u32 = 32 * 1024 * 1024; // 32 MB
 /// MIPS KSEG0 mask (strip top 3 bits for cached segment)
 const KSEG0_MASK: u32 = 0x1FFF_FFFF;
 
+/// Guest-visible aliases for the LCD framebuffer mapping.
+const LCD_FRAMEBUFFER_ALIASES: [u32; 4] = [
+    crate::video::VM_LCD_FB_ADDRESS,
+    0x1400_0000,
+    0x9000_0000,
+    0x1000_0000,
+];
+
 /// Memory manager for the Dingoo A320
 pub struct Memory {
     /// Main RAM (32 MB)
     ram: Box<[u8]>,
+    /// LCD framebuffer memory shared by all guest aliases
+    framebuffer: Box<[u8]>,
     /// Heap pointer (next allocation address)
     heap_ptr: u32,
     /// Heap allocations (addr -> size)
@@ -25,6 +36,7 @@ impl Memory {
         // Heap starts in the middle of RAM (16MB offset)
         Self {
             ram: vec![0u8; RAM_SIZE as usize].into_boxed_slice(),
+            framebuffer: vec![0u8; FRAMEBUFFER_MAP_SIZE].into_boxed_slice(),
             heap_ptr: 0x0100_0000, // 16MB
             allocations: std::collections::HashMap::new(),
             write_log: Vec::new(),
@@ -34,6 +46,14 @@ impl Memory {
     /// Get a copy of the write log and clear it
     pub fn consume_write_log(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.write_log)
+    }
+
+    /// Return the offset inside the LCD framebuffer mapping, if any.
+    fn framebuffer_offset(&self, addr: u32) -> Option<usize> {
+        LCD_FRAMEBUFFER_ALIASES.iter().find_map(|&base| {
+            let offset = addr.wrapping_sub(base);
+            (offset < FRAMEBUFFER_MAP_SIZE as u32).then_some(offset as usize)
+        })
     }
 
     /// Translate MIPS virtual address to physical address
@@ -51,6 +71,10 @@ impl Memory {
 
     /// Read a byte from memory
     pub fn read_u8(&self, addr: u32) -> Result<u8> {
+        if let Some(offset) = self.framebuffer_offset(addr) {
+            return Ok(self.framebuffer[offset]);
+        }
+
         let phys_addr = self.translate_address(addr);
         if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&phys_addr) {
             Ok(self.ram[(phys_addr - RAM_BASE) as usize])
@@ -80,6 +104,14 @@ impl Memory {
 
     /// Write a byte to memory
     pub fn write_u8(&mut self, addr: u32, value: u8) -> Result<()> {
+        if let Some(offset) = self.framebuffer_offset(addr) {
+            self.framebuffer[offset] = value;
+            if self.write_log.len() < 1000 {
+                self.write_log.push(addr);
+            }
+            return Ok(());
+        }
+
         let phys_addr = self.translate_address(addr);
         if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&phys_addr) {
             self.ram[(phys_addr - RAM_BASE) as usize] = value;
@@ -254,6 +286,16 @@ mod tests {
         assert_eq!(mem.read_u32(0x0000_0000).unwrap(), 0x1234_5678);
     }
 
+    #[test]
+    fn test_framebuffer_aliases_share_storage() {
+        let mut mem = Memory::new();
+
+        mem.write_u8(crate::video::VM_LCD_FB_ADDRESS, 0x12).unwrap();
+        assert_eq!(mem.read_u8(0x1400_0000).unwrap(), 0x12);
+
+        mem.write_u8(0x9000_0004, 0x34).unwrap();
+        assert_eq!(mem.read_u8(0x1000_0004).unwrap(), 0x34);
+    }
     #[test]
     fn test_memory_bounds_check() {
         let mem = Memory::new();

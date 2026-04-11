@@ -217,7 +217,7 @@ impl Cpu {
             0x09 => {
                 // JALR - Jump and Link Register
                 let target = self.regs.read(rs);
-                self.regs.write(rd, self.regs.pc); // Save return address
+                self.regs.write(rd, self.regs.pc.wrapping_add(4)); // Save return address
                 self.branch_delay = true;
                 self.branch_target = target;
             }
@@ -353,7 +353,7 @@ impl Cpu {
         let target = instr & 0x03FF_FFFF;
         let pc = self.regs.pc.wrapping_sub(4); // Get branch instruction address
         let jump_target = (pc & 0xF000_0000) | (target << 2);
-        self.regs.write(31, self.regs.pc); // Save return address (PC + 4)
+        self.regs.write(31, self.regs.pc.wrapping_add(4)); // Save return address
         self.branch_delay = true;
         self.branch_target = jump_target;
         Ok(())
@@ -568,14 +568,14 @@ impl Cpu {
             }
             0x10 => {
                 // BLTZAL - Branch on Less Than Zero and Link
-                self.regs.write(31, self.regs.pc);
+                self.regs.write(31, self.regs.pc.wrapping_add(4));
                 if (self.regs.read(rs) as i32) < 0 {
                     self.branch(offset);
                 }
             }
             0x11 => {
                 // BGEZAL - Branch on Greater Than or Equal to Zero and Link
-                self.regs.write(31, self.regs.pc);
+                self.regs.write(31, self.regs.pc.wrapping_add(4));
                 if (self.regs.read(rs) as i32) >= 0 {
                     self.branch(offset);
                 }
@@ -808,6 +808,24 @@ mod tests {
         assert_eq!(cpu.regs.read(8), 0x1234);
     }
 
+    #[test]
+    fn test_jal_sets_ra_after_delay_slot() {
+        let mut cpu = Cpu::new(0);
+        let mut mem = Memory::new();
+
+        // JAL 0x10
+        let jal = (0x03 << 26) | 0x04;
+        mem.write_u32(0, jal).unwrap();
+        mem.write_u32(4, 0).unwrap(); // delay slot
+        mem.write_u32(0x10, 0).unwrap();
+
+        cpu.start();
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.regs.read(31), 8);
+
+        cpu.step(&mut mem).unwrap();
+        assert_eq!(cpu.regs.pc, 0x10);
+    }
     #[test]
     fn test_lui() {
         let mut cpu = Cpu::new(0);

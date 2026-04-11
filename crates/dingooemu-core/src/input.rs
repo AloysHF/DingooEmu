@@ -1,27 +1,38 @@
 /// Dingoo A320 button masks
-pub const BUTTON_UP: u32 = 0x0001;
-pub const BUTTON_DOWN: u32 = 0x0002;
-pub const BUTTON_LEFT: u32 = 0x0004;
-pub const BUTTON_RIGHT: u32 = 0x0008;
-pub const BUTTON_A: u32 = 0x0010;
-pub const BUTTON_B: u32 = 0x0020;
-pub const BUTTON_X: u32 = 0x0040;
-pub const BUTTON_Y: u32 = 0x0080;
-pub const BUTTON_START: u32 = 0x0100;
-pub const BUTTON_SELECT: u32 = 0x0200;
-pub const BUTTON_L: u32 = 0x0400;
-pub const BUTTON_R: u32 = 0x0800;
+pub const BUTTON_UP: u32 = 1 << 20;
+pub const BUTTON_DOWN: u32 = 1 << 27;
+pub const BUTTON_LEFT: u32 = 1 << 28;
+pub const BUTTON_RIGHT: u32 = 1 << 18;
+pub const BUTTON_A: u32 = 1 << 31;
+pub const BUTTON_B: u32 = 1 << 21;
+pub const BUTTON_X: u32 = 1 << 16;
+pub const BUTTON_Y: u32 = 1 << 6;
+pub const BUTTON_START: u32 = 1 << 11;
+pub const BUTTON_SELECT: u32 = 1 << 10;
+pub const BUTTON_L: u32 = 1 << 8;
+pub const BUTTON_R: u32 = 1 << 29;
 
 /// Input subsystem
 pub struct Input {
     /// Current button state (bitmask)
     buttons: u32,
+    /// Buttons pressed since the last status poll
+    pressed: u32,
+    /// Buttons released since the last status poll
+    released: u32,
+    /// Whether a system/input event is pending
+    event_pending: bool,
 }
 
 impl Input {
     /// Create a new input subsystem
     pub fn new() -> Self {
-        Self { buttons: 0 }
+        Self {
+            buttons: 0,
+            pressed: 0,
+            released: 0,
+            event_pending: false,
+        }
     }
 
     /// Get the current button state
@@ -31,7 +42,28 @@ impl Input {
 
     /// Set the button state
     pub fn set_buttons(&mut self, buttons: u32) {
+        let changed = self.buttons ^ buttons;
+        self.pressed |= changed & buttons;
+        self.released |= changed & self.buttons;
+        if changed != 0 {
+            self.event_pending = true;
+        }
         self.buttons = buttons;
+    }
+
+    /// Get and clear the Dingoo key status structure fields.
+    pub fn take_status(&mut self) -> (u32, u32, u32) {
+        let status = (self.pressed, self.released, self.buttons);
+        self.pressed = 0;
+        self.released = 0;
+        status
+    }
+
+    /// Get and clear whether an input event is pending.
+    pub fn take_pending_event(&mut self) -> bool {
+        let pending = self.event_pending;
+        self.event_pending = false;
+        pending
     }
 
     /// Check if a specific button is pressed
@@ -41,12 +73,12 @@ impl Input {
 
     /// Press a button
     pub fn press(&mut self, button: u32) {
-        self.buttons |= button;
+        self.set_buttons(self.buttons | button);
     }
 
     /// Release a button
     pub fn release(&mut self, button: u32) {
-        self.buttons &= !button;
+        self.set_buttons(self.buttons & !button);
     }
 }
 

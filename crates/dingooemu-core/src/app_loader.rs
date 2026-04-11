@@ -229,9 +229,18 @@ impl AppImage {
         self.rawd.program_size
     }
 
-    /// Find a resource by name
+    /// Find a resource by name, accepting path separator and basename variants.
     pub fn find_resource(&self, name: &str) -> Option<&ResourceEntry> {
-        self.resources.iter().find(|r| r.name == name)
+        let requested = normalize_resource_name(name);
+        self.resources
+            .iter()
+            .find(|r| normalize_resource_name(&r.name) == requested)
+            .or_else(|| {
+                let requested_base = resource_basename(&requested);
+                self.resources.iter().find(|r| {
+                    resource_basename(&normalize_resource_name(&r.name)) == requested_base
+                })
+            })
     }
 
     /// Get resource data (decoded)
@@ -422,7 +431,7 @@ fn parse_resources(
         }
     }
 
-    // Try packed resources (after RAWD payload)
+    // Try packed resources after RAWD payload, scanning aligned package tables.
     let rawd_end = rawd.base.offset + rawd.base.size;
     if rawd_end < data.len() as u32 {
         resources = parse_packed_resources(data, rawd_end as usize);
@@ -501,69 +510,143 @@ fn parse_erpt_resources(data: &[u8], erpt: &ChunkHeader) -> Result<Vec<ResourceE
 
 /// Parse packed resources (short-name format, 36-byte records)
 fn parse_packed_resources(data: &[u8], start: usize) -> Vec<ResourceEntry> {
-    const RECORD_SIZE: usize = 36;
-    const NAME_SIZE: usize = 32;
+    const MAX_TABLES: usize = 8;
+    const SCAN_ALIGNMENT: usize = 0x1000;
 
-    if data.len() < start + 2 {
-        return Vec::new();
+    let mut table_starts = Vec::new();
+
+    if is_valid_packed_table(data, start) {
+        table_starts.push(start);
     }
 
-    let count = u16::from_le_bytes([data[start], data[start + 1]]) as usize;
-
-    if count == 0 || count > 10000 {
-        return Vec::new();
-    }
-
-    let mut resources = Vec::with_capacity(count);
-    let table_start = start + 2;
-
-    for i in 0..count {
-        let record_offset = table_start + i * RECORD_SIZE;
-
-        if record_offset + RECORD_SIZE > data.len() {
-            break;
+    let mut scan = align_up(start, SCAN_ALIGNMENT);
+    while scan + 2 < data.len() && table_starts.len() < MAX_TABLES {
+        if scan != start && is_valid_packed_table(data, scan) {
+            table_starts.push(scan);
         }
-
-        // Read name (null-terminated)
-        let name = read_cstring(data, record_offset, NAME_SIZE);
-
-        // Read relative offset
-        let rel_offset = u32::from_le_bytes([
-            data[record_offset + NAME_SIZE],
-            data[record_offset + NAME_SIZE + 1],
-            data[record_offset + NAME_SIZE + 2],
-            data[record_offset + NAME_SIZE + 3],
-        ]);
-
-        // Validate name
-        if !is_printable_ascii(&name) {
-            continue;
-        }
-
-        resources.push(ResourceEntry {
-            kind: ResourceKind::Packed,
-            name,
-            offset: start as u32 + rel_offset,
-            size: 0, // Will be calculated later
-            xor_key: 0,
-        });
+        scan = scan.saturating_add(SCAN_ALIGNMENT);
     }
 
-    // Calculate sizes (next offset - current offset)
-    for i in 0..resources.len() {
-        let current_offset = resources[i].offset;
-        let next_offset = if i + 1 < resources.len() {
-            resources[i + 1].offset
-        } else {
-            // Use end of data as approximation
-            data.len() as u32
-        };
-        resources[i].size = next_offset.saturating_sub(current_offset);
+    let mut resources = Vec::new();
+    for (index, &table_start) in table_starts.iter().enumerate() {
+        let package_end = table_starts.get(index + 1).copied().unwrap_or(data.len());
+        parse_packed_table(data, table_start, package_end, &mut resources);
     }
 
     resources
 }
 
+fn align_up(value: usize, alignment: usize) -> usize {
+    (value + alignment - 1) & !(alignment - 1)
+}
+
+fn is_valid_packed_table(data: &[u8], start: usize) -> bool {
+    const RECORD_SIZE: usize = 36;
+    const NAME_SIZE: usize = 32;
+    const MIN_VALID_SAMPLE: usize = 4;
+
+    if data.len() < start + 2 {
+        return false;
+    }
+
+    let count = u16::from_le_bytes([data[start], data[start + 1]]) as usize;
+    if count == 0 || count > 1024 {
+        return false;
+    }
+
+    let table_size = 2 + count * RECORD_SIZE;
+    if start + table_size > data.len() {
+        return false;
+    }
+
+    let sample_count = count.min(32);
+    let mut valid = 0usize;
+    let mut last_offset = table_size as u32;
+
+    for i in 0..sample_count {
+        let record_offset = start + 2 + i * RECORD_SIZE;
+        let name = read_cstring(data, record_offset, NAME_SIZE);
+        let rel_offset = read_u32_at(data, record_offset + NAME_SIZE);
+
+        if !name.is_empty()
+            && name.contains('.')
+            && is_printable_ascii(&name)
+            && rel_offset >= table_size as u32
+            && start + (rel_offset as usize) < data.len()
+            && rel_offset >= last_offset
+        {
+            valid += 1;
+            last_offset = rel_offset;
+        }
+    }
+
+    valid >= MIN_VALID_SAMPLE && valid * 2 >= sample_count
+}
+
+fn parse_packed_table(
+    data: &[u8],
+    start: usize,
+    package_end: usize,
+    resources: &mut Vec<ResourceEntry>,
+) {
+    const RECORD_SIZE: usize = 36;
+    const NAME_SIZE: usize = 32;
+
+    let count = u16::from_le_bytes([data[start], data[start + 1]]) as usize;
+    let table_size = 2 + count * RECORD_SIZE;
+    let mut entries = Vec::new();
+
+    for i in 0..count {
+        let record_offset = start + 2 + i * RECORD_SIZE;
+        let name = read_cstring(data, record_offset, NAME_SIZE);
+        let rel_offset = read_u32_at(data, record_offset + NAME_SIZE) as usize;
+
+        if name.is_empty()
+            || !name.contains('.')
+            || !is_printable_ascii(&name)
+            || rel_offset < table_size
+            || start + rel_offset >= package_end
+        {
+            continue;
+        }
+
+        entries.push((start + rel_offset, name));
+    }
+
+    entries.sort_by_key(|(offset, _)| *offset);
+    entries.dedup_by(|a, b| {
+        a.0 == b.0 && normalize_resource_name(&a.1) == normalize_resource_name(&b.1)
+    });
+
+    for i in 0..entries.len() {
+        let (offset, name) = &entries[i];
+        let next_offset = entries
+            .iter()
+            .skip(i + 1)
+            .map(|(next, _)| *next)
+            .find(|next| next > offset)
+            .unwrap_or(package_end);
+
+        if next_offset > *offset {
+            resources.push(ResourceEntry {
+                kind: ResourceKind::Packed,
+                name: name.clone(),
+                offset: *offset as u32,
+                size: (next_offset - *offset) as u32,
+                xor_key: 0,
+            });
+        }
+    }
+}
+
+fn read_u32_at(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
+}
 /// Parse packed64 resources (long-path format, 68-byte records)
 fn parse_packed64_resources(data: &[u8], start: usize) -> Vec<ResourceEntry> {
     const RECORD_SIZE: usize = 0x44;
@@ -686,6 +769,20 @@ fn read_cstring(data: &[u8], offset: usize, max_len: usize) -> String {
     s
 }
 
+fn normalize_resource_name(name: &str) -> String {
+    let mut s = name.replace('/', "\\").to_ascii_lowercase();
+    while let Some(stripped) = s.strip_prefix(".\\") {
+        s = stripped.to_string();
+    }
+    while let Some(stripped) = s.strip_prefix('\\') {
+        s = stripped.to_string();
+    }
+    s
+}
+
+fn resource_basename(name: &str) -> &str {
+    name.rsplit(['\\', '/', ':']).next().unwrap_or(name)
+}
 /// Check if a string is printable ASCII
 fn is_printable_ascii(s: &str) -> bool {
     s.bytes()

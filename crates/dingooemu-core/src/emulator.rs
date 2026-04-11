@@ -8,6 +8,12 @@ use crate::video::Video;
 use std::collections::HashMap;
 use std::path::Path;
 
+struct OpenFile {
+    data: Vec<u8>,
+    position: usize,
+    data_ptr: u32,
+}
+
 /// Main emulator struct that ties all components together
 pub struct Emulator {
     /// CPU core
@@ -29,17 +35,36 @@ pub struct Emulator {
     import_addrs: HashMap<u32, String>,
     /// Hooked addresses (for SDK function interception)
     hooked_addrs: HashMap<u32, String>,
+    /// Open guest resource files
+    open_files: HashMap<u32, OpenFile>,
+    /// Next guest file handle
+    next_file_handle: u32,
+    /// AppMain export address
+    app_main_entry: Option<u32>,
+    /// AppMain startup check hook address
+    app_main_init_check_address: Option<u32>,
+    /// Whether AppMain startup arguments were installed
+    app_main_args_initialized: bool,
+    /// Original app path for AppMain
+    app_path: String,
+    /// Whether the guest submitted a framebuffer this tick
+    framebuffer_submitted: bool,
 }
 
 impl Emulator {
     /// Create a new emulator from an .app file path
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
         let app = AppImage::from_path(path)?;
-        Self::from_app(app)
+        Self::from_app_with_path(app, path.to_string_lossy().into_owned())
     }
 
     /// Create a new emulator from a parsed AppImage
     pub fn from_app(app: AppImage) -> Result<Self> {
+        Self::from_app_with_path(app, String::new())
+    }
+
+    fn from_app_with_path(app: AppImage, app_path: String) -> Result<Self> {
         let mut memory = Memory::new();
 
         // Load executable into memory at the load base address (KSEG0)
@@ -53,7 +78,7 @@ impl Emulator {
             memory.load_data(physical_addr, &executable)?;
         }
 
-        // Map framebuffer at fixed address (like DingooPie)
+        // Map framebuffer at a fixed guest-visible address
         // The game writes directly to this address
         let fb_addr = crate::video::VM_LCD_FB_ADDRESS;
         let fb_size = crate::video::FRAMEBUFFER_SIZE;
@@ -63,12 +88,23 @@ impl Emulator {
         }
 
         let mut cpu = Cpu::new(app.entry_point());
+        let app_main_entry = app
+            .exports
+            .iter()
+            .find(|export| export.name == "AppMain")
+            .map(|export| export.address);
+
+        if let Some(app_main_entry) = app_main_entry {
+            cpu.regs.write(31, app_main_entry);
+            cpu.regs.write(25, app.entry_point());
+        }
+        cpu.regs.write(5, 0);
 
         // Initialize stack pointer to a reasonable value in RAM
         // Stack grows downward from top of RAM (32MB)
         cpu.regs.write(29, 0x01FF_FFF0); // $sp = top of RAM - 16
 
-        // Use fixed framebuffer address like DingooPie
+        // Use a fixed guest-visible framebuffer address
         // The game writes directly to this address
         let video = Video::new();
 
@@ -92,7 +128,7 @@ impl Emulator {
             }
         }
 
-        eprintln!(
+        log::debug!(
             "Emulator initialized: entry={:#010x}, base={:#010x}, physical={:#010x}, framebuffer={:#010x}, imports={}, hooked={}",
             app.entry_point(),
             load_base,
@@ -102,9 +138,8 @@ impl Emulator {
             hooked_addrs.len()
         );
 
-        // Debug: print some hooked addresses
         for (addr, name) in hooked_addrs.iter().take(5) {
-            eprintln!("  Hooked: {:#010x} = {}", addr, name);
+            log::trace!("Hooked SDK import: {:#010x} = {}", addr, name);
         }
 
         Ok(Self {
@@ -117,9 +152,43 @@ impl Emulator {
             app: Some(app),
             import_addrs,
             hooked_addrs,
+            open_files: HashMap::new(),
+            next_file_handle: 1,
+            app_main_entry,
+            app_main_init_check_address: app_main_entry.map(|addr| addr.wrapping_add(0x34)),
+            app_main_args_initialized: false,
+            app_path,
+            framebuffer_submitted: false,
         })
     }
 
+    fn install_app_main_args(&mut self) -> Result<()> {
+        if self.app_main_args_initialized {
+            return Ok(());
+        }
+        self.app_main_args_initialized = true;
+
+        let path = if self.app_path.is_empty() {
+            "game.app"
+        } else {
+            &self.app_path
+        };
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let byte_len = (wide.len() * 2) as u32;
+        let ptr = self.memory.malloc(byte_len);
+        if ptr == 0 {
+            return Ok(());
+        }
+        for (i, word) in wide.iter().enumerate() {
+            self.memory
+                .write_u16(ptr.wrapping_add((i * 2) as u32), *word)?;
+        }
+        self.cpu.regs.write(4, ptr);
+        if let Some(app_main_entry) = self.app_main_entry {
+            self.cpu.regs.write(25, app_main_entry);
+        }
+        Ok(())
+    }
     /// Start the emulator
     pub fn start(&mut self) {
         self.cpu.start();
@@ -134,6 +203,8 @@ impl Emulator {
 
     /// Run one frame of emulation
     pub fn tick(&mut self) -> Result<()> {
+        self.framebuffer_submitted = false;
+
         // Execute instructions for one frame
         // Dingoo A320 runs at 336 MHz, 60 fps = 5,600,000 cycles per frame
         let cycles_per_frame = 5_600_000;
@@ -146,8 +217,15 @@ impl Emulator {
             // Check if PC is at a hooked address (SDK call)
             let pc = self.cpu.regs.pc;
 
+            if Some(pc) == self.app_main_entry && !self.app_main_args_initialized {
+                self.install_app_main_args()?;
+            }
+            if Some(pc) == self.app_main_init_check_address {
+                self.cpu.regs.write(2, 1);
+            }
+
             if let Some(func_name) = self.hooked_addrs.get(&pc).cloned() {
-                eprintln!("SDK HOOK: PC={:#010x} = {}", pc, func_name);
+                log::trace!("SDK hook: PC={:#010x} = {}", pc, func_name);
                 // Handle SDK call directly
                 self.handle_sdk_call(pc, &func_name)?;
             } else {
@@ -156,8 +234,10 @@ impl Emulator {
             }
         }
 
-        // Sync framebuffer from guest memory to video subsystem
-        self.sync_framebuffer();
+        // Use a fallback sync for tests or apps that draw without an explicit submit.
+        if !self.framebuffer_submitted {
+            self.sync_framebuffer();
+        }
 
         self.video.advance_frame();
         self.frame_count += 1;
@@ -165,6 +245,187 @@ impl Emulator {
         Ok(())
     }
 
+    fn read_guest_c_string(&self, ptr: u32) -> String {
+        let mut bytes = Vec::new();
+        let mut offset = 0u32;
+        while let Ok(b) = self.memory.read_u8(ptr.wrapping_add(offset)) {
+            if b == 0 {
+                break;
+            }
+            bytes.push(b);
+            offset = offset.wrapping_add(1);
+            if bytes.len() >= 1024 {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn read_guest_w_string(&self, ptr: u32) -> String {
+        let mut words = Vec::new();
+        let mut offset = 0u32;
+        while let Ok(w) = self.memory.read_u16(ptr.wrapping_add(offset)) {
+            if w == 0 {
+                break;
+            }
+            words.push(w);
+            offset = offset.wrapping_add(2);
+            if words.len() >= 1024 {
+                break;
+            }
+        }
+        String::from_utf16_lossy(&words)
+    }
+
+    fn resource_name_from_args(&self, args: &[u32]) -> Option<String> {
+        args.iter().find_map(|&ptr| {
+            if ptr < 0x10000 {
+                return None;
+            }
+            let name = self.read_guest_c_string(ptr);
+            (!name.is_empty()).then_some(name)
+        })
+    }
+    fn open_resource_file(&mut self, name: &str) -> u32 {
+        let Some(app) = self.app.as_ref() else {
+            return 0;
+        };
+        let Some(resource) = app.find_resource(name) else {
+            log::trace!("  resource open failed: {}", name);
+            return 0;
+        };
+
+        let handle = self.next_file_handle;
+        self.next_file_handle = self.next_file_handle.wrapping_add(1).max(1);
+        self.open_files.insert(
+            handle,
+            OpenFile {
+                data: app.get_resource_data(resource),
+                position: 0,
+                data_ptr: 0,
+            },
+        );
+        log::trace!(
+            "  resource open: {} -> {} ({} bytes)",
+            name,
+            handle,
+            self.open_files[&handle].data.len()
+        );
+        handle
+    }
+
+    fn open_host_file(&mut self, name: &str) -> u32 {
+        let path = Path::new(name);
+        let Ok(data) = std::fs::read(path) else {
+            log::trace!("  host file open failed: {}", name);
+            return 0;
+        };
+
+        let handle = self.next_file_handle;
+        self.next_file_handle = self.next_file_handle.wrapping_add(1).max(1);
+        let size = data.len();
+        self.open_files.insert(
+            handle,
+            OpenFile {
+                data,
+                position: 0,
+                data_ptr: 0,
+            },
+        );
+        log::trace!("  host file open: {} -> {} ({} bytes)", name, handle, size);
+        handle
+    }
+    fn read_file(&mut self, dest: u32, size: u32, count: u32, handle: u32) -> Result<u32> {
+        let Some(file) = self.open_files.get_mut(&handle) else {
+            return Ok(0);
+        };
+        let requested = (size as usize).saturating_mul(count as usize);
+        if requested == 0 {
+            return Ok(0);
+        }
+
+        let remaining = file.data.len().saturating_sub(file.position);
+        let bytes_to_copy = requested.min(remaining);
+        for i in 0..bytes_to_copy {
+            self.memory
+                .write_u8(dest.wrapping_add(i as u32), file.data[file.position + i])?;
+        }
+        file.position += bytes_to_copy;
+
+        if size == 0 {
+            Ok(0)
+        } else {
+            Ok((bytes_to_copy / size as usize) as u32)
+        }
+    }
+
+    fn read_resource_data(
+        &mut self,
+        handle: u32,
+        buffer: u32,
+        buffer_len: u32,
+        read_len: u32,
+    ) -> Result<u32> {
+        let Some(file) = self.open_files.get_mut(&handle) else {
+            return Ok(0);
+        };
+
+        if buffer == 0 {
+            if file.data_ptr == 0 {
+                let ptr = self.memory.malloc(file.data.len() as u32);
+                if ptr == 0 {
+                    return Ok(0);
+                }
+                for (i, &byte) in file.data.iter().enumerate() {
+                    self.memory.write_u8(ptr.wrapping_add(i as u32), byte)?;
+                }
+                file.data_ptr = ptr;
+            }
+            return Ok(file.data_ptr);
+        }
+
+        let remaining = file.data.len().saturating_sub(file.position);
+        let mut copy_size = if read_len != 0 && buffer_len > 1 {
+            (read_len as usize).saturating_mul(buffer_len as usize)
+        } else if read_len != 0 {
+            read_len as usize
+        } else {
+            buffer_len as usize
+        };
+        if copy_size == 0 || copy_size > remaining {
+            copy_size = remaining;
+        }
+
+        for i in 0..copy_size {
+            self.memory
+                .write_u8(buffer.wrapping_add(i as u32), file.data[file.position + i])?;
+        }
+        file.position += copy_size;
+
+        if read_len != 0 {
+            Ok((copy_size / read_len as usize) as u32)
+        } else {
+            Ok(copy_size as u32)
+        }
+    }
+    fn seek_file(&mut self, handle: u32, offset: i32, origin: u32) -> u32 {
+        let Some(file) = self.open_files.get_mut(&handle) else {
+            return u32::MAX;
+        };
+
+        let base = match origin {
+            0 => 0i64,
+            1 => file.position as i64,
+            2 => file.data.len() as i64,
+            _ => return u32::MAX,
+        };
+        let next = base + offset as i64;
+        if next < 0 {
+            return u32::MAX;
+        }
+        file.position = (next as usize).min(file.data.len());
+        0
+    }
     /// Handle SDK function call at import address
     fn handle_sdk_call(&mut self, addr: u32, func_name: &str) -> Result<()> {
         log::trace!("SDK call: {:#010x} = {}", addr, func_name);
@@ -222,27 +483,17 @@ impl Emulator {
 
             // Graphics/LCD
             "_lcd_get_frame" | "lcd_get_frame" | "lcd_get_cframe" => {
-                // Return fixed framebuffer address (like DingooPie)
+                // Return fixed guest-visible framebuffer address
                 // The game writes directly to this address
                 let phys_addr = crate::video::VM_LCD_FB_ADDRESS;
                 self.cpu.regs.write(2, phys_addr); // $v0
                 log::trace!("  lcd_get_frame() = {:#010x}", phys_addr);
             }
             "_lcd_set_frame" | "lcd_set_frame" | "ap_lcd_set_frame" => {
-                let addr = self.cpu.regs.read(4); // $a0
-                let physical_addr = if (0x8000_0000..0xA000_0000).contains(&addr) {
-                    addr & 0x1FFF_FFFF
-                } else {
-                    addr
-                };
-                log::info!(
-                    "  lcd_set_frame({:#010x}) -> physical: {:#010x}",
-                    addr,
-                    physical_addr
-                );
+                self.sync_framebuffer();
+                log::trace!("  lcd_set_frame() - framebuffer updated");
             }
             "lcd_flip" => {
-                // Trigger framebuffer update (like DingooPie's requestFbUpdate)
                 self.sync_framebuffer();
                 log::trace!("  lcd_flip() - framebuffer updated");
             }
@@ -254,37 +505,46 @@ impl Emulator {
             // Input
             "_kbd_get_status" | "kbd_get_status" => {
                 let status_ptr = self.cpu.regs.read(4); // $a0
-                let buttons = self.input.buttons();
-                let _ = self.memory.write_u32(status_ptr, buttons);
-                log::trace!("  kbd_get_status({:#010x}) = {:#010x}", status_ptr, buttons);
+                let (pressed, released, status) = self.input.take_status();
+                self.memory.write_u32(status_ptr, pressed)?;
+                self.memory
+                    .write_u32(status_ptr.wrapping_add(4), released)?;
+                self.memory.write_u32(status_ptr.wrapping_add(8), status)?;
+                log::trace!(
+                    "  kbd_get_status({:#010x}) pressed={:#010x} released={:#010x} status={:#010x}",
+                    status_ptr,
+                    pressed,
+                    released,
+                    status
+                );
             }
             "_kbd_get_key" | "kbd_get_key" => {
                 // Convert bitmask to key code
                 let buttons = self.input.buttons();
-                let key = if buttons & 0x0001 != 0 {
-                    1
-                } else if buttons & 0x0002 != 0 {
-                    2
-                } else if buttons & 0x0004 != 0 {
-                    3
-                } else if buttons & 0x0008 != 0 {
-                    4
-                } else if buttons & 0x0010 != 0 {
-                    5
-                } else if buttons & 0x0020 != 0 {
+                let key = if buttons & crate::input::BUTTON_UP != 0 {
+                    20
+                } else if buttons & crate::input::BUTTON_DOWN != 0 {
+                    27
+                } else if buttons & crate::input::BUTTON_LEFT != 0 {
+                    28
+                } else if buttons & crate::input::BUTTON_RIGHT != 0 {
+                    18
+                } else if buttons & crate::input::BUTTON_A != 0 {
+                    31
+                } else if buttons & crate::input::BUTTON_B != 0 {
+                    21
+                } else if buttons & crate::input::BUTTON_X != 0 {
+                    16
+                } else if buttons & crate::input::BUTTON_Y != 0 {
                     6
-                } else if buttons & 0x0040 != 0 {
-                    7
-                } else if buttons & 0x0080 != 0 {
-                    8
-                } else if buttons & 0x0100 != 0 {
-                    9
-                } else if buttons & 0x0200 != 0 {
-                    10
-                } else if buttons & 0x0400 != 0 {
+                } else if buttons & crate::input::BUTTON_START != 0 {
                     11
-                } else if buttons & 0x0800 != 0 {
-                    12
+                } else if buttons & crate::input::BUTTON_SELECT != 0 {
+                    10
+                } else if buttons & crate::input::BUTTON_L != 0 {
+                    8
+                } else if buttons & crate::input::BUTTON_R != 0 {
+                    29
                 } else {
                     0
                 };
@@ -293,10 +553,15 @@ impl Emulator {
             }
 
             // Timer
-            "GetTickCount" | "OSTimeGet" => {
-                let ticks = (self.frame_count * 16) as u32; // ~60fps -> ~16ms per frame
+            "OSTimeGet" => {
+                let ticks = ((self.frame_count * 100) / 60) as u32;
                 self.cpu.regs.write(2, ticks); // $v0
-                log::trace!("  GetTickCount() = {}", ticks);
+                log::trace!("  OSTimeGet() = {}", ticks);
+            }
+            "GetTickCount" => {
+                let micros = self.frame_count.saturating_mul(1_000_000) / 60;
+                self.cpu.regs.write(2, micros as u32); // $v0
+                log::trace!("  GetTickCount() = {}", micros as u32);
             }
             "delay_ms" | "mdelay" => {
                 let ms = self.cpu.regs.read(4); // $a0
@@ -314,25 +579,111 @@ impl Emulator {
                 let us = self.cpu.regs.read(4); // $a0
                 log::trace!("  udelay({})", us);
             }
-
-            // File I/O (stubs)
-            "fopen" | "fsys_fopen" => {
-                self.cpu.regs.write(2, 0); // $v0 = NULL
-                log::trace!("  fopen() = NULL (stub)");
+            "_sys_judge_event" | "sys_judge_event" => {
+                let pending = u32::from(self.input.take_pending_event());
+                self.cpu.regs.write(2, pending);
+                log::trace!("  sys_judge_event() = {}", pending);
             }
-            "fclose" | "fsys_fclose" => {
-                self.cpu.regs.write(2, 0); // $v0 = 0
-                log::trace!("  fclose() = 0 (stub)");
+
+            // Resource manager
+            "get_dl_handle" => {
+                self.cpu.regs.write(2, u32::from(self.app.is_some()));
+            }
+            "dl_res_open" => {
+                let name = self.resource_name_from_args(&[
+                    self.cpu.regs.read(6),
+                    self.cpu.regs.read(5),
+                    self.cpu.regs.read(4),
+                ]);
+                let handle = name
+                    .as_deref()
+                    .map(|name| self.open_resource_file(name))
+                    .unwrap_or(0);
+                self.cpu.regs.write(2, handle);
+            }
+            "dl_res_get_size" => {
+                let handle = self.cpu.regs.read(4);
+                let size = self
+                    .open_files
+                    .get(&handle)
+                    .map(|file| file.data.len() as u32)
+                    .unwrap_or(0);
+                self.cpu.regs.write(2, size);
+            }
+            "dl_res_get_data" => {
+                let handle = self.cpu.regs.read(4);
+                let buffer = self.cpu.regs.read(5);
+                let buffer_len = self.cpu.regs.read(6);
+                let read_len = self.cpu.regs.read(7);
+                let ret = self.read_resource_data(handle, buffer, buffer_len, read_len)?;
+                self.cpu.regs.write(2, ret);
+            }
+            "dl_res_close" => {
+                let handle = self.cpu.regs.read(4);
+                self.open_files.remove(&handle);
+                self.cpu.regs.write(2, 0);
+            }
+            // Resource-backed File I/O
+            "fopen" | "fsys_fopen" => {
+                let name = self.read_guest_c_string(self.cpu.regs.read(4));
+                let handle = match self.open_resource_file(&name) {
+                    0 => self.open_host_file(&name),
+                    handle => handle,
+                };
+                self.cpu.regs.write(2, handle);
+            }
+            "fsys_fopenW" => {
+                let name = self.read_guest_w_string(self.cpu.regs.read(4));
+                let mode = self.read_guest_w_string(self.cpu.regs.read(5));
+                log::trace!("  fsys_fopenW({}, {})", name, mode);
+                let handle = match self.open_resource_file(&name) {
+                    0 => self.open_host_file(&name),
+                    handle => handle,
+                };
+                self.cpu.regs.write(2, handle);
+            }
+            "fclose" | "fsys_fclose" | "fsys_fcloseW" => {
+                let handle = self.cpu.regs.read(4);
+                self.open_files.remove(&handle);
+                self.cpu.regs.write(2, 0);
             }
             "fread" | "fsys_fread" => {
-                self.cpu.regs.write(2, 0); // $v0 = 0
-                log::trace!("  fread() = 0 (stub)");
+                let dest = self.cpu.regs.read(4);
+                let size = self.cpu.regs.read(5);
+                let count = self.cpu.regs.read(6);
+                let handle = self.cpu.regs.read(7);
+                let read = self.read_file(dest, size, count, handle)?;
+                self.cpu.regs.write(2, read);
+            }
+            "fseek" | "fsys_fseek" => {
+                let handle = self.cpu.regs.read(4);
+                let offset = self.cpu.regs.read(5) as i32;
+                let origin = self.cpu.regs.read(6);
+                let ret = self.seek_file(handle, offset, origin);
+                self.cpu.regs.write(2, ret);
+            }
+            "ftell" | "fsys_ftell" => {
+                let handle = self.cpu.regs.read(4);
+                let pos = self
+                    .open_files
+                    .get(&handle)
+                    .map(|file| file.position as u32)
+                    .unwrap_or(u32::MAX);
+                self.cpu.regs.write(2, pos);
+            }
+            "feof" | "fsys_feof" => {
+                let handle = self.cpu.regs.read(4);
+                let eof = self
+                    .open_files
+                    .get(&handle)
+                    .map(|file| u32::from(file.position >= file.data.len()))
+                    .unwrap_or(1);
+                self.cpu.regs.write(2, eof);
             }
             "fwrite" | "fsys_fwrite" => {
-                self.cpu.regs.write(2, 0); // $v0 = 0
+                self.cpu.regs.write(2, 0);
                 log::trace!("  fwrite() = 0 (stub)");
             }
-
             // System (stubs)
             "vxGoHome" | "abort" | "TaskMediaFunStop" => {
                 self.cpu.stop();
@@ -390,6 +741,7 @@ impl Emulator {
         }
 
         if all_ok && non_zero_count > 0 {
+            self.framebuffer_submitted = true;
             // Copy to video subsystem
             let dst = self.video.framebuffer_mut();
             dst.copy_from_slice(&fb_data);
@@ -434,6 +786,13 @@ impl Default for Emulator {
             app: None,
             import_addrs: HashMap::new(),
             hooked_addrs: HashMap::new(),
+            open_files: HashMap::new(),
+            next_file_handle: 1,
+            app_main_entry: None,
+            app_main_init_check_address: None,
+            app_main_args_initialized: false,
+            app_path: String::new(),
+            framebuffer_submitted: false,
         }
     }
 }

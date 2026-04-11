@@ -14,7 +14,7 @@ A cross-platform, open-source Dingoo A320 emulator with RetroArch integration.
 
 🚧 **Under Active Development**
 
-This project is in early development. The basic architecture is being established.
+This project is in early development. The basic architecture is being established, and simple `.app` titles can now reach the rendering path. Compatibility remains experimental.
 
 ## Quick Start
 

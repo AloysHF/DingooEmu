@@ -14,7 +14,7 @@ fn test_load_simple_game() {
     emu.start();
 
     // Run 100 frames
-    for frame in 0..100 {
+    for _frame in 0..100 {
         emu.tick().unwrap();
     }
 
