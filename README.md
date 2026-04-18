@@ -25,6 +25,18 @@ cargo build -p dingooemu --release
 cargo run -p dingooemu --release -- path/to/game.app
 ```
 
+### Screenshot Mode
+
+Take a headless screenshot for automated testing or preview generation:
+
+```bash
+# Take screenshot after 30 frames (default) and save as PNG
+cargo run -p dingooemu --release -- path/to/game.app --screenshot preview.png
+
+# Take screenshot after a custom number of frames
+cargo run -p dingooemu --release -- path/to/game.app --screenshot preview.png --screenshot-frames 60
+```
+
 ### RetroArch Mode
 
 ```bash

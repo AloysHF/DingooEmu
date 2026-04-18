@@ -86,6 +86,28 @@ impl Video {
         pixels
     }
 
+    /// Save the current framebuffer as a PNG screenshot.
+    pub fn save_screenshot(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use image::RgbaImage;
+        let mut img = RgbaImage::new(SCREEN_WIDTH, SCREEN_HEIGHT);
+        for y in 0..SCREEN_HEIGHT {
+            for x in 0..SCREEN_WIDTH {
+                let offset = ((y * SCREEN_WIDTH + x) * 2) as usize;
+                let rgb565 =
+                    u16::from_le_bytes([self.framebuffer[offset], self.framebuffer[offset + 1]]);
+                let r5 = (rgb565 >> 11) & 0x1F;
+                let g6 = (rgb565 >> 5) & 0x3F;
+                let b5 = rgb565 & 0x1F;
+                let r = ((r5 << 3) | (r5 >> 2)) as u8;
+                let g = ((g6 << 2) | (g6 >> 4)) as u8;
+                let b = ((b5 << 3) | (b5 >> 2)) as u8;
+                img.put_pixel(x, y, image::Rgba([r, g, b, 0xFF]));
+            }
+        }
+        img.save(path)?;
+        Ok(())
+    }
+
     /// Increment frame counter
     pub fn advance_frame(&mut self) {
         self.frame_count += 1;

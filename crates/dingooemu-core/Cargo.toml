@@ -13,6 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 crc32fast.workspace = true
 byteorder = "1"
+image.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true

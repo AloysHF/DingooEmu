@@ -1,6 +1,7 @@
 use clap::Parser;
 use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator};
 use minifb::{Key, Window, WindowOptions};
+use std::path::PathBuf;
 
 /// Dingoo A320 Emulator
 #[derive(Parser, Debug)]
@@ -20,6 +21,14 @@ struct Args {
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
+
+    /// Take a screenshot after N frames and exit (saves as PNG)
+    #[arg(short = 'S', long = "screenshot", value_name = "PATH")]
+    screenshot: Option<PathBuf>,
+
+    /// Number of frames to run before taking screenshot (default: 30)
+    #[arg(long = "screenshot-frames", default_value = "30")]
+    screenshot_frames: u32,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -35,6 +44,19 @@ fn main() -> anyhow::Result<()> {
 
     // Start emulation
     emu.start();
+
+    // Screenshot mode: run headless for N frames, save PNG, and exit
+    if let Some(ref screenshot_path) = args.screenshot {
+        for frame in 0..args.screenshot_frames {
+            emu.tick()?;
+            if frame % 60 == 0 {
+                log::info!("Frame {}", frame);
+            }
+        }
+        emu.video.save_screenshot(screenshot_path)?;
+        log::info!("Screenshot saved to: {}", screenshot_path.display());
+        return Ok(());
+    }
 
     if args.headless {
         // Headless mode: run for a fixed number of frames
