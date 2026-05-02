@@ -37,6 +37,23 @@ cargo run -p dingooemu --release -- path/to/game.app --screenshot preview.png
 cargo run -p dingooemu --release -- path/to/game.app --screenshot preview.png --screenshot-frames 60
 ```
 
+### Batch Screenshot Mode
+
+Build the standalone emulator and capture every `.app` file under
+`tmp/dingoo_game` recursively:
+
+```powershell
+pwsh -NoProfile -File scripts/batch-screenshots.ps1
+```
+
+Screenshots are written to `docs/images`. The default capture point is 300
+frames, with shorter per-game overrides for titles that exceed the default
+timeout. Explicit parameters apply the requested values to every game:
+
+```powershell
+pwsh -NoProfile -File scripts/batch-screenshots.ps1 -Frames 60 -TimeoutSeconds 30
+```
+
 ### RetroArch Mode
 
 ```bash
