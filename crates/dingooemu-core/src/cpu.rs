@@ -625,9 +625,9 @@ impl Cpu {
 
         // Combine bytes based on alignment
         let result = match byte {
-            0 => (mem_val & 0xFF000000) | (rt_val & 0x00FFFFFF),
-            1 => (mem_val & 0xFFFF0000) | (rt_val & 0x0000FFFF),
-            2 => (mem_val & 0xFFFFFF00) | (rt_val & 0x000000FF),
+            0 => (mem_val << 24) | (rt_val & 0x00FFFFFF),
+            1 => (mem_val << 16) | (rt_val & 0x0000FFFF),
+            2 => (mem_val << 8) | (rt_val & 0x000000FF),
             3 => mem_val,
             _ => unreachable!(),
         };
@@ -674,10 +674,10 @@ impl Cpu {
         let rt_val = self.regs.read(rt);
 
         let result = match byte {
-            0 => rt_val,
-            1 => (mem_val & 0x000000FF) | (rt_val << 8),
-            2 => (mem_val & 0x0000FFFF) | (rt_val << 16),
-            3 => (mem_val & 0x00FFFFFF) | (rt_val << 24),
+            0 => (mem_val & 0xFFFFFF00) | (rt_val >> 24),
+            1 => (mem_val & 0xFFFF0000) | (rt_val >> 16),
+            2 => (mem_val & 0xFF000000) | (rt_val >> 8),
+            3 => rt_val,
             _ => unreachable!(),
         };
 
@@ -698,10 +698,10 @@ impl Cpu {
         let rt_val = self.regs.read(rt);
 
         let result = match byte {
-            0 => (mem_val & 0xFFFFFF00) | (rt_val >> 24),
-            1 => (mem_val & 0xFFFF0000) | (rt_val >> 16),
-            2 => (mem_val & 0xFF000000) | (rt_val >> 8),
-            3 => rt_val,
+            0 => rt_val,
+            1 => (mem_val & 0x000000FF) | (rt_val << 8),
+            2 => (mem_val & 0x0000FFFF) | (rt_val << 16),
+            3 => (mem_val & 0x00FFFFFF) | (rt_val << 24),
             _ => unreachable!(),
         };
 
@@ -826,6 +826,54 @@ mod tests {
         cpu.step(&mut mem).unwrap();
         assert_eq!(cpu.regs.pc, 0x10);
     }
+
+    #[test]
+    fn test_lwl_lwr_loads_unaligned_little_endian_word() {
+        let mut cpu = Cpu::new(0);
+        let mut mem = Memory::new();
+        mem.load_data(0x100, &[0x11, 0x22, 0x33, 0x44, 0x55])
+            .unwrap();
+
+        let lwl = (0x22 << 26) | (4 << 21) | (8 << 16) | 3;
+        let lwr = (0x26 << 26) | (4 << 21) | (8 << 16);
+        mem.write_u32(0, lwl).unwrap();
+        mem.write_u32(4, lwr).unwrap();
+        cpu.regs.write(4, 0x101);
+        cpu.regs.write(8, 0xDEAD_BEEF);
+        cpu.start();
+
+        cpu.step(&mut mem).unwrap();
+        cpu.step(&mut mem).unwrap();
+
+        assert_eq!(cpu.regs.read(8), 0x5544_3322);
+    }
+
+    #[test]
+    fn test_swl_swr_stores_unaligned_little_endian_word() {
+        let mut cpu = Cpu::new(0);
+        let mut mem = Memory::new();
+        mem.load_data(0x100, &[0x11, 0x22, 0x33, 0x44, 0x55])
+            .unwrap();
+
+        let swl = (0x2A << 26) | (4 << 21) | (8 << 16) | 3;
+        let swr = (0x2E << 26) | (4 << 21) | (8 << 16);
+        mem.write_u32(0, swl).unwrap();
+        mem.write_u32(4, swr).unwrap();
+        cpu.regs.write(4, 0x101);
+        cpu.regs.write(8, 0xA1B2_C3D4);
+        cpu.start();
+
+        cpu.step(&mut mem).unwrap();
+        cpu.step(&mut mem).unwrap();
+
+        assert_eq!(
+            (0..5)
+                .map(|offset| mem.read_u8(0x100 + offset).unwrap())
+                .collect::<Vec<_>>(),
+            vec![0x11, 0xD4, 0xC3, 0xB2, 0xA1]
+        );
+    }
+
     #[test]
     fn test_lui() {
         let mut cpu = Cpu::new(0);
