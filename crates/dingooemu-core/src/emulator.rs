@@ -277,6 +277,31 @@ impl Emulator {
         String::from_utf16_lossy(&words)
     }
 
+    fn convert_guest_w_string_to_ansi(&mut self, ptr: u32) -> u32 {
+        const MAX_CHARS: u32 = 511;
+
+        let mut bytes = Vec::new();
+        for index in 0..MAX_CHARS {
+            let Ok(word) = self.memory.read_u16(ptr.wrapping_add(index * 2)) else {
+                return 0;
+            };
+            if word == 0 {
+                break;
+            }
+            bytes.push(if (0x20..=0x7E).contains(&word) {
+                word as u8
+            } else {
+                b'?'
+            });
+        }
+        bytes.push(0);
+
+        if self.memory.load_data(ptr, &bytes).is_err() {
+            return 0;
+        }
+        ptr
+    }
+
     fn resource_name_from_args(&self, args: &[u32]) -> Option<String> {
         args.iter().find_map(|&ptr| {
             if ptr < 0x10000 {
@@ -335,6 +360,21 @@ impl Emulator {
         log::trace!("  host file open: {} -> {} ({} bytes)", name, handle, size);
         handle
     }
+
+    fn open_memory_file(&mut self) -> u32 {
+        let handle = self.next_file_handle;
+        self.next_file_handle = self.next_file_handle.wrapping_add(1).max(1);
+        self.open_files.insert(
+            handle,
+            OpenFile {
+                data: Vec::new(),
+                position: 0,
+                data_ptr: 0,
+            },
+        );
+        handle
+    }
+
     fn read_file(&mut self, dest: u32, size: u32, count: u32, handle: u32) -> Result<u32> {
         let Some(file) = self.open_files.get_mut(&handle) else {
             return Ok(0);
@@ -357,6 +397,30 @@ impl Emulator {
         } else {
             Ok((bytes_to_copy / size as usize) as u32)
         }
+    }
+
+    fn write_file(&mut self, src: u32, size: u32, count: u32, handle: u32) -> Result<u32> {
+        let requested = (size as usize).saturating_mul(count as usize);
+        if requested == 0 {
+            return Ok(0);
+        }
+
+        let mut data = Vec::with_capacity(requested);
+        for offset in 0..requested {
+            data.push(self.memory.read_u8(src.wrapping_add(offset as u32))?);
+        }
+
+        let Some(file) = self.open_files.get_mut(&handle) else {
+            return Ok(0);
+        };
+        let end = file.position.saturating_add(requested);
+        if file.data.len() < end {
+            file.data.resize(end, 0);
+        }
+        file.data[file.position..end].copy_from_slice(&data);
+        file.position = end;
+
+        Ok(count)
     }
 
     fn read_resource_data(
@@ -479,6 +543,12 @@ impl Emulator {
                 let len = self.memory.read_string_len(ptr);
                 self.cpu.regs.write(2, len); // $v0
                 log::trace!("  strlen({:#010x}) = {}", ptr, len);
+            }
+            "__to_locale_ansi" => {
+                let ptr = self.cpu.regs.read(4);
+                let result = self.convert_guest_w_string_to_ansi(ptr);
+                self.cpu.regs.write(2, result);
+                log::trace!("  __to_locale_ansi({:#010x}) = {:#010x}", ptr, result);
             }
 
             // Graphics/LCD
@@ -626,11 +696,32 @@ impl Emulator {
             // Resource-backed File I/O
             "fopen" | "fsys_fopen" => {
                 let name = self.read_guest_c_string(self.cpu.regs.read(4));
-                let handle = match self.open_resource_file(&name) {
-                    0 => self.open_host_file(&name),
-                    handle => handle,
+                let mode = self.read_guest_c_string(self.cpu.regs.read(5));
+                let operation = mode.as_bytes().first().copied().unwrap_or(b'r');
+                let handle = match operation {
+                    b'w' => self.open_memory_file(),
+                    b'a' => {
+                        let handle = match self.open_resource_file(&name) {
+                            0 => self.open_host_file(&name),
+                            handle => handle,
+                        };
+                        let handle = if handle == 0 {
+                            self.open_memory_file()
+                        } else {
+                            handle
+                        };
+                        if let Some(file) = self.open_files.get_mut(&handle) {
+                            file.position = file.data.len();
+                        }
+                        handle
+                    }
+                    _ => match self.open_resource_file(&name) {
+                        0 => self.open_host_file(&name),
+                        handle => handle,
+                    },
                 };
                 self.cpu.regs.write(2, handle);
+                log::trace!("  {}({}, {}) = {}", func_name, name, mode, handle);
             }
             "fsys_fopenW" => {
                 let name = self.read_guest_w_string(self.cpu.regs.read(4));
@@ -681,8 +772,13 @@ impl Emulator {
                 self.cpu.regs.write(2, eof);
             }
             "fwrite" | "fsys_fwrite" => {
-                self.cpu.regs.write(2, 0);
-                log::trace!("  fwrite() = 0 (stub)");
+                let src = self.cpu.regs.read(4);
+                let size = self.cpu.regs.read(5);
+                let count = self.cpu.regs.read(6);
+                let handle = self.cpu.regs.read(7);
+                let written = self.write_file(src, size, count, handle)?;
+                self.cpu.regs.write(2, written);
+                log::trace!("  {}() = {}", func_name, written);
             }
             // System (stubs)
             "vxGoHome" | "abort" | "TaskMediaFunStop" => {
@@ -806,5 +902,52 @@ mod tests {
         let emu = Emulator::default();
         assert_eq!(emu.frame_count(), 0);
         assert!(!emu.is_running());
+    }
+
+    #[test]
+    fn test_to_locale_ansi_converts_in_place_and_returns_input() {
+        let mut emu = Emulator::default();
+        let ptr = 0x100;
+        for (index, word) in "Ali中.app\0".encode_utf16().enumerate() {
+            emu.memory
+                .write_u16(ptr + (index as u32 * 2), word)
+                .unwrap();
+        }
+        emu.cpu.regs.write(4, ptr);
+        emu.cpu.regs.write(31, 0x1234);
+
+        emu.handle_sdk_call(0, "__to_locale_ansi").unwrap();
+
+        assert_eq!(emu.cpu.regs.read(2), ptr);
+        assert_eq!(emu.cpu.regs.pc, 0x1234);
+        assert_eq!(
+            (0..9)
+                .map(|offset| emu.memory.read_u8(ptr + offset).unwrap())
+                .collect::<Vec<_>>(),
+            b"Ali?.app\0"
+        );
+    }
+
+    #[test]
+    fn test_writable_file_is_buffered_in_memory() {
+        let mut emu = Emulator::default();
+        emu.memory.load_data(0x100, b"test.log\0").unwrap();
+        emu.memory.load_data(0x120, b"w\0").unwrap();
+        emu.memory.load_data(0x140, b"abcdef").unwrap();
+        emu.cpu.regs.write(4, 0x100);
+        emu.cpu.regs.write(5, 0x120);
+
+        emu.handle_sdk_call(0, "fsys_fopen").unwrap();
+        let handle = emu.cpu.regs.read(2);
+        assert_ne!(handle, 0);
+
+        emu.cpu.regs.write(4, 0x140);
+        emu.cpu.regs.write(5, 2);
+        emu.cpu.regs.write(6, 3);
+        emu.cpu.regs.write(7, handle);
+        emu.handle_sdk_call(0, "fsys_fwrite").unwrap();
+
+        assert_eq!(emu.cpu.regs.read(2), 3);
+        assert_eq!(emu.open_files[&handle].data, b"abcdef");
     }
 }
