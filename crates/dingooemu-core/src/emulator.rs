@@ -6,7 +6,12 @@ use crate::memory::Memory;
 use crate::sdk_hle::SdkHle;
 use crate::video::Video;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const CPU_CLOCK_HZ: u64 = 336_000_000;
+const FRAMES_PER_SECOND: u64 = 60;
+const OS_TICKS_PER_SECOND: u64 = 100;
+const CYCLES_PER_FRAME: u64 = CPU_CLOCK_HZ / FRAMES_PER_SECOND;
 
 struct OpenFile {
     data: Vec<u8>,
@@ -28,6 +33,8 @@ pub struct Emulator {
     pub sdk: SdkHle,
     /// Frame count
     frame_count: u64,
+    /// Emulated CPU cycles elapsed
+    cycle_count: u64,
     /// Parsed app image (for resource access)
     app: Option<AppImage>,
     /// Import address to function name mapping (for diagnostics)
@@ -149,6 +156,7 @@ impl Emulator {
             input,
             sdk,
             frame_count: 0,
+            cycle_count: 0,
             app: Some(app),
             import_addrs,
             hooked_addrs,
@@ -171,7 +179,10 @@ impl Emulator {
         let path = if self.app_path.is_empty() {
             "game.app"
         } else {
-            &self.app_path
+            self.app_path
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&self.app_path)
         };
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         let byte_len = (wide.len() * 2) as u32;
@@ -206,10 +217,7 @@ impl Emulator {
         self.framebuffer_submitted = false;
 
         // Execute instructions for one frame
-        // Dingoo A320 runs at 336 MHz, 60 fps = 5,600,000 cycles per frame
-        let cycles_per_frame = 5_600_000;
-
-        for _ in 0..cycles_per_frame {
+        for _ in 0..CYCLES_PER_FRAME {
             if !self.cpu.is_running() {
                 break;
             }
@@ -232,6 +240,7 @@ impl Emulator {
                 // Normal instruction execution
                 self.cpu.step(&mut self.memory)?;
             }
+            self.cycle_count = self.cycle_count.wrapping_add(1);
         }
 
         // Use a fallback sync for tests or apps that draw without an explicit submit.
@@ -275,6 +284,202 @@ impl Emulator {
             }
         }
         String::from_utf16_lossy(&words)
+    }
+
+    fn guest_printf_arg(&self, index: usize) -> Result<u32> {
+        match index {
+            0 => Ok(self.cpu.regs.read(6)),
+            1 => Ok(self.cpu.regs.read(7)),
+            _ => {
+                let stack_offset = 8u32.wrapping_add((index as u32).wrapping_mul(4));
+                self.memory
+                    .read_u32(self.cpu.regs.read(29).wrapping_add(stack_offset))
+            }
+        }
+    }
+
+    fn format_guest_printf(&self, format: &str) -> Result<String> {
+        let bytes = format.as_bytes();
+        let mut output = String::new();
+        let mut cursor = 0;
+        let mut arg_index = 0;
+
+        while cursor < bytes.len() {
+            if bytes[cursor] != b'%' {
+                output.push(bytes[cursor] as char);
+                cursor += 1;
+                continue;
+            }
+
+            cursor += 1;
+            if cursor < bytes.len() && bytes[cursor] == b'%' {
+                output.push('%');
+                cursor += 1;
+                continue;
+            }
+
+            let mut left_aligned = false;
+            let mut show_sign = false;
+            let mut space_sign = false;
+            let mut alternate = false;
+            let mut zero_padded = false;
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    b'-' => left_aligned = true,
+                    b'+' => show_sign = true,
+                    b' ' => space_sign = true,
+                    b'#' => alternate = true,
+                    b'0' => zero_padded = true,
+                    _ => break,
+                }
+                cursor += 1;
+            }
+
+            let width_start = cursor;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            let width = if cursor > width_start {
+                format[width_start..cursor].parse::<usize>().ok()
+            } else {
+                None
+            };
+
+            let precision = if cursor < bytes.len() && bytes[cursor] == b'.' {
+                cursor += 1;
+                let precision_start = cursor;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                    cursor += 1;
+                }
+                Some(
+                    format[precision_start..cursor]
+                        .parse::<usize>()
+                        .unwrap_or(0),
+                )
+            } else {
+                None
+            };
+
+            while cursor < bytes.len()
+                && matches!(bytes[cursor], b'h' | b'l' | b'j' | b'z' | b't' | b'L')
+            {
+                cursor += 1;
+            }
+            if cursor >= bytes.len() {
+                output.push('%');
+                break;
+            }
+
+            let conversion = bytes[cursor];
+            cursor += 1;
+            let argument = self.guest_printf_arg(arg_index)?;
+            arg_index += 1;
+
+            let (mut field, numeric_prefix_len) = match conversion {
+                b's' => {
+                    let value = self.read_guest_c_string(argument);
+                    let value = precision
+                        .map(|limit| value.chars().take(limit).collect())
+                        .unwrap_or(value);
+                    (value, 0)
+                }
+                b'c' => ((argument as u8 as char).to_string(), 0),
+                b'd' | b'i' => {
+                    let signed = argument as i32 as i64;
+                    let sign = if signed < 0 {
+                        "-"
+                    } else if show_sign {
+                        "+"
+                    } else if space_sign {
+                        " "
+                    } else {
+                        ""
+                    };
+                    let digits = signed.unsigned_abs().to_string();
+                    let digits = Self::apply_integer_precision(digits, precision, argument == 0);
+                    (format!("{sign}{digits}"), sign.len())
+                }
+                b'u' => {
+                    let digits = argument.to_string();
+                    (
+                        Self::apply_integer_precision(digits, precision, argument == 0),
+                        0,
+                    )
+                }
+                b'o' => {
+                    let mut prefix = "";
+                    let digits = format!("{argument:o}");
+                    if alternate && !digits.starts_with('0') {
+                        prefix = "0";
+                    }
+                    let digits = Self::apply_integer_precision(digits, precision, argument == 0);
+                    (format!("{prefix}{digits}"), prefix.len())
+                }
+                b'x' | b'X' | b'p' => {
+                    let uppercase = conversion == b'X';
+                    let prefix = if conversion == b'p' || (alternate && argument != 0) {
+                        if uppercase {
+                            "0X"
+                        } else {
+                            "0x"
+                        }
+                    } else {
+                        ""
+                    };
+                    let digits = if uppercase {
+                        format!("{argument:X}")
+                    } else {
+                        format!("{argument:x}")
+                    };
+                    let digits = Self::apply_integer_precision(digits, precision, argument == 0);
+                    (format!("{prefix}{digits}"), prefix.len())
+                }
+                _ => {
+                    output.push('%');
+                    output.push(conversion as char);
+                    continue;
+                }
+            };
+
+            if let Some(width) = width {
+                if field.len() < width {
+                    let padding = width - field.len();
+                    if left_aligned {
+                        field.push_str(&" ".repeat(padding));
+                    } else if zero_padded && precision.is_none() && numeric_prefix_len > 0 {
+                        field.insert_str(numeric_prefix_len, &"0".repeat(padding));
+                    } else {
+                        let padding_char =
+                            if zero_padded && precision.is_none() && numeric_prefix_len == 0 {
+                                '0'
+                            } else {
+                                ' '
+                            };
+                        field.insert_str(0, &padding_char.to_string().repeat(padding));
+                    }
+                }
+            }
+            output.push_str(&field);
+        }
+
+        Ok(output)
+    }
+
+    fn apply_integer_precision(
+        mut digits: String,
+        precision: Option<usize>,
+        is_zero: bool,
+    ) -> String {
+        let Some(precision) = precision else {
+            return digits;
+        };
+        if precision == 0 && is_zero {
+            return String::new();
+        }
+        if digits.len() < precision {
+            digits.insert_str(0, &"0".repeat(precision - digits.len()));
+        }
+        digits
     }
 
     fn convert_guest_w_string_to_ansi(&mut self, ptr: u32) -> u32 {
@@ -340,8 +545,8 @@ impl Emulator {
     }
 
     fn open_host_file(&mut self, name: &str) -> u32 {
-        let path = Path::new(name);
-        let Ok(data) = std::fs::read(path) else {
+        let path = self.resolve_host_file_path(name);
+        let Ok(data) = std::fs::read(&path) else {
             log::trace!("  host file open failed: {}", name);
             return 0;
         };
@@ -359,6 +564,21 @@ impl Emulator {
         );
         log::trace!("  host file open: {} -> {} ({} bytes)", name, handle, size);
         handle
+    }
+
+    fn resolve_host_file_path(&self, name: &str) -> PathBuf {
+        let normalized_name = name.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR);
+        let path = PathBuf::from(normalized_name);
+        if path.is_absolute() {
+            return path;
+        }
+
+        let Some(separator) = self.app_path.rfind(['/', '\\']) else {
+            return path;
+        };
+        let app_directory =
+            self.app_path[..separator].replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR);
+        Path::new(&app_directory).join(path)
     }
 
     fn open_memory_file(&mut self) -> u32 {
@@ -624,12 +844,20 @@ impl Emulator {
 
             // Timer
             "OSTimeGet" => {
-                let ticks = ((self.frame_count * 100) / 60) as u32;
+                let ticks = self
+                    .cycle_count
+                    .saturating_mul(OS_TICKS_PER_SECOND)
+                    .checked_div(CPU_CLOCK_HZ)
+                    .unwrap_or(0) as u32;
                 self.cpu.regs.write(2, ticks); // $v0
                 log::trace!("  OSTimeGet() = {}", ticks);
             }
             "GetTickCount" => {
-                let micros = self.frame_count.saturating_mul(1_000_000) / 60;
+                let micros = self
+                    .cycle_count
+                    .saturating_mul(1_000_000)
+                    .checked_div(CPU_CLOCK_HZ)
+                    .unwrap_or(0);
                 self.cpu.regs.write(2, micros as u32); // $v0
                 log::trace!("  GetTickCount() = {}", micros as u32);
             }
@@ -785,8 +1013,17 @@ impl Emulator {
                 self.cpu.stop();
                 log::trace!("  {} -> stopping", func_name);
             }
-            "printf" | "sprintf" | "fprintf" => {
-                // Stubs - just return 0
+            "sprintf" => {
+                let destination = self.cpu.regs.read(4);
+                let format = self.read_guest_c_string(self.cpu.regs.read(5));
+                let rendered = self.format_guest_printf(&format)?;
+                let mut bytes = rendered.as_bytes().to_vec();
+                bytes.push(0);
+                self.memory.load_data(destination, &bytes)?;
+                self.cpu.regs.write(2, rendered.len() as u32);
+                log::trace!("  sprintf({}) = {}", format, rendered.len());
+            }
+            "printf" | "fprintf" => {
                 self.cpu.regs.write(2, 0);
                 log::trace!("  {}() = 0 (stub)", func_name);
             }
@@ -879,6 +1116,7 @@ impl Default for Emulator {
             input: Input::new(),
             sdk: SdkHle::new(),
             frame_count: 0,
+            cycle_count: 0,
             app: None,
             import_addrs: HashMap::new(),
             hooked_addrs: HashMap::new(),
@@ -902,6 +1140,88 @@ mod tests {
         let emu = Emulator::default();
         assert_eq!(emu.frame_count(), 0);
         assert!(!emu.is_running());
+    }
+
+    #[test]
+    fn test_guest_timers_advance_with_emulated_cycles() {
+        let mut emu = Emulator::default();
+        emu.cycle_count = CPU_CLOCK_HZ / OS_TICKS_PER_SECOND;
+
+        emu.handle_sdk_call(0, "OSTimeGet").unwrap();
+        assert_eq!(emu.cpu.regs.read(2), 1);
+
+        emu.handle_sdk_call(0, "GetTickCount").unwrap();
+        assert_eq!(emu.cpu.regs.read(2), 10_000);
+    }
+
+    #[test]
+    fn test_sprintf_builds_guest_path() {
+        let mut emu = Emulator::default();
+        let destination = 0x8001_0000;
+        let format = 0x8001_0100;
+        let directory = 0x8001_0200;
+        emu.memory.load_data(format, b"%ssplash.tga\0").unwrap();
+        emu.memory.load_data(directory, b"games/astro/\0").unwrap();
+        emu.cpu.regs.write(4, destination);
+        emu.cpu.regs.write(5, format);
+        emu.cpu.regs.write(6, directory);
+
+        emu.handle_sdk_call(0, "sprintf").unwrap();
+
+        assert_eq!(
+            emu.read_guest_c_string(destination),
+            "games/astro/splash.tga"
+        );
+        assert_eq!(emu.cpu.regs.read(2), 22);
+    }
+
+    #[test]
+    fn test_sprintf_reads_stack_varargs() {
+        let mut emu = Emulator::default();
+        let destination = 0x8001_0000;
+        let format = 0x8001_0100;
+        let stack = 0x8001_1000;
+        emu.memory
+            .load_data(format, b"Ver: %lu.%lu.%04lu\0")
+            .unwrap();
+        emu.cpu.regs.write(4, destination);
+        emu.cpu.regs.write(5, format);
+        emu.cpu.regs.write(6, 1);
+        emu.cpu.regs.write(7, 2);
+        emu.cpu.regs.write(29, stack);
+        emu.memory.write_u32(stack + 16, 3).unwrap();
+
+        emu.handle_sdk_call(0, "sprintf").unwrap();
+
+        assert_eq!(emu.read_guest_c_string(destination), "Ver: 1.2.0003");
+        assert_eq!(emu.cpu.regs.read(2), 13);
+    }
+
+    #[test]
+    fn test_app_main_receives_file_name() {
+        let mut emu = Emulator::default();
+        emu.app_path = "games/astro/Astro-Lander.app".to_string();
+
+        emu.install_app_main_args().unwrap();
+
+        assert_eq!(
+            emu.read_guest_w_string(emu.cpu.regs.read(4)),
+            "Astro-Lander.app"
+        );
+    }
+
+    #[test]
+    fn test_host_file_path_resolves_from_app_directory() {
+        let mut emu = Emulator::default();
+        emu.app_path = "games/astro/Astro-Lander.app".to_string();
+
+        assert_eq!(
+            emu.resolve_host_file_path(r"assets\splash.tga"),
+            Path::new("games")
+                .join("astro")
+                .join("assets")
+                .join("splash.tga")
+        );
     }
 
     #[test]

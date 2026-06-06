@@ -459,20 +459,24 @@ fn parse_erpt_resources(data: &[u8], erpt: &ChunkHeader) -> Result<Vec<ResourceE
     if size < 4 {
         return Ok(Vec::new());
     }
-
-    let count = u32::from_le_bytes([
+    if offset > data.len().saturating_sub(4) {
+        return Ok(Vec::new());
+    }
+    let chunk_end = offset.saturating_add(size).min(data.len());
+    let declared_count = u32::from_le_bytes([
         data[offset],
         data[offset + 1],
         data[offset + 2],
         data[offset + 3],
     ]) as usize;
+    let count = declared_count.min((size - 4) / RECORD_SIZE);
 
     let mut resources = Vec::with_capacity(count);
 
     for i in 0..count {
         let record_offset = offset + 4 + i * RECORD_SIZE;
 
-        if record_offset + RECORD_SIZE > offset + size {
+        if record_offset + RECORD_SIZE > chunk_end {
             break;
         }
 
@@ -839,5 +843,37 @@ mod tests {
         assert!(is_printable_ascii("Hello\nWorld")); // Newline is allowed
         assert!(is_printable_ascii("Hello\tWorld")); // Tab is allowed
         assert!(is_printable_ascii("Hello\r\nWorld")); // CR+LF is allowed
+    }
+
+    #[test]
+    fn test_erpt_out_of_file_range_is_ignored() {
+        let data = vec![0u8; 128];
+        let erpt = ChunkHeader {
+            offset: data.len() as u32,
+            size: 64,
+            ..ChunkHeader::default()
+        };
+
+        let resources = parse_erpt_resources(&data, &erpt).unwrap();
+
+        assert!(resources.is_empty());
+    }
+
+    #[test]
+    fn test_erpt_size_is_clamped_to_file() {
+        const RECORD_SIZE: usize = 0x1FC;
+        let mut data = vec![0u8; 4 + RECORD_SIZE];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes());
+        data[4..14].copy_from_slice(b"asset.bin\0");
+        let erpt = ChunkHeader {
+            offset: 0,
+            size: (data.len() + 128) as u32,
+            ..ChunkHeader::default()
+        };
+
+        let resources = parse_erpt_resources(&data, &erpt).unwrap();
+
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].name, "asset.bin");
     }
 }
