@@ -1,4 +1,4 @@
-use crate::app_loader::AppImage;
+use crate::app_loader::{AppImage, ResourceKind};
 use crate::cpu::Cpu;
 use crate::error::Result;
 use crate::input::Input;
@@ -17,6 +17,38 @@ struct OpenFile {
     data: Vec<u8>,
     position: usize,
     data_ptr: u32,
+}
+
+fn prepare_resource_file_data(name: &str, kind: ResourceKind, data: Vec<u8>) -> Vec<u8> {
+    let is_bin = name
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("bin"));
+    if kind != ResourceKind::Packed || !is_bin || data.len() < 12 {
+        return data;
+    }
+
+    let record_count = u16::from_le_bytes([data[0], data[1]]);
+    let declared_size = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+    let Ok(data_size) = u32::try_from(data.len()) else {
+        return data;
+    };
+    if record_count == 0 || declared_size <= data_size {
+        return data;
+    }
+
+    let payload = &data[4..];
+    let Ok(payload_size) = u32::try_from(payload.len()) else {
+        return data;
+    };
+    let Some(view_size) = data.len().checked_add(16) else {
+        return data;
+    };
+    let mut view = vec![0; view_size];
+    view[0..4].copy_from_slice(&1_u32.to_le_bytes());
+    view[8..12].copy_from_slice(&payload_size.to_le_bytes());
+    view[12..12 + payload.len()].copy_from_slice(payload);
+    view[16..20].fill(0);
+    view
 }
 
 /// Main emulator struct that ties all components together
@@ -525,22 +557,21 @@ impl Emulator {
             return 0;
         };
 
+        let kind = resource.kind;
+        let resource_data = app.get_resource_data(resource);
+        let data = prepare_resource_file_data(name, kind, resource_data);
         let handle = self.next_file_handle;
         self.next_file_handle = self.next_file_handle.wrapping_add(1).max(1);
+        let size = data.len();
         self.open_files.insert(
             handle,
             OpenFile {
-                data: app.get_resource_data(resource),
+                data,
                 position: 0,
                 data_ptr: 0,
             },
         );
-        log::trace!(
-            "  resource open: {} -> {} ({} bytes)",
-            name,
-            handle,
-            self.open_files[&handle].data.len()
-        );
+        log::trace!("  resource open: {} -> {} ({} bytes)", name, handle, size);
         handle
     }
 
@@ -1140,6 +1171,37 @@ mod tests {
         let emu = Emulator::default();
         assert_eq!(emu.frame_count(), 0);
         assert!(!emu.is_running());
+    }
+
+    #[test]
+    fn test_packed_bin_resource_view_inserts_header() {
+        let mut data = vec![0; 24];
+        data[0..2].copy_from_slice(&1_u16.to_le_bytes());
+        data[4..8].copy_from_slice(&0x1122_3344_u32.to_le_bytes());
+        data[8..12].copy_from_slice(&0x260a_1300_u32.to_le_bytes());
+        data[12..24].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+
+        let view = prepare_resource_file_data("brick.bin", ResourceKind::Packed, data);
+
+        assert_eq!(view.len(), 40);
+        assert_eq!(u32::from_le_bytes(view[0..4].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(view[4..8].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(view[8..12].try_into().unwrap()), 20);
+        assert_eq!(&view[12..16], &0x1122_3344_u32.to_le_bytes());
+        assert_eq!(&view[16..20], &[0; 4]);
+        assert_eq!(&view[20..32], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(&view[32..40], &[0; 8]);
+    }
+
+    #[test]
+    fn test_regular_resource_data_remains_unchanged() {
+        let mut data = vec![0x5a; 12];
+        data[8..12].copy_from_slice(&12_u32.to_le_bytes());
+
+        assert_eq!(
+            prepare_resource_file_data("image.bin", ResourceKind::Packed, data.clone()),
+            data
+        );
     }
 
     #[test]
