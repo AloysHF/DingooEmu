@@ -253,8 +253,8 @@ impl Cpu {
             0x13 => self.regs.lo = self.regs.read(rs), // MTLO
             0x18 => {
                 // MULT
-                let a = self.regs.read(rs) as i64;
-                let b = self.regs.read(rt) as i64;
+                let a = self.regs.read(rs) as i32 as i64;
+                let b = self.regs.read(rt) as i32 as i64;
                 let result = a * b;
                 self.regs.hi = (result >> 32) as u32;
                 self.regs.lo = result as u32;
@@ -872,6 +872,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0x11, 0xD4, 0xC3, 0xB2, 0xA1]
         );
+    }
+
+    #[test]
+    fn test_mult_sign_extends_negative_operands() {
+        let mut cpu = Cpu::new(0);
+        let mut mem = Memory::new();
+        cpu.regs.write(8, (-7_i32) as u32);
+        cpu.regs.write(9, 3);
+        mem.write_u32(0, (8 << 21) | (9 << 16) | 0x18).unwrap();
+        cpu.start();
+
+        cpu.step(&mut mem).unwrap();
+
+        assert_eq!(cpu.regs.hi, u32::MAX);
+        assert_eq!(cpu.regs.lo, (-21_i32) as u32);
     }
 
     #[test]

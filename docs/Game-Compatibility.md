@@ -9,3 +9,4 @@ scenario that has been verified and do not imply complete gameplay support.
 | `AliBaba.app` | Partial | The startup title screen renders correctly in standalone screenshot mode. |
 | `Astro-Lander.app` | Partial | The startup splash screen renders correctly with its external image and font assets in standalone screenshot mode. |
 | `Block Breaker.app` | Partial | The startup title screen renders correctly from its packed binary resource in standalone screenshot mode. |
+| `Candy.app` | Partial | The startup title menu renders correctly with signed random-index calculations in standalone screenshot mode. |
