@@ -26,6 +26,8 @@ pub struct Memory {
     heap_ptr: u32,
     /// Heap allocations (addr -> size)
     allocations: std::collections::HashMap<u32, u32>,
+    /// Reusable free heap blocks (addr, size), sorted by address
+    free_blocks: Vec<(u32, u32)>,
     /// Write tracking: addresses that were written to
     write_log: Vec<u32>,
 }
@@ -39,6 +41,7 @@ impl Memory {
             framebuffer: vec![0u8; FRAMEBUFFER_MAP_SIZE].into_boxed_slice(),
             heap_ptr: 0x0100_0000, // 16MB
             allocations: std::collections::HashMap::new(),
+            free_blocks: Vec::new(),
             write_log: Vec::new(),
         }
     }
@@ -168,25 +171,72 @@ impl Memory {
             return 0;
         }
 
-        // Align to 4 bytes
-        let aligned_size = (size + 3) & !3;
+        let Some(aligned_size) = size.checked_add(3).map(|value| value & !3) else {
+            log::warn!("malloc failed: invalid allocation size");
+            return 0;
+        };
+
+        if let Some(index) = self
+            .free_blocks
+            .iter()
+            .position(|&(_, block_size)| block_size >= aligned_size)
+        {
+            let (ptr, block_size) = self.free_blocks[index];
+            if block_size == aligned_size {
+                self.free_blocks.remove(index);
+            } else {
+                self.free_blocks[index] =
+                    (ptr.wrapping_add(aligned_size), block_size - aligned_size);
+            }
+            self.allocations.insert(ptr, aligned_size);
+            return ptr;
+        }
+
         let ptr = self.heap_ptr;
 
-        // Check if allocation would exceed RAM
-        if ptr + aligned_size > RAM_BASE + RAM_SIZE {
+        let Some(end) = ptr.checked_add(aligned_size) else {
+            log::warn!("malloc failed: not enough memory");
+            return 0;
+        };
+        if end > RAM_BASE + RAM_SIZE {
             log::warn!("malloc failed: not enough memory");
             return 0;
         }
 
-        self.heap_ptr = self.heap_ptr.wrapping_add(aligned_size);
+        self.heap_ptr = end;
         self.allocations.insert(ptr, aligned_size);
         ptr
     }
 
     /// Free previously allocated memory
     pub fn free(&mut self, ptr: u32) {
-        if ptr != 0 {
-            self.allocations.remove(&ptr);
+        let Some(size) = (ptr != 0).then(|| self.allocations.remove(&ptr)).flatten() else {
+            return;
+        };
+
+        let insert_at = self
+            .free_blocks
+            .partition_point(|&(address, _)| address < ptr);
+        self.free_blocks.insert(insert_at, (ptr, size));
+
+        let mut index = insert_at.saturating_sub(1);
+        while index + 1 < self.free_blocks.len() {
+            let (address, block_size) = self.free_blocks[index];
+            let (next_address, next_size) = self.free_blocks[index + 1];
+            if address.checked_add(block_size) != Some(next_address) {
+                index += 1;
+                continue;
+            }
+            self.free_blocks[index].1 = block_size + next_size;
+            self.free_blocks.remove(index + 1);
+        }
+
+        while let Some(&(address, block_size)) = self.free_blocks.last() {
+            if address.checked_add(block_size) != Some(self.heap_ptr) {
+                break;
+            }
+            self.heap_ptr = address;
+            self.free_blocks.pop();
         }
     }
 
@@ -201,17 +251,32 @@ impl Memory {
             return 0;
         }
 
-        // Allocate new block and copy data
-        let new_ptr = self.malloc(new_size);
-        if let Some(&old_size) = self.allocations.get(&ptr) {
-            let copy_size = old_size.min(new_size);
-            // Copy old data to new location
-            let old_data: Vec<u8> = (0..copy_size)
-                .filter_map(|i| self.read_u8(ptr.wrapping_add(i)).ok())
-                .collect();
-            for (i, &byte) in old_data.iter().enumerate() {
-                let _ = self.write_u8(new_ptr.wrapping_add(i as u32), byte);
+        let Some(&old_size) = self.allocations.get(&ptr) else {
+            return 0;
+        };
+        let Some(aligned_size) = new_size.checked_add(3).map(|value| value & !3) else {
+            return 0;
+        };
+        if aligned_size <= old_size {
+            self.allocations.insert(ptr, aligned_size);
+            if aligned_size < old_size {
+                let tail = ptr.wrapping_add(aligned_size);
+                self.allocations.insert(tail, old_size - aligned_size);
+                self.free(tail);
             }
+            return ptr;
+        }
+
+        let new_ptr = self.malloc(new_size);
+        if new_ptr == 0 {
+            return 0;
+        }
+
+        let old_data: Vec<u8> = (0..old_size)
+            .filter_map(|i| self.read_u8(ptr.wrapping_add(i)).ok())
+            .collect();
+        for (i, &byte) in old_data.iter().enumerate() {
+            let _ = self.write_u8(new_ptr.wrapping_add(i as u32), byte);
         }
         self.free(ptr);
         new_ptr
@@ -296,6 +361,44 @@ mod tests {
         mem.write_u8(0x9000_0004, 0x34).unwrap();
         assert_eq!(mem.read_u8(0x1000_0004).unwrap(), 0x34);
     }
+
+    #[test]
+    fn test_malloc_reuses_and_splits_freed_blocks() {
+        let mut mem = Memory::new();
+        let first = mem.malloc(64);
+        let second = mem.malloc(32);
+
+        mem.free(first);
+
+        assert_eq!(mem.malloc(48), first);
+        assert_eq!(mem.malloc(16), first + 48);
+        assert_eq!(mem.malloc(4), second + 32);
+    }
+
+    #[test]
+    fn test_free_coalesces_adjacent_blocks() {
+        let mut mem = Memory::new();
+        let first = mem.malloc(32);
+        let second = mem.malloc(32);
+        let _guard = mem.malloc(4);
+
+        mem.free(first);
+        mem.free(second);
+
+        assert_eq!(mem.malloc(64), first);
+    }
+
+    #[test]
+    fn test_realloc_failure_preserves_original_block() {
+        let mut mem = Memory::new();
+        let ptr = mem.malloc(16);
+        mem.write_u32(ptr, 0x1234_5678).unwrap();
+
+        assert_eq!(mem.realloc(ptr, RAM_SIZE), 0);
+        assert_eq!(mem.read_u32(ptr).unwrap(), 0x1234_5678);
+        assert_eq!(mem.allocations.get(&ptr), Some(&16));
+    }
+
     #[test]
     fn test_memory_bounds_check() {
         let mem = Memory::new();

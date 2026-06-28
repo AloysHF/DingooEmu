@@ -10,3 +10,4 @@ scenario that has been verified and do not imply complete gameplay support.
 | `Astro-Lander.app` | Partial | The startup splash screen renders correctly with its external image and font assets in standalone screenshot mode. |
 | `Block Breaker.app` | Partial | The startup title screen renders correctly from its packed binary resource in standalone screenshot mode. |
 | `Candy.app` | Partial | The startup title menu renders correctly with signed random-index calculations in standalone screenshot mode. |
+| `Zhao-Chuan RPG.app` | Partial | The startup menu renders correctly while reusing freed image-decoding buffers in standalone screenshot mode. |
