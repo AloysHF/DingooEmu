@@ -9,8 +9,8 @@
     release binary is built before capture.
 
 .PARAMETER Frames
-    Number of frames to emulate before capturing. Default: 300 (five seconds
-    at 60 fps, allowing most title screens time to appear).
+    Number of frames to emulate before capturing. Default: 60 (one second at
+    60 fps). Known slow-starting games use per-game overrides.
 
 .PARAMETER Binary
     Path to the dingoo-emu binary. Default: the Cargo release build output.
@@ -21,7 +21,7 @@
 
 param(
     [ValidateRange(1, [int]::MaxValue)]
-    [int]$Frames = 300,
+    [int]$Frames = 60,
 
     [string]$Binary = "",
 
@@ -95,6 +95,7 @@ function Get-CaptureFrames {
         "仙剑奇侠传\仙剑奇侠传.APP" { return 30 }
         "Decollation-Warrior.app" { return 30 }
         "Overlord-Fighter.app" { return 30 }
+        "SameGoo\samegoo.app" { return 300 }
         "Snake.app" { return 30 }
         default { return $DefaultFrames }
     }
