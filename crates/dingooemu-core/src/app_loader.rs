@@ -142,7 +142,7 @@ impl AppImage {
         // Parse chunk descriptors at fixed offsets
         let impt = read_chunk_header(data, IMPT_OFFSET as usize)?;
         let expt = read_chunk_header(data, EXPT_OFFSET as usize)?;
-        let rawd = read_rawd_header(data, RAWD_OFFSET as usize)?;
+        let mut rawd = read_rawd_header(data, RAWD_OFFSET as usize)?;
 
         // Validate RAWD
         if rawd.entry == 0 {
@@ -150,10 +150,25 @@ impl AppImage {
                 "RAW entry point is zero".to_string(),
             ));
         }
-        if rawd.program_size < rawd.base.size {
+        let rawd_end = rawd
+            .base
+            .offset
+            .checked_add(rawd.base.size)
+            .ok_or_else(|| {
+                SimulatorError::InvalidAppFormat("RAW payload range overflow".to_string())
+            })?;
+        if rawd_end as usize > data.len() {
             return Err(SimulatorError::InvalidAppFormat(
-                "RAW program_size < size".to_string(),
+                "RAW payload out of bounds".to_string(),
             ));
+        }
+        if rawd.program_size < rawd.base.size {
+            log::warn!(
+                "RAW program_size {} is smaller than payload {}; using payload size",
+                rawd.program_size,
+                rawd.base.size
+            );
+            rawd.program_size = rawd.base.size;
         }
 
         // Check for ERPT chunk
@@ -827,6 +842,25 @@ mod tests {
         assert_eq!(header.entry, 0x8000_0000);
         assert_eq!(header.origin, 0x8000_0000);
         assert_eq!(header.program_size, 0x1000);
+    }
+
+    #[test]
+    fn test_parse_uses_raw_payload_size_when_program_size_is_smaller() {
+        let mut data = vec![0u8; 256];
+        data[0..4].copy_from_slice(b"CCDL");
+        data[0x20..0x24].copy_from_slice(b"IMPT");
+        data[0x40..0x44].copy_from_slice(b"EXPT");
+        data[0x60..0x64].copy_from_slice(b"RAWD");
+        data[0x68..0x6C].copy_from_slice(&0x80u32.to_le_bytes());
+        data[0x6C..0x70].copy_from_slice(&0x20u32.to_le_bytes());
+        data[0x74..0x78].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        data[0x78..0x7C].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        data[0x7C..0x80].copy_from_slice(&0x18u32.to_le_bytes());
+
+        let app = AppImage::parse(&data).unwrap();
+
+        assert_eq!(app.program_size(), 0x20);
+        assert_eq!(app.executable().len(), 0x20);
     }
 
     #[test]
