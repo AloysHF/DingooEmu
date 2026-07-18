@@ -86,6 +86,8 @@ pub struct Emulator {
     app_main_args_initialized: bool,
     /// Original app path for AppMain
     app_path: String,
+    /// Reusable guest buffer for ANSI string conversions
+    locale_ansi_buffer: Option<u32>,
     /// Whether the guest submitted a framebuffer this tick
     framebuffer_submitted: bool,
 }
@@ -198,6 +200,7 @@ impl Emulator {
             app_main_init_check_address: app_main_entry.map(|addr| addr.wrapping_add(0x34)),
             app_main_args_initialized: false,
             app_path,
+            locale_ansi_buffer: None,
             framebuffer_submitted: false,
         })
     }
@@ -516,6 +519,11 @@ impl Emulator {
 
     fn convert_guest_w_string_to_ansi(&mut self, ptr: u32) -> u32 {
         const MAX_CHARS: u32 = 511;
+        const BUFFER_SIZE: u32 = MAX_CHARS + 1;
+
+        if self.locale_ansi_buffer == Some(ptr) {
+            return ptr;
+        }
 
         let mut bytes = Vec::new();
         for index in 0..MAX_CHARS {
@@ -533,10 +541,21 @@ impl Emulator {
         }
         bytes.push(0);
 
-        if self.memory.load_data(ptr, &bytes).is_err() {
+        let output = match self.locale_ansi_buffer {
+            Some(output) => output,
+            None => {
+                let output = self.memory.malloc(BUFFER_SIZE);
+                if output == 0 {
+                    return 0;
+                }
+                self.locale_ansi_buffer = Some(output);
+                output
+            }
+        };
+        if self.memory.load_data(output, &bytes).is_err() {
             return 0;
         }
-        ptr
+        output
     }
 
     fn resource_name_from_args(&self, args: &[u32]) -> Option<String> {
@@ -801,6 +820,21 @@ impl Emulator {
                 self.cpu.regs.write(2, result);
                 log::trace!("  __to_locale_ansi({:#010x}) = {:#010x}", ptr, result);
             }
+            "cmGetSysModel" => {
+                let ptr = self.cpu.regs.read(4);
+                for (index, word) in "A320\0".encode_utf16().enumerate() {
+                    self.memory
+                        .write_u16(ptr.wrapping_add((index * 2) as u32), word)?;
+                }
+                self.cpu.regs.write(2, 0);
+                log::trace!("  cmGetSysModel({:#010x}) = 0", ptr);
+            }
+            "U8TOU32" => {
+                let ptr = self.cpu.regs.read(4);
+                let value = self.memory.read_u32(ptr)?;
+                self.cpu.regs.write(2, value);
+                log::trace!("  U8TOU32({:#010x}) = {:#010x}", ptr, value);
+            }
 
             // Graphics/LCD
             "_lcd_get_frame" | "lcd_get_frame" | "lcd_get_cframe" => {
@@ -821,6 +855,14 @@ impl Emulator {
             "LcdGetDisMode" => {
                 self.cpu.regs.write(2, 0); // $v0 = 0
                 log::trace!("  LcdGetDisMode() = 0");
+            }
+            "LCD_GetXSize" => {
+                self.cpu.regs.write(2, crate::video::SCREEN_WIDTH);
+                log::trace!("  LCD_GetXSize() = {}", crate::video::SCREEN_WIDTH);
+            }
+            "LCD_GetYSize" => {
+                self.cpu.regs.write(2, crate::video::SCREEN_HEIGHT);
+                log::trace!("  LCD_GetYSize() = {}", crate::video::SCREEN_HEIGHT);
             }
 
             // Input
@@ -1157,6 +1199,7 @@ impl Default for Emulator {
             app_main_init_check_address: None,
             app_main_args_initialized: false,
             app_path: String::new(),
+            locale_ansi_buffer: None,
             framebuffer_submitted: false,
         }
     }
@@ -1287,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_locale_ansi_converts_in_place_and_returns_input() {
+    fn test_to_locale_ansi_preserves_input_and_reuses_output_buffer() {
         let mut emu = Emulator::default();
         let ptr = 0x100;
         for (index, word) in "Ali中.app\0".encode_utf16().enumerate() {
@@ -1300,14 +1343,61 @@ mod tests {
 
         emu.handle_sdk_call(0, "__to_locale_ansi").unwrap();
 
-        assert_eq!(emu.cpu.regs.read(2), ptr);
+        let output = emu.cpu.regs.read(2);
+        assert_ne!(output, ptr);
         assert_eq!(emu.cpu.regs.pc, 0x1234);
         assert_eq!(
             (0..9)
-                .map(|offset| emu.memory.read_u8(ptr + offset).unwrap())
+                .map(|offset| emu.memory.read_u8(output + offset).unwrap())
                 .collect::<Vec<_>>(),
             b"Ali?.app\0"
         );
+        assert_eq!(emu.read_guest_w_string(ptr), "Ali中.app");
+
+        emu.cpu.regs.write(4, ptr);
+        emu.handle_sdk_call(0, "__to_locale_ansi").unwrap();
+
+        assert_eq!(emu.cpu.regs.read(2), output);
+        assert_eq!(emu.read_guest_c_string(output), "Ali?.app");
+    }
+
+    #[test]
+    fn test_get_system_model_writes_a320_as_utf16() {
+        let mut emu = Emulator::default();
+        let ptr = 0x100;
+        emu.cpu.regs.write(4, ptr);
+        emu.cpu.regs.write(31, 0x1234);
+
+        emu.handle_sdk_call(0, "cmGetSysModel").unwrap();
+
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(emu.cpu.regs.pc, 0x1234);
+        assert_eq!(emu.read_guest_w_string(ptr), "A320");
+    }
+
+    #[test]
+    fn test_u8_to_u32_reads_little_endian_value() {
+        let mut emu = Emulator::default();
+        let ptr = 0x100;
+        emu.memory
+            .load_data(ptr, &[0x18, 0xC2, 0x01, 0x00])
+            .unwrap();
+        emu.cpu.regs.write(4, ptr);
+
+        emu.handle_sdk_call(0, "U8TOU32").unwrap();
+
+        assert_eq!(emu.cpu.regs.read(2), 0x0001_C218);
+    }
+
+    #[test]
+    fn test_lcd_size_matches_a320_display() {
+        let mut emu = Emulator::default();
+
+        emu.handle_sdk_call(0, "LCD_GetXSize").unwrap();
+        assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_WIDTH);
+
+        emu.handle_sdk_call(0, "LCD_GetYSize").unwrap();
+        assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_HEIGHT);
     }
 
     #[test]
