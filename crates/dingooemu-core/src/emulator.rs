@@ -1249,8 +1249,10 @@ mod tests {
 
     #[test]
     fn test_guest_timers_advance_with_emulated_cycles() {
-        let mut emu = Emulator::default();
-        emu.cycle_count = CPU_CLOCK_HZ / OS_TICKS_PER_SECOND;
+        let mut emu = Emulator {
+            cycle_count: CPU_CLOCK_HZ / OS_TICKS_PER_SECOND,
+            ..Default::default()
+        };
 
         emu.handle_sdk_call(0, "OSTimeGet").unwrap();
         assert_eq!(emu.cpu.regs.read(2), 1);
@@ -1304,8 +1306,10 @@ mod tests {
 
     #[test]
     fn test_app_main_receives_file_name() {
-        let mut emu = Emulator::default();
-        emu.app_path = "games/astro/Astro-Lander.app".to_string();
+        let mut emu = Emulator {
+            app_path: "games/astro/Astro-Lander.app".to_string(),
+            ..Default::default()
+        };
 
         emu.install_app_main_args().unwrap();
 
@@ -1317,8 +1321,10 @@ mod tests {
 
     #[test]
     fn test_host_file_path_resolves_from_app_directory() {
-        let mut emu = Emulator::default();
-        emu.app_path = "games/astro/Astro-Lander.app".to_string();
+        let emu = Emulator {
+            app_path: "games/astro/Astro-Lander.app".to_string(),
+            ..Default::default()
+        };
 
         assert_eq!(
             emu.resolve_host_file_path(r"assets\splash.tga"),

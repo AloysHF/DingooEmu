@@ -68,7 +68,7 @@ fn test_cpu_instructions() {
     let mut mem = Memory::new();
 
     // ADDIU $t0, $zero, 0x1234
-    let instr = (0x09 << 26) | (0 << 21) | (8 << 16) | 0x1234;
+    let instr = (0x09 << 26) | (8 << 16) | 0x1234;
     mem.write_u32(0, instr).unwrap();
 
     cpu.start();
@@ -88,14 +88,14 @@ fn test_branch_instructions() {
 
     // BEQ $zero, $zero, offset=1 (branch to PC+4+1*4 = 8)
     // opcode=0x04, rs=0, rt=0, offset=1
-    let beq = (0x04 << 26) | (0 << 21) | (0 << 16) | 1;
+    let beq = (0x04 << 26) | 1;
     mem.write_u32(0, beq).unwrap();
 
     // NOP (delay slot)
     mem.write_u32(4, 0).unwrap();
 
     // ADDIU $t0, $zero, 0x1234 (target at address 8)
-    let addiu = (0x09 << 26) | (0 << 21) | (8 << 16) | 0x1234;
+    let addiu = (0x09 << 26) | (8 << 16) | 0x1234;
     mem.write_u32(8, addiu).unwrap();
 
     cpu.start();

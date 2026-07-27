@@ -801,7 +801,7 @@ mod tests {
         let mut mem = Memory::new();
         // ADDIU $t0, $zero, 0x1234
         // opcode=0x09, rs=0, rt=8, imm=0x1234
-        let instr = (0x09 << 26) | (0 << 21) | (8 << 16) | 0x1234;
+        let instr = (0x09 << 26) | (8 << 16) | 0x1234;
         mem.write_u32(0, instr).unwrap();
         cpu.start();
         cpu.step(&mut mem).unwrap();
@@ -895,7 +895,7 @@ mod tests {
         let mut mem = Memory::new();
         // LUI $t0, 0xABCD
         // opcode=0x0F, rs=0, rt=8, imm=0xABCD
-        let instr = (0x0F << 26) | (0 << 21) | (8 << 16) | 0xABCD;
+        let instr = (0x0F << 26) | (8 << 16) | 0xABCD;
         mem.write_u32(0, instr).unwrap();
         cpu.start();
         cpu.step(&mut mem).unwrap();
