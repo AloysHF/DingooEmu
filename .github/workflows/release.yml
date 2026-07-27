@@ -1,0 +1,367 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: dingoo-emu-linux-x86_64
+          - platform: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: dingoo-emu-linux-aarch64
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            artifact: dingoo-emu-macos-x86_64
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            artifact: dingoo-emu-macos-aarch64
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: dingoo-emu-windows-x86_64
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev
+
+      - name: Build standalone
+        run: cargo build -p dingooemu --release --target ${{ matrix.target }}
+
+      - name: Build libretro core
+        run: cargo build -p dingooemu-libretro --release --target ${{ matrix.target }}
+
+      - name: Stage libretro core
+        shell: bash
+        run: |
+          out="libretro/${{ matrix.artifact }}"
+          mkdir -p "$out"
+          rel="target/${{ matrix.target }}/release"
+          # Cargo names the cdylib after its lib target (dingooemu_libretro); copy it
+          # to the dingooemu_libretro.<ext> name RetroArch expects.
+          for f in "dingooemu_libretro.dll:dingooemu_libretro.dll" \
+                   "libdingooemu_libretro.so:dingooemu_libretro.so" \
+                   "libdingooemu_libretro.dylib:dingooemu_libretro.dylib"; do
+            src="${f%%:*}"; dst="${f##*:}"
+            if [ -f "$rel/$src" ]; then
+              cp "$rel/$src" "$out/$dst"
+              break
+            fi
+          done
+          cp crates/dingooemu-libretro/dingooemu_libretro.info "$out/dingooemu_libretro.info"
+          ls -la "$out"
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact }}.tar.gz dingoo-emu
+          cd ../../..
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.artifact }}.zip dingoo-emu.exe
+          cd ../../..
+
+      - name: Package libretro (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd libretro
+          tar czf ../${{ matrix.artifact }}-libretro.tar.gz ${{ matrix.artifact }}
+          cd ..
+
+      - name: Package libretro (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd libretro
+          7z a ../${{ matrix.artifact }}-libretro.zip ${{ matrix.artifact }}
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.*
+            ${{ matrix.artifact }}-libretro.*
+
+  build-android:
+    name: Build libretro (Android)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build libretro core (all ABIs)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk \
+            -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 \
+            --platform 21 \
+            build -p dingooemu-libretro --release
+
+      - name: Stage libretro core (Android)
+        shell: bash
+        run: |
+          # RetroArch on Android loads cores named <corename>_libretro_android.so,
+          # one per ABI directory (matching RetroArch's cores/<abi>/ layout).
+          declare -A ABI_TRIPLE=(
+            [arm64-v8a]=aarch64-linux-android
+            [armeabi-v7a]=armv7-linux-androideabi
+            [x86]=i686-linux-android
+            [x86_64]=x86_64-linux-android
+          )
+          for abi in "${!ABI_TRIPLE[@]}"; do
+            triple="${ABI_TRIPLE[$abi]}"
+            out="libretro/dingoo-emu-android/$abi"
+            mkdir -p "$out"
+            cp "target/$triple/release/libdingooemu_libretro.so" \
+               "$out/dingooemu_libretro_android.so"
+          done
+          cp crates/dingooemu-libretro/dingooemu_libretro.info \
+             libretro/dingoo-emu-android/dingooemu_libretro.info
+          ls -laR libretro/dingoo-emu-android
+
+      - name: Package libretro (Android)
+        shell: bash
+        run: |
+          cd libretro
+          tar czf ../dingoo-emu-android-libretro.tar.gz dingoo-emu-android
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dingoo-emu-android
+          path: dingoo-emu-android-libretro.tar.gz
+
+  build-ios:
+    name: Build libretro (iOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          key: ios
+
+      - name: Build libretro core (arm64 for real devices)
+        run: |
+          cargo build -p dingooemu-libretro --release --target aarch64-apple-ios
+
+      - name: Build libretro core (x86_64 for real devices)
+        run: |
+          cargo build -p dingooemu-libretro --release --target x86_64-apple-ios
+
+      - name: Build libretro core (arm64 for simulator)
+        run: |
+          cargo build -p dingooemu-libretro --release --target aarch64-apple-ios-sim
+
+      - name: Create universal library and stage
+        shell: bash
+        run: |
+          out="libretro/dingoo-emu-ios"
+          mkdir -p "$out/simulator"
+
+          # Create universal library for real devices (arm64 + x86_64)
+          lipo -create \
+            target/aarch64-apple-ios/release/libdingooemu_libretro.dylib \
+            target/x86_64-apple-ios/release/libdingooemu_libretro.dylib \
+            -output "$out/dingooemu_libretro_ios.dylib"
+
+          # Copy arm64 simulator library
+          cp target/aarch64-apple-ios-sim/release/libdingooemu_libretro.dylib \
+             "$out/simulator/dingooemu_libretro_ios.dylib"
+
+          # Copy info file
+          cp crates/dingooemu-libretro/dingooemu_libretro.info "$out/"
+          ls -laR "$out"
+
+      - name: Package libretro (iOS)
+        shell: bash
+        run: |
+          cd libretro
+          tar czf ../dingoo-emu-ios-libretro.tar.gz dingoo-emu-ios
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dingoo-emu-ios
+          path: dingoo-emu-ios-libretro.tar.gz
+
+  build-webos:
+    name: Build libretro (webOS)
+    runs-on: ubuntu-22.04
+    env:
+      WEBOS_TOOLCHAIN_URL: https://github.com/openlgtv/buildroot-nc4/releases/latest/download/arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz
+      RUST_TARGET: armv7-unknown-linux-gnueabi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabi
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          key: webos
+
+      - name: Install webOS native toolchain
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 \
+            "$WEBOS_TOOLCHAIN_URL" \
+            --output "$RUNNER_TEMP/webos-toolchain.tar.gz"
+          mkdir -p "$RUNNER_TEMP/webos-toolchain"
+          tar xzf "$RUNNER_TEMP/webos-toolchain.tar.gz" \
+            -C "$RUNNER_TEMP/webos-toolchain" --strip-components=1
+          "$RUNNER_TEMP/webos-toolchain/relocate-sdk.sh"
+          echo "$RUNNER_TEMP/webos-toolchain/bin" >> "$GITHUB_PATH"
+          echo "WEBOS_TOOLCHAIN=$RUNNER_TEMP/webos-toolchain" >> "$GITHUB_ENV"
+
+      - name: Build libretro core (webOS ARMv7)
+        env:
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_LINKER: arm-webos-linux-gnueabi-gcc
+          CC_armv7_unknown_linux_gnueabi: arm-webos-linux-gnueabi-gcc
+          AR_armv7_unknown_linux_gnueabi: arm-webos-linux-gnueabi-ar
+        run: cargo build -p dingooemu-libretro --release --target "$RUST_TARGET"
+
+      - name: Verify and stage libretro core (webOS)
+        shell: bash
+        run: |
+          core="target/$RUST_TARGET/release/libdingooemu_libretro.so"
+          arm-webos-linux-gnueabi-readelf -h "$core"
+          arm-webos-linux-gnueabi-readelf -d "$core"
+
+          out="libretro/dingoo-emu-webos"
+          mkdir -p "$out"
+          cp "$core" "$out/dingooemu_libretro.so"
+          cp crates/dingooemu-libretro/dingooemu_libretro.info "$out/"
+          ls -la "$out"
+
+      - name: Package libretro (webOS)
+        shell: bash
+        run: |
+          cd libretro
+          tar czf ../dingoo-emu-webos-libretro.tar.gz dingoo-emu-webos
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dingoo-emu-webos
+          path: dingoo-emu-webos-libretro.tar.gz
+
+  release:
+    name: Create Release
+    needs: [build, build-android, build-ios, build-webos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          name: "DingooEmu ${{ github.ref_name }}"
+          body: |
+            DingooEmu ${{ github.ref_name }}
+
+            ## Downloads
+
+            ### Standalone emulator
+            - **Linux x86_64**: `dingoo-emu-linux-x86_64.tar.gz`
+            - **Linux aarch64**: `dingoo-emu-linux-aarch64.tar.gz`
+            - **macOS x86_64**: `dingoo-emu-macos-x86_64.tar.gz`
+            - **macOS aarch64**: `dingoo-emu-macos-aarch64.tar.gz`
+            - **Windows x86_64**: `dingoo-emu-windows-x86_64.zip`
+
+            ### libretro core (for RetroArch)
+            - Files ending in `-libretro.*` contain `dingooemu_libretro.<ext>`,
+              ready to drop into RetroArch.
+
+            ### Android libretro core (for RetroArch on Android)
+            - `dingoo-emu-android-libretro.tar.gz` contains
+              `dingooemu_libretro_android.so` for the `arm64-v8a`,
+              `armeabi-v7a`, `x86` and `x86_64` ABIs.
+
+            ### iOS libretro core (for RetroArch on iOS)
+            - `dingoo-emu-ios-libretro.tar.gz` contains:
+              - `dingooemu_libretro_ios.dylib` for real devices (arm64)
+              - `simulator/dingooemu_libretro_ios.dylib` for iOS Simulator (Apple Silicon)
+
+            ### webOS libretro core (for RetroArch on LG webOS TVs)
+            - `dingoo-emu-webos-libretro.tar.gz` contains
+              `dingooemu_libretro.so` for the webOS ARMv7 ABI.
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
