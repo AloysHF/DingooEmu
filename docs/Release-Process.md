@@ -72,7 +72,7 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
 
 1. Go to [Releases](https://github.com/jiangxincode/DingooEmu/releases)
 2. Find the draft release created by CI
-3. Review the auto-generated changelog — edit if needed
+3. Review the auto-generated changelog — edit if needed (refer to previous release changelogs for style)
 4. Verify all expected artifacts are attached:
    - `dingoo-emu-linux-x86_64.tar.gz`
    - `dingoo-emu-linux-aarch64.tar.gz`
