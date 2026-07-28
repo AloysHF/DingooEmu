@@ -1,8 +1,8 @@
 # RetroArch Core
 
 DingooEmu is available as a libretro core for RetroArch on Windows, Linux,
-and macOS. This guide covers installation, loading content, supported frontend
-features, and controls.
+macOS, Android, and iOS. This guide covers installation, loading content,
+supported frontend features, and controls.
 
 ## Installation
 
@@ -24,6 +24,14 @@ Cargo names the cdylib after its lib target, so this produces `dingooemu.dll`
 on Windows (`libdingooemu.so` on Linux) under `target/release/`. Rename it to
 `dingooemu_libretro.<ext>` before dropping it into RetroArch's `cores/`
 directory.
+
+## Mobile Platforms
+
+The same libretro core architecture is available on mobile platforms, with
+platform-specific installation requirements:
+
+- [Android Libretro Core](Android-Libretro-Core.md)
+- [iOS Libretro Core](iOS-Libretro-Core.md)
 
 ## Loading Games
 
