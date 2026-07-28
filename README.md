@@ -15,63 +15,36 @@
   <a href="https://qm.qq.com/q/LAO7DKAWUC"><img src="https://img.shields.io/badge/QQ%E7%BE%A4-Join%20Us-12B7F5?logo=tencent-qq&logoColor=white" alt="QQ Group"></a>
 </p>
 
-A cross-platform, open-source Dingoo A320 emulator with RetroArch integration.
+Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. This emulator runs `.app` game files from the Dingoo ecosystem through high-level emulation of the MIPS32 CPU and Dingoo SDK.
 
 ## Features
 
-- **MIPS32 CPU interpreter** — Ingenic JZ4740 XBurst compatible
-- **HLE (High-Level Emulation)** — Dingoo SDK functions implemented in Rust
-- **Cross-platform** — Windows, Linux, macOS, Android, iOS
+- **MIPS32 CPU interpreter** — Ingenic JZ4740 XBurst compatible instruction set
+- **HLE (High-Level Emulation)** — Dingoo SDK functions (graphics, input, audio, timing) implemented in Rust
+- **`.app` file support** — Parse and load Dingoo A320 game container format
+- **Frame rendering** — 320×240 RGB565 framebuffer with XRGB8888 output
+- **Screenshot mode** — Headless frame capture for automated testing and preview generation
+- **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`
 - **RetroArch integration** — libretro core for use with RetroArch frontend
-- **`.app` file support** — Load Dingoo A320 game files
+- **Cross-platform** — Windows, Linux, macOS
 
-## Status
-
-🚧 **Under Active Development**
-
-This project is in early development. The basic architecture is being established, and simple `.app` titles can now reach the rendering path. Compatibility remains experimental.
-
-See the [game compatibility notes](docs/Game-Compatibility.md) for verified behavior.
-
-## Quick Start
+## Usage
 
 ### Standalone Mode
 
-```bash
-cargo build -p dingooemu --release
-cargo run -p dingooemu --release -- path/to/game.app
-```
-
-### Screenshot Mode
-
-Take a headless screenshot for automated testing or preview generation:
+Download the latest binary from the
+[Releases](https://github.com/jiangxincode/DingooEmu/releases) page and run:
 
 ```bash
-# Take screenshot after 30 frames (default) and save as PNG
-cargo run -p dingooemu --release -- path/to/game.app --screenshot preview.png
-
-# Take screenshot after a custom number of frames
-cargo run -p dingooemu --release -- path/to/game.app --screenshot preview.png --screenshot-frames 60
+dingooemu path/to/game.app
 ```
 
-### Batch Screenshot Mode
-
-Build the standalone emulator and capture every `.app` file under
-`tmp/dingoo_game` recursively:
-
-```powershell
-pwsh -NoProfile -File scripts/batch-screenshots.ps1
-```
-
-Screenshots are written to `docs/images`. The default capture point is 300
-frames, with shorter per-game overrides for titles that exceed the default
-timeout. Explicit parameters apply the requested values to every game:
-
-```powershell
-pwsh -NoProfile -File scripts/batch-screenshots.ps1 -Frames 60 -TimeoutSeconds 30
-```
+See the [Standalone Emulator](docs/Standalone-Emulator.md) guide for
+installation, keyboard controls, screenshot mode, and all command-line options.
 
 ### RetroArch Mode
+
+Build the libretro core and load it in RetroArch:
 
 ```bash
 cargo build -p dingooemu-libretro --release
@@ -79,26 +52,87 @@ cargo build -p dingooemu-libretro --release
 
 The core file will be produced at `target/release/dingooemu_libretro.dll` (Windows) or `libdingooemu_libretro.so` (Linux).
 
+See the [RetroArch Core](docs/RetroArch-Core.md) guide for installation,
+supported features, and RetroPad mapping.
+
 ## Building
 
 Requires [Rust](https://www.rust-lang.org/tools/install) (stable).
 
+### Standalone Mode (Default)
+
 ```bash
-cargo build --release
+cargo build -p dingooemu --release
+cargo run -p dingooemu --release -- path/to/game.app
 ```
 
-## Project Structure
+The binary is produced at `target/release/dingooemu` (`.exe` on Windows).
+
+### Libretro Core (for RetroArch)
+
+```bash
+cargo build -p dingooemu-libretro --release
+```
+
+Cargo names the cdylib after its lib target, so this produces `dingooemu.dll`
+on Windows (`libdingooemu.so` on Linux) under `target/release/`. RetroArch
+expects the core file to be named `dingooemu_libretro.<ext>`, so rename it
+accordingly before dropping it into RetroArch's `cores/` directory.
+
+## Testing
+
+Run the unit tests:
+
+```bash
+cargo test --workspace
+```
+
+## Architecture
 
 ```
-DingooEmu/
-├── Cargo.toml                    # Workspace
-├── crates/
-│   ├── dingooemu-core/          # Platform-independent emulator engine
-│   ├── dingooemu/               # Standalone binary
-│   └── dingooemu-libretro/      # RetroArch libretro core
-├── docs/
-└── README.md
+crates/
+├── dingooemu-core/              # Platform-independent emulator engine (library)
+│   └── src/
+│       ├── lib.rs               # Crate root (module declarations)
+│       ├── emulator.rs          # Shared Emulator (both front-ends)
+│       ├── cpu/                 # MIPS32 CPU interpreter
+│       │   ├── mod.rs           # CPU module root
+│       │   ├── registers.rs     # GPR, HI/LO, PC management
+│       │   ├── instructions.rs  # MIPS32 instruction decoder and execution
+│       │   └── cop0.rs          # Coprocessor 0 (system control)
+│       ├── memory.rs            # Memory bus (32MB address space)
+│       ├── video.rs             # Framebuffer and screen rendering
+│       ├── audio.rs             # Audio engine (PCM output)
+│       ├── input.rs             # Button state management
+│       ├── app_loader.rs        # .app container parser
+│       ├── hle/                 # High-Level Emulation bridge
+│       │   ├── mod.rs           # HLE module root
+│       │   └── sdk.rs           # Dingoo SDK function implementations
+│       └── error.rs             # Error types
+├── dingooemu/                   # Standalone binary (-> dingooemu)
+│   └── src/
+│       └── main.rs              # Window loop and CLI front-end
+└── dingooemu-libretro/          # libretro cdylib (-> dingooemu_libretro.{dll,so,dylib})
+    ├── dingooemu_libretro.info  # RetroArch core metadata
+    └── src/
+        ├── lib.rs               # cdylib crate root
+        └── libretro/
+            ├── api.rs           # Exported libretro functions
+            ├── callbacks.rs     # Callback management
+            └── types.rs         # libretro type definitions
 ```
+
+## Game Compatibility
+
+🚧 **Under Active Development**
+
+This project is in early development. The basic architecture is being established, and simple `.app` titles can now reach the rendering path. Compatibility remains experimental.
+
+| Category | Count | Status |
+|----------|-------|--------|
+| Verified Games | 8 | ⚠️ Partial |
+
+For detailed game list with screenshots and descriptions, see [Game Compatibility](docs/Game-Compatibility.md).
 
 ## Keyboard Controls
 
@@ -115,6 +149,10 @@ DingooEmu/
 | Right Shift | R shoulder |
 | Esc | Exit |
 
+## Contribute
+
+Contributions are welcome! Whether you're interested in fixing bugs, adding features, improving documentation, or testing game compatibility, we'd love your help. See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for details.
+
 ## License
 
-BSD-3-Clause
+This project is licensed under the [BSD 3-Clause License](LICENSE).
