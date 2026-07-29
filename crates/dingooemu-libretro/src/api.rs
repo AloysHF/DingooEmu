@@ -207,6 +207,16 @@ pub extern "C" fn retro_run() {
                 let buffer = emu.video.to_xrgb8888();
                 cb(buffer.as_ptr(), 320, 240, 320 * std::mem::size_of::<u32>());
             }
+
+            // Submit one video frame of interleaved stereo audio.
+            let samples = emu.take_audio_samples();
+            if let Some(cb) = CALLBACKS.as_ref().and_then(|c| c.audio_sample_batch) {
+                cb(samples.as_ptr(), samples.len() / 2);
+            } else if let Some(cb) = CALLBACKS.as_ref().and_then(|c| c.audio_sample) {
+                for frame in samples.chunks_exact(2) {
+                    cb(frame[0], frame[1]);
+                }
+            }
         }
     }
 }

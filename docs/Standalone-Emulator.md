@@ -64,6 +64,14 @@ dingooemu [OPTIONS] <PATH>
 | Right Shift | R shoulder |
 | Esc | Exit |
 
+## Audio Output
+
+The standalone emulator sends Dingoo PCM audio to the default system output
+device. It supports unsigned 8-bit and signed 16-bit little-endian PCM, mono
+and stereo streams, guest volume controls, and automatic device resampling.
+If the default output device cannot be opened, emulation continues without
+audio and logs a warning.
+
 ## Screenshot Mode
 
 Take a headless screenshot for automated testing or preview generation:

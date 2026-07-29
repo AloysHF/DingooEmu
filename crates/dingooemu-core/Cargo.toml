@@ -14,7 +14,11 @@ serde_json.workspace = true
 crc32fast.workspace = true
 byteorder = "1"
 image.workspace = true
+rodio = { workspace = true, optional = true }
 
 [dev-dependencies]
 env_logger.workspace = true
 cargo-husky = { version = "=1.5.0", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy"] }
+
+[features]
+standalone = ["dep:rodio"]

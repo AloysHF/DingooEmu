@@ -1,4 +1,5 @@
 use crate::app_loader::{AppImage, ResourceKind};
+use crate::audio::{Audio, AudioConfig};
 use crate::cpu::Cpu;
 use crate::error::Result;
 use crate::input::Input;
@@ -12,11 +13,27 @@ const CPU_CLOCK_HZ: u64 = 336_000_000;
 const FRAMES_PER_SECOND: u64 = 60;
 const OS_TICKS_PER_SECOND: u64 = 100;
 const CYCLES_PER_FRAME: u64 = CPU_CLOCK_HZ / FRAMES_PER_SECOND;
+const MAX_AUDIO_WRITE_BYTES: u32 = 4 * 1024 * 1024;
+const TASK_QUANTUM_CYCLES: u64 = 4_096;
+const TASK_RETURN_ADDRESS: u32 = u32::MAX;
+const MAX_GUEST_TASKS: usize = 16;
 
 struct OpenFile {
     data: Vec<u8>,
     position: usize,
     data_ptr: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskWait {
+    Semaphore(u32),
+    UntilCycle(u64),
+}
+
+struct GuestTask {
+    cpu: Cpu,
+    priority: u32,
+    wait: Option<TaskWait>,
 }
 
 fn prepare_resource_file_data(name: &str, kind: ResourceKind, data: Vec<u8>) -> Vec<u8> {
@@ -61,12 +78,24 @@ pub struct Emulator {
     pub video: Video,
     /// Input subsystem
     pub input: Input,
+    /// PCM audio subsystem
+    pub audio: Audio,
     /// SDK HLE bridge
     pub sdk: SdkHle,
     /// Frame count
     frame_count: u64,
     /// Emulated CPU cycles elapsed
     cycle_count: u64,
+    /// Cooperatively scheduled guest tasks
+    tasks: Vec<GuestTask>,
+    /// Wait state for the main guest task
+    main_wait: Option<TaskWait>,
+    /// Task whose CPU is currently swapped into `cpu`
+    active_task: Option<usize>,
+    /// uC/OS-II semaphore counts by guest handle
+    semaphores: HashMap<u32, u32>,
+    /// Next guest semaphore handle
+    next_semaphore_handle: u32,
     /// Parsed app image (for resource access)
     app: Option<AppImage>,
     /// Import address to function name mapping (for diagnostics)
@@ -150,6 +179,7 @@ impl Emulator {
         let video = Video::new();
 
         let input = Input::new();
+        let audio = Audio::new();
         let sdk = SdkHle::new();
 
         // Build import address map for SDK hooking
@@ -188,9 +218,15 @@ impl Emulator {
             memory,
             video,
             input,
+            audio,
             sdk,
             frame_count: 0,
             cycle_count: 0,
+            tasks: Vec::new(),
+            main_wait: None,
+            active_task: None,
+            semaphores: HashMap::new(),
+            next_semaphore_handle: 1,
             app: Some(app),
             import_addrs,
             hooked_addrs,
@@ -251,32 +287,36 @@ impl Emulator {
     pub fn tick(&mut self) -> Result<()> {
         self.framebuffer_submitted = false;
 
-        // Execute instructions for one frame
-        for _ in 0..CYCLES_PER_FRAME {
-            if !self.cpu.is_running() {
-                break;
+        let mut remaining_cycles = CYCLES_PER_FRAME;
+        let mut context_cursor = 0usize;
+        let mut idle_contexts = 0usize;
+        while remaining_cycles > 0 {
+            let context_count = self.tasks.len() + 1;
+            if context_cursor >= context_count {
+                context_cursor = 0;
             }
-
-            // Check if PC is at a hooked address (SDK call)
-            let pc = self.cpu.regs.pc;
-
-            if Some(pc) == self.app_main_entry && !self.app_main_args_initialized {
-                self.install_app_main_args()?;
-            }
-            if Some(pc) == self.app_main_init_check_address {
-                self.cpu.regs.write(2, 1);
-            }
-
-            if let Some(func_name) = self.hooked_addrs.get(&pc).cloned() {
-                log::trace!("SDK hook: PC={:#010x} = {}", pc, func_name);
-                // Handle SDK call directly
-                self.handle_sdk_call(pc, &func_name)?;
+            let slice_cycles = remaining_cycles.min(TASK_QUANTUM_CYCLES);
+            let executed = if context_cursor == 0 {
+                self.active_task = None;
+                self.run_active_cpu_slice(slice_cycles)?
             } else {
-                // Normal instruction execution
-                self.cpu.step(&mut self.memory)?;
+                self.run_task_slice(context_cursor - 1, slice_cycles)?
+            };
+            context_cursor = (context_cursor + 1) % context_count;
+
+            if executed == 0 {
+                idle_contexts += 1;
+                if idle_contexts >= context_count {
+                    self.cycle_count = self.cycle_count.wrapping_add(slice_cycles);
+                    remaining_cycles -= slice_cycles;
+                    idle_contexts = 0;
+                }
+            } else {
+                remaining_cycles -= executed;
+                idle_contexts = 0;
             }
-            self.cycle_count = self.cycle_count.wrapping_add(1);
         }
+        self.tasks.retain(|task| task.cpu.is_running());
 
         // Use a fallback sync for tests or apps that draw without an explicit submit.
         if !self.framebuffer_submitted {
@@ -287,6 +327,156 @@ impl Emulator {
         self.frame_count += 1;
 
         Ok(())
+    }
+
+    fn run_task_slice(&mut self, task_index: usize, cycles: u64) -> Result<u64> {
+        let task_cpu = std::mem::replace(&mut self.tasks[task_index].cpu, Cpu::new(0));
+        let main_cpu = std::mem::replace(&mut self.cpu, task_cpu);
+        self.active_task = Some(task_index);
+        let result = self.run_active_cpu_slice(cycles);
+        let task_cpu = std::mem::replace(&mut self.cpu, main_cpu);
+        self.tasks[task_index].cpu = task_cpu;
+        self.active_task = None;
+        result
+    }
+
+    fn run_active_cpu_slice(&mut self, cycles: u64) -> Result<u64> {
+        let mut executed = 0;
+        while executed < cycles {
+            if self.active_context_waiting() || !self.cpu.is_running() {
+                break;
+            }
+            if self.cpu.regs.pc == TASK_RETURN_ADDRESS {
+                self.cpu.stop();
+                break;
+            }
+
+            let pc = self.cpu.regs.pc;
+            if self.active_task.is_none()
+                && Some(pc) == self.app_main_entry
+                && !self.app_main_args_initialized
+            {
+                self.install_app_main_args()?;
+            }
+            if self.active_task.is_none() && Some(pc) == self.app_main_init_check_address {
+                self.cpu.regs.write(2, 1);
+            }
+
+            if let Some(func_name) = self.hooked_addrs.get(&pc).cloned() {
+                log::trace!("SDK hook: PC={:#010x} = {}", pc, func_name);
+                self.handle_sdk_call(pc, &func_name)?;
+            } else {
+                self.cpu.step(&mut self.memory)?;
+            }
+            self.cycle_count = self.cycle_count.wrapping_add(1);
+            executed += 1;
+        }
+        Ok(executed)
+    }
+
+    fn active_context_waiting(&mut self) -> bool {
+        let cycle_count = self.cycle_count;
+        let wait = if let Some(task_index) = self.active_task {
+            &mut self.tasks[task_index].wait
+        } else {
+            &mut self.main_wait
+        };
+        match *wait {
+            Some(TaskWait::UntilCycle(deadline)) if cycle_count >= deadline => {
+                *wait = None;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn create_guest_task(
+        &mut self,
+        entry: u32,
+        data_ptr: u32,
+        stack_ptr: u32,
+        priority: u32,
+    ) -> bool {
+        if entry == 0 || self.tasks.len() >= MAX_GUEST_TASKS {
+            return false;
+        }
+
+        let mut cpu = Cpu::new(entry);
+        cpu.regs.write(4, data_ptr);
+        cpu.regs.write(25, entry);
+        cpu.regs.write(29, stack_ptr);
+        cpu.regs.write(31, TASK_RETURN_ADDRESS);
+        cpu.start();
+        self.tasks.push(GuestTask {
+            cpu,
+            priority,
+            wait: None,
+        });
+        log::debug!(
+            "Created guest task: entry={entry:#010x}, data={data_ptr:#010x}, stack={stack_ptr:#010x}, priority={priority}"
+        );
+        true
+    }
+
+    fn set_active_wait(&mut self, wait: TaskWait) {
+        if let Some(task_index) = self.active_task {
+            self.tasks[task_index].wait = Some(wait);
+        } else {
+            self.main_wait = Some(wait);
+        }
+    }
+
+    fn delay_active_until(&mut self, deadline: u64) {
+        if deadline > self.cycle_count {
+            self.set_active_wait(TaskWait::UntilCycle(deadline));
+        }
+    }
+
+    fn create_semaphore(&mut self, count: u32) -> u32 {
+        let handle = self.next_semaphore_handle;
+        self.next_semaphore_handle = self.next_semaphore_handle.wrapping_add(1).max(1);
+        self.semaphores.insert(handle, count);
+        handle
+    }
+
+    fn pend_semaphore(&mut self, handle: u32) -> bool {
+        let Some(count) = self.semaphores.get_mut(&handle) else {
+            return false;
+        };
+        if *count > 0 {
+            *count -= 1;
+        } else {
+            self.set_active_wait(TaskWait::Semaphore(handle));
+        }
+        true
+    }
+
+    fn post_semaphore(&mut self, handle: u32) -> bool {
+        if !self.semaphores.contains_key(&handle) {
+            return false;
+        }
+
+        if self.main_wait == Some(TaskWait::Semaphore(handle)) {
+            self.main_wait = None;
+            return true;
+        }
+        if let Some(task_index) = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| task.wait == Some(TaskWait::Semaphore(handle)))
+            .min_by_key(|(_, task)| task.priority)
+            .map(|(index, _)| index)
+        {
+            self.tasks[task_index].wait = None;
+            return true;
+        }
+
+        if let Some(count) = self.semaphores.get_mut(&handle) {
+            *count = count.saturating_add(1);
+        }
+        true
     }
 
     fn read_guest_c_string(&self, ptr: u32) -> String {
@@ -572,7 +762,7 @@ impl Emulator {
             return 0;
         };
         let Some(resource) = app.find_resource(name) else {
-            log::trace!("  resource open failed: {}", name);
+            log::trace!("Resource open failed: {name}");
             return 0;
         };
 
@@ -590,7 +780,7 @@ impl Emulator {
                 data_ptr: 0,
             },
         );
-        log::trace!("  resource open: {} -> {} ({} bytes)", name, handle, size);
+        log::trace!("Resource opened: {name} -> {handle} ({size} bytes)");
         handle
     }
 
@@ -915,6 +1105,111 @@ impl Emulator {
                 log::trace!("  kbd_get_key() = {}", key);
             }
 
+            // Tasks and synchronization
+            "OSTaskCreate" => {
+                let entry = self.cpu.regs.read(4);
+                let data_ptr = self.cpu.regs.read(5);
+                let stack_ptr = self.cpu.regs.read(6);
+                let priority = self.cpu.regs.read(7);
+                let created = self.create_guest_task(entry, data_ptr, stack_ptr, priority);
+                self.cpu.regs.write(2, if created { 0 } else { u32::MAX });
+                log::trace!(
+                    "  OSTaskCreate({entry:#010x}, {data_ptr:#010x}, {stack_ptr:#010x}, {priority}) = {}",
+                    self.cpu.regs.read(2)
+                );
+            }
+            "OSSemCreate" => {
+                let count = self.cpu.regs.read(4);
+                let handle = self.create_semaphore(count);
+                self.cpu.regs.write(2, handle);
+                log::trace!("  OSSemCreate({count}) = {handle}");
+            }
+            "OSSemPend" => {
+                let handle = self.cpu.regs.read(4);
+                let error_ptr = self.cpu.regs.read(6);
+                let pending = self.pend_semaphore(handle);
+                if error_ptr != 0 {
+                    self.memory
+                        .write_u8(error_ptr, if pending { 0 } else { 1 })?;
+                }
+                log::trace!("  OSSemPend({handle}) = {pending}");
+            }
+            "OSSemPost" => {
+                let handle = self.cpu.regs.read(4);
+                let posted = self.post_semaphore(handle);
+                self.cpu.regs.write(2, if posted { 0 } else { 1 });
+                log::trace!("  OSSemPost({handle}) = {}", self.cpu.regs.read(2));
+            }
+            "OSSemDel" => {
+                let handle = self.cpu.regs.read(4);
+                let error_ptr = self.cpu.regs.read(6);
+                let removed = self.semaphores.remove(&handle).is_some();
+                if error_ptr != 0 {
+                    self.memory
+                        .write_u8(error_ptr, if removed { 0 } else { 1 })?;
+                }
+                self.cpu.regs.write(2, 0);
+                log::trace!("  OSSemDel({handle}) = {removed}");
+            }
+
+            // Audio
+            "_waveout_open" | "waveout_open" => {
+                let args_ptr = self.cpu.regs.read(4);
+                let config = AudioConfig::new(
+                    self.memory.read_u32(args_ptr)?,
+                    self.memory.read_u16(args_ptr.wrapping_add(4))?,
+                    self.memory.read_u8(args_ptr.wrapping_add(6))?,
+                    self.memory.read_u8(args_ptr.wrapping_add(7))?,
+                );
+                let opened = config.is_some_and(|config| self.audio.open(config));
+                self.cpu.regs.write(2, u32::from(opened));
+                log::trace!("  waveout_open({args_ptr:#010x}) = {opened}");
+            }
+            "waveout_write" => {
+                let buffer_ptr = self.cpu.regs.read(5);
+                let count = self.cpu.regs.read(6);
+                let written = if count == 0 || count > MAX_AUDIO_WRITE_BYTES {
+                    false
+                } else {
+                    let mut data = Vec::with_capacity(count as usize);
+                    for offset in 0..count {
+                        data.push(self.memory.read_u8(buffer_ptr.wrapping_add(offset))?);
+                    }
+                    self.audio.write(&data)
+                };
+                self.cpu.regs.write(2, u32::from(written));
+                log::trace!(
+                    "  waveout_write({buffer_ptr:#010x}, {count}) = {}",
+                    u32::from(written)
+                );
+            }
+            "waveout_can_write" | "pcm_can_write" => {
+                let can_write = self.audio.can_write();
+                self.cpu.regs.write(2, u32::from(can_write));
+                log::trace!("  {func_name}() = {}", u32::from(can_write));
+            }
+            "waveout_close" | "waveout_close_at_once" => {
+                let closed = self.audio.close();
+                self.cpu.regs.write(2, u32::from(closed));
+                log::trace!("  {func_name}() = {}", u32::from(closed));
+            }
+            "_waveout_set_volume" | "waveout_set_volume" => {
+                let volume = self.cpu.regs.read(4);
+                let updated = self.audio.set_volume(volume);
+                self.cpu.regs.write(2, u32::from(updated));
+                log::trace!("  {func_name}({volume}) = {}", u32::from(updated));
+            }
+            "HP_Mute_sw" => {
+                let muted = self.cpu.regs.read(4) != 0;
+                let updated = self.audio.set_muted(muted);
+                self.cpu.regs.write(2, u32::from(updated));
+                log::trace!("  HP_Mute_sw({muted}) = {}", u32::from(updated));
+            }
+            "pcm_ioctl" => {
+                self.cpu.regs.write(2, 0);
+                log::trace!("  pcm_ioctl() = 0");
+            }
+
             // Timer
             "OSTimeGet" => {
                 let ticks = self
@@ -936,6 +1231,8 @@ impl Emulator {
             }
             "delay_ms" | "mdelay" => {
                 let ms = self.cpu.regs.read(4); // $a0
+                let delay_cycles = (ms as u64).saturating_mul(CPU_CLOCK_HZ) / 1_000;
+                self.delay_active_until(self.cycle_count.saturating_add(delay_cycles));
                 log::trace!("  delay_ms({})", ms);
             }
             "StartSwTimer" => {
@@ -944,10 +1241,15 @@ impl Emulator {
             }
             "OSTimeDly" => {
                 let ticks = self.cpu.regs.read(4); // $a0
+                let delay_cycles =
+                    (ticks as u64).saturating_mul(CPU_CLOCK_HZ) / OS_TICKS_PER_SECOND;
+                self.delay_active_until(self.cycle_count.saturating_add(delay_cycles));
                 log::trace!("  OSTimeDly({})", ticks);
             }
             "udelay" => {
                 let us = self.cpu.regs.read(4); // $a0
+                let delay_cycles = (us as u64).saturating_mul(CPU_CLOCK_HZ) / 1_000_000;
+                self.delay_active_until(self.cycle_count.saturating_add(delay_cycles));
                 log::trace!("  udelay({})", us);
             }
             "_sys_judge_event" | "sys_judge_event" => {
@@ -1164,6 +1466,16 @@ impl Emulator {
         self.input.set_buttons(buttons);
     }
 
+    /// Get one video frame of interleaved stereo audio.
+    pub fn take_audio_samples(&mut self) -> Vec<i16> {
+        self.audio.take_frame_samples()
+    }
+
+    /// Get the fixed frontend audio sample rate.
+    pub fn audio_sample_rate(&self) -> u32 {
+        crate::audio::OUTPUT_SAMPLE_RATE
+    }
+
     /// Get the current frame count
     pub fn frame_count(&self) -> u64 {
         self.frame_count
@@ -1187,9 +1499,15 @@ impl Default for Emulator {
             memory: Memory::new(),
             video: Video::new(),
             input: Input::new(),
+            audio: Audio::new(),
             sdk: SdkHle::new(),
             frame_count: 0,
             cycle_count: 0,
+            tasks: Vec::new(),
+            main_wait: None,
+            active_task: None,
+            semaphores: HashMap::new(),
+            next_semaphore_handle: 1,
             app: None,
             import_addrs: HashMap::new(),
             hooked_addrs: HashMap::new(),
@@ -1214,6 +1532,36 @@ mod tests {
         let emu = Emulator::default();
         assert_eq!(emu.frame_count(), 0);
         assert!(!emu.is_running());
+    }
+
+    #[test]
+    fn test_guest_task_executes_with_shared_memory() {
+        let mut emu = Emulator::default();
+        let entry = 0x1000;
+        let addiu_t0 = (0x09 << 26) | (8 << 16) | 0x1234;
+        let sw_t0 = (0x2B << 26) | (8 << 16) | 0x2000;
+        let jr_ra = (31 << 21) | 0x08;
+        emu.memory.write_u32(entry, addiu_t0).unwrap();
+        emu.memory.write_u32(entry + 4, sw_t0).unwrap();
+        emu.memory.write_u32(entry + 8, jr_ra).unwrap();
+        emu.memory.write_u32(entry + 12, 0).unwrap();
+
+        assert!(emu.create_guest_task(entry, 0, 0x3000, 16));
+        emu.tick().unwrap();
+
+        assert_eq!(emu.memory.read_u32(0x2000).unwrap(), 0x1234);
+        assert!(emu.tasks.is_empty());
+    }
+
+    #[test]
+    fn test_semaphore_wakes_waiting_main_task() {
+        let mut emu = Emulator::default();
+        let semaphore = emu.create_semaphore(0);
+
+        assert!(emu.pend_semaphore(semaphore));
+        assert_eq!(emu.main_wait, Some(TaskWait::Semaphore(semaphore)));
+        assert!(emu.post_semaphore(semaphore));
+        assert_eq!(emu.main_wait, None);
     }
 
     #[test]
@@ -1404,6 +1752,40 @@ mod tests {
 
         emu.handle_sdk_call(0, "LCD_GetYSize").unwrap();
         assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_HEIGHT);
+    }
+
+    #[cfg(not(feature = "standalone"))]
+    #[test]
+    fn test_waveout_hle_opens_and_queues_guest_pcm() {
+        let mut emu = Emulator::default();
+        let args_ptr = 0x1000;
+        emu.memory.write_u32(args_ptr, 16_000).unwrap();
+        emu.memory.write_u16(args_ptr + 4, 16).unwrap();
+        emu.memory.write_u8(args_ptr + 6, 1).unwrap();
+        emu.memory.write_u8(args_ptr + 7, 100).unwrap();
+        emu.cpu.regs.write(4, args_ptr);
+        emu.handle_sdk_call(0, "waveout_open").unwrap();
+
+        assert_eq!(emu.cpu.regs.read(2), 1);
+        assert_eq!(emu.audio.config(), AudioConfig::new(16_000, 16, 1, 100));
+
+        let buffer_ptr = 0x2000;
+        for index in 0..1_600u32 {
+            let sample = if index % 2 == 0 {
+                10_000i16
+            } else {
+                -10_000i16
+            };
+            emu.memory
+                .write_u16(buffer_ptr + index * 2, sample as u16)
+                .unwrap();
+        }
+        emu.cpu.regs.write(5, buffer_ptr);
+        emu.cpu.regs.write(6, 3_200);
+        emu.handle_sdk_call(0, "waveout_write").unwrap();
+
+        assert_eq!(emu.cpu.regs.read(2), 1);
+        assert!(emu.take_audio_samples().iter().any(|&sample| sample != 0));
     }
 
     #[test]
