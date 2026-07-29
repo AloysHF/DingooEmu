@@ -172,6 +172,10 @@ impl Memory {
 
     /// Read a byte from memory
     pub fn read_u8(&self, addr: u32) -> Result<u8> {
+        let phys_addr = self.translate_address(addr);
+        if phys_addr < RAM_SIZE {
+            return Ok(self.ram[phys_addr as usize]);
+        }
         if let Some(offset) = self.framebuffer_offset(addr) {
             return Ok(self.framebuffer[offset]);
         }
@@ -179,35 +183,66 @@ impl Memory {
             return Ok(self.ipu_registers[offset]);
         }
 
-        let phys_addr = self.translate_address(addr);
-        if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&phys_addr) {
-            Ok(self.ram[(phys_addr - RAM_BASE) as usize])
-        } else {
-            Err(SimulatorError::MemoryError {
-                addr,
-                message: "out of bounds".to_string(),
-            })
-        }
+        Err(SimulatorError::MemoryError {
+            addr,
+            message: "out of bounds".to_string(),
+        })
     }
 
     /// Read a 16-bit value from memory (little-endian)
     pub fn read_u16(&self, addr: u32) -> Result<u16> {
-        let b0 = self.read_u8(addr)? as u16;
-        let b1 = self.read_u8(addr.wrapping_add(1))? as u16;
-        Ok(b0 | (b1 << 8))
+        let phys_addr = self.translate_address(addr) as usize;
+        if let Some(bytes) = self.ram.get(phys_addr..).and_then(|bytes| bytes.get(..2)) {
+            return Ok(u16::from_le_bytes([bytes[0], bytes[1]]));
+        }
+        if let Some(offset) = self.framebuffer_offset(addr) {
+            if let Some(bytes) = self.framebuffer.get(offset..offset + 2) {
+                return Ok(u16::from_le_bytes([bytes[0], bytes[1]]));
+            }
+        }
+        if let Some(offset) = self.ipu_register_offset(addr) {
+            if let Some(bytes) = self.ipu_registers.get(offset..offset + 2) {
+                return Ok(u16::from_le_bytes([bytes[0], bytes[1]]));
+            }
+        }
+        Err(SimulatorError::MemoryError {
+            addr,
+            message: "out of bounds".to_string(),
+        })
     }
 
     /// Read a 32-bit value from memory (little-endian)
     pub fn read_u32(&self, addr: u32) -> Result<u32> {
-        let b0 = self.read_u8(addr)? as u32;
-        let b1 = self.read_u8(addr.wrapping_add(1))? as u32;
-        let b2 = self.read_u8(addr.wrapping_add(2))? as u32;
-        let b3 = self.read_u8(addr.wrapping_add(3))? as u32;
-        Ok(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+        let phys_addr = self.translate_address(addr) as usize;
+        if let Some(bytes) = self.ram.get(phys_addr..).and_then(|bytes| bytes.get(..4)) {
+            return Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        }
+        if let Some(offset) = self.framebuffer_offset(addr) {
+            if let Some(bytes) = self.framebuffer.get(offset..offset + 4) {
+                return Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+            }
+        }
+        if let Some(offset) = self.ipu_register_offset(addr) {
+            if let Some(bytes) = self.ipu_registers.get(offset..offset + 4) {
+                return Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+            }
+        }
+        Err(SimulatorError::MemoryError {
+            addr,
+            message: "out of bounds".to_string(),
+        })
     }
 
     /// Write a byte to memory
     pub fn write_u8(&mut self, addr: u32, value: u8) -> Result<()> {
+        let phys_addr = self.translate_address(addr);
+        if phys_addr < RAM_SIZE {
+            self.ram[phys_addr as usize] = value;
+            if self.write_log.len() < 1000 {
+                self.write_log.push(phys_addr);
+            }
+            return Ok(());
+        }
         if let Some(offset) = self.framebuffer_offset(addr) {
             self.framebuffer[offset] = value;
             if self.write_log.len() < 1000 {
@@ -220,43 +255,78 @@ impl Memory {
             return Ok(());
         }
 
-        let phys_addr = self.translate_address(addr);
-        if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&phys_addr) {
-            self.ram[(phys_addr - RAM_BASE) as usize] = value;
-            // Track ALL writes for debugging
-            if self.write_log.len() < 1000 {
-                self.write_log.push(phys_addr);
-            }
-            Ok(())
-        } else {
-            Err(SimulatorError::MemoryError {
-                addr,
-                message: "out of bounds".to_string(),
-            })
-        }
+        Err(SimulatorError::MemoryError {
+            addr,
+            message: "out of bounds".to_string(),
+        })
     }
 
     /// Write a 16-bit value to memory (little-endian)
     pub fn write_u16(&mut self, addr: u32, value: u16) -> Result<()> {
-        self.write_u8(addr, value as u8)?;
-        self.write_u8(addr.wrapping_add(1), (value >> 8) as u8)?;
-        Ok(())
+        let bytes = value.to_le_bytes();
+        let phys_addr = self.translate_address(addr) as usize;
+        if let Some(destination) = self
+            .ram
+            .get_mut(phys_addr..)
+            .and_then(|destination| destination.get_mut(..2))
+        {
+            destination.copy_from_slice(&bytes);
+            self.track_writes(phys_addr as u32, bytes.len());
+            return Ok(());
+        }
+        if let Some(offset) = self.framebuffer_offset(addr) {
+            if let Some(destination) = self.framebuffer.get_mut(offset..offset + bytes.len()) {
+                destination.copy_from_slice(&bytes);
+                self.track_writes(addr, bytes.len());
+                return Ok(());
+            }
+        }
+        if let Some(offset) = self.ipu_register_offset(addr) {
+            if let Some(destination) = self.ipu_registers.get_mut(offset..offset + bytes.len()) {
+                destination.copy_from_slice(&bytes);
+                return Ok(());
+            }
+        }
+        Err(SimulatorError::MemoryError {
+            addr,
+            message: "out of bounds".to_string(),
+        })
     }
 
     /// Write a 32-bit value to memory (little-endian)
     pub fn write_u32(&mut self, addr: u32, value: u32) -> Result<()> {
-        let ipu_offset = self.ipu_register_offset(addr);
-        if ipu_offset.is_some() {
+        let bytes = value.to_le_bytes();
+        let phys_addr = self.translate_address(addr) as usize;
+        if let Some(destination) = self
+            .ram
+            .get_mut(phys_addr..)
+            .and_then(|destination| destination.get_mut(..4))
+        {
+            destination.copy_from_slice(&bytes);
+            self.track_writes(phys_addr as u32, bytes.len());
+            return Ok(());
+        }
+        if let Some(offset) = self.framebuffer_offset(addr) {
+            if let Some(destination) = self.framebuffer.get_mut(offset..offset + bytes.len()) {
+                destination.copy_from_slice(&bytes);
+                self.track_writes(addr, bytes.len());
+                return Ok(());
+            }
+        }
+        if let Some(offset) = self.ipu_register_offset(addr) {
             log::trace!("IPU write: {:#010x} = {:#010x}", addr, value);
+            if let Some(destination) = self.ipu_registers.get_mut(offset..offset + bytes.len()) {
+                destination.copy_from_slice(&bytes);
+                if offset == IPU_CTRL_OFFSET && value & IPU_CTRL_RUN != 0 {
+                    self.run_ipu()?;
+                }
+                return Ok(());
+            }
         }
-        self.write_u8(addr, value as u8)?;
-        self.write_u8(addr.wrapping_add(1), (value >> 8) as u8)?;
-        self.write_u8(addr.wrapping_add(2), (value >> 16) as u8)?;
-        self.write_u8(addr.wrapping_add(3), (value >> 24) as u8)?;
-        if ipu_offset == Some(IPU_CTRL_OFFSET) && value & IPU_CTRL_RUN != 0 {
-            self.run_ipu()?;
-        }
-        Ok(())
+        Err(SimulatorError::MemoryError {
+            addr,
+            message: "out of bounds".to_string(),
+        })
     }
 
     /// Load data into memory at the specified address
@@ -275,6 +345,17 @@ impl Memory {
     /// Get a mutable slice of memory (for direct access)
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.ram
+    }
+
+    /// Get the shared LCD framebuffer mapping.
+    pub fn framebuffer(&self) -> &[u8] {
+        &self.framebuffer
+    }
+
+    fn track_writes(&mut self, addr: u32, count: usize) {
+        let count = count.min(1000usize.saturating_sub(self.write_log.len()));
+        self.write_log
+            .extend((0..count).map(|offset| addr.wrapping_add(offset as u32)));
     }
 
     /// Allocate memory from the heap
@@ -472,6 +553,10 @@ mod tests {
 
         mem.write_u8(0x9000_0004, 0x34).unwrap();
         assert_eq!(mem.read_u8(0x1000_0004).unwrap(), 0x34);
+
+        mem.write_u32(crate::video::VM_LCD_FB_ADDRESS + 8, 0x1234_5678)
+            .unwrap();
+        assert_eq!(mem.read_u32(0x1400_0008).unwrap(), 0x1234_5678);
     }
 
     #[test]

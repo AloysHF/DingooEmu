@@ -13,10 +13,21 @@ const CPU_CLOCK_HZ: u64 = 336_000_000;
 const FRAMES_PER_SECOND: u64 = 60;
 const OS_TICKS_PER_SECOND: u64 = 100;
 const CYCLES_PER_FRAME: u64 = CPU_CLOCK_HZ / FRAMES_PER_SECOND;
+// Model the pipeline and memory stalls with a conservative average CPI.
+const CPU_CYCLES_PER_INSTRUCTION: u64 = 2;
 const MAX_AUDIO_WRITE_BYTES: u32 = 4 * 1024 * 1024;
 const TASK_QUANTUM_CYCLES: u64 = 4_096;
 const TASK_RETURN_ADDRESS: u32 = u32::MAX;
 const MAX_GUEST_TASKS: usize = 16;
+const HOOK_FILTER_WORDS: usize = 1_024;
+
+fn hook_filter_location(address: u32) -> (usize, u64) {
+    let bit_index = (address as usize >> 2) & (HOOK_FILTER_WORDS * u64::BITS as usize - 1);
+    (
+        bit_index / u64::BITS as usize,
+        1 << (bit_index % u64::BITS as usize),
+    )
+}
 
 struct OpenFile {
     data: Vec<u8>,
@@ -88,6 +99,8 @@ pub struct Emulator {
     cycle_count: u64,
     /// Cooperatively scheduled guest tasks
     tasks: Vec<GuestTask>,
+    /// Scheduler position preserved across frontend frames
+    scheduler_cursor: usize,
     /// Wait state for the main guest task
     main_wait: Option<TaskWait>,
     /// Task whose CPU is currently swapped into `cpu`
@@ -103,6 +116,8 @@ pub struct Emulator {
     import_addrs: HashMap<u32, String>,
     /// Hooked addresses (for SDK function interception)
     hooked_addrs: HashMap<u32, String>,
+    /// Fast rejection filter for non-hook instruction addresses
+    hook_filter: Box<[u64]>,
     /// Open guest resource files
     open_files: HashMap<u32, OpenFile>,
     /// Next guest file handle
@@ -187,15 +202,20 @@ impl Emulator {
         // So we need to hook physical addresses
         let mut import_addrs = HashMap::new();
         let mut hooked_addrs = HashMap::new();
+        let mut hook_filter = vec![0; HOOK_FILTER_WORDS].into_boxed_slice();
         for import in &app.imports {
             // Physical address (what the game actually uses)
             let phys = import.address & 0x1FFF_FFFF;
             import_addrs.insert(phys, import.name.clone());
             hooked_addrs.insert(phys, import.name.clone());
+            let (word, mask) = hook_filter_location(phys);
+            hook_filter[word] |= mask;
             // Also hook KSEG0 address (for completeness)
             if phys != import.address {
                 import_addrs.insert(import.address, import.name.clone());
                 hooked_addrs.insert(import.address, import.name.clone());
+                let (word, mask) = hook_filter_location(import.address);
+                hook_filter[word] |= mask;
             }
         }
 
@@ -223,6 +243,7 @@ impl Emulator {
             frame_count: 0,
             cycle_count: 0,
             tasks: Vec::new(),
+            scheduler_cursor: 0,
             main_wait: None,
             active_task: None,
             semaphores: HashMap::new(),
@@ -230,6 +251,7 @@ impl Emulator {
             app: Some(app),
             import_addrs,
             hooked_addrs,
+            hook_filter,
             open_files: HashMap::new(),
             next_file_handle: 1,
             app_main_entry,
@@ -288,21 +310,20 @@ impl Emulator {
         self.framebuffer_submitted = false;
 
         let mut remaining_cycles = CYCLES_PER_FRAME;
-        let mut context_cursor = 0usize;
         let mut idle_contexts = 0usize;
         while remaining_cycles > 0 {
             let context_count = self.tasks.len() + 1;
-            if context_cursor >= context_count {
-                context_cursor = 0;
+            if self.scheduler_cursor >= context_count {
+                self.scheduler_cursor = 0;
             }
             let slice_cycles = remaining_cycles.min(TASK_QUANTUM_CYCLES);
-            let executed = if context_cursor == 0 {
+            let executed = if self.scheduler_cursor == 0 {
                 self.active_task = None;
                 self.run_active_cpu_slice(slice_cycles)?
             } else {
-                self.run_task_slice(context_cursor - 1, slice_cycles)?
+                self.run_task_slice(self.scheduler_cursor - 1, slice_cycles)?
             };
-            context_cursor = (context_cursor + 1) % context_count;
+            self.scheduler_cursor = (self.scheduler_cursor + 1) % context_count;
 
             if executed == 0 {
                 idle_contexts += 1;
@@ -314,6 +335,11 @@ impl Emulator {
             } else {
                 remaining_cycles -= executed;
                 idle_contexts = 0;
+            }
+
+            if self.framebuffer_submitted {
+                self.cycle_count = self.cycle_count.wrapping_add(remaining_cycles);
+                remaining_cycles = 0;
             }
         }
         self.tasks.retain(|task| task.cpu.is_running());
@@ -341,11 +367,12 @@ impl Emulator {
     }
 
     fn run_active_cpu_slice(&mut self, cycles: u64) -> Result<u64> {
+        if self.active_context_waiting() || !self.cpu.is_running() {
+            return Ok(0);
+        }
+
         let mut executed = 0;
         while executed < cycles {
-            if self.active_context_waiting() || !self.cpu.is_running() {
-                break;
-            }
             if self.cpu.regs.pc == TASK_RETURN_ADDRESS {
                 self.cpu.stop();
                 break;
@@ -362,14 +389,27 @@ impl Emulator {
                 self.cpu.regs.write(2, 1);
             }
 
-            if let Some(func_name) = self.hooked_addrs.get(&pc).cloned() {
+            let (hook_word, hook_mask) = hook_filter_location(pc);
+            let func_name = (self.hook_filter[hook_word] & hook_mask != 0)
+                .then(|| self.hooked_addrs.get(&pc))
+                .flatten()
+                .cloned();
+            if let Some(func_name) = func_name {
                 log::trace!("SDK hook: PC={:#010x} = {}", pc, func_name);
                 self.handle_sdk_call(pc, &func_name)?;
+                self.cycle_count = self.cycle_count.wrapping_add(CPU_CYCLES_PER_INSTRUCTION);
+                executed += CPU_CYCLES_PER_INSTRUCTION;
+                if self.framebuffer_submitted
+                    || self.active_context_waiting()
+                    || !self.cpu.is_running()
+                {
+                    break;
+                }
             } else {
                 self.cpu.step(&mut self.memory)?;
+                self.cycle_count = self.cycle_count.wrapping_add(CPU_CYCLES_PER_INSTRUCTION);
+                executed += CPU_CYCLES_PER_INSTRUCTION;
             }
-            self.cycle_count = self.cycle_count.wrapping_add(1);
-            executed += 1;
         }
         Ok(executed)
     }
@@ -1425,39 +1465,21 @@ impl Emulator {
     /// Sync framebuffer from guest memory to video subsystem
     /// The game writes directly to the fixed framebuffer address
     fn sync_framebuffer(&mut self) {
-        let addr = crate::video::VM_LCD_FB_ADDRESS;
-        let size = crate::video::FRAMEBUFFER_SIZE;
+        let fb_data = &self.memory.framebuffer()[..crate::video::FRAMEBUFFER_SIZE];
 
-        // Try to read framebuffer from guest memory
-        let mut fb_data = vec![0u8; size];
-        let mut all_ok = true;
-        let mut non_zero_count = 0u32;
-
-        for (i, byte) in fb_data.iter_mut().enumerate() {
-            match self.memory.read_u8(addr.wrapping_add(i as u32)) {
-                Ok(b) => {
-                    *byte = b;
-                    if b != 0 {
-                        non_zero_count += 1;
-                    }
-                }
-                Err(_) => {
-                    all_ok = false;
-                    break;
-                }
-            }
-        }
-
-        if all_ok && non_zero_count > 0 {
+        if fb_data.iter().any(|&byte| byte != 0) {
             self.framebuffer_submitted = true;
             // Copy to video subsystem
             let dst = self.video.framebuffer_mut();
-            dst.copy_from_slice(&fb_data);
-            log::trace!(
-                "  sync_framebuffer: {}/{} non-zero bytes",
-                non_zero_count,
-                size
-            );
+            dst.copy_from_slice(fb_data);
+            if log::log_enabled!(log::Level::Trace) {
+                let non_zero_count = fb_data.iter().filter(|&&byte| byte != 0).count();
+                log::trace!(
+                    "  sync_framebuffer: {}/{} non-zero bytes",
+                    non_zero_count,
+                    fb_data.len()
+                );
+            }
         }
     }
 
@@ -1504,6 +1526,7 @@ impl Default for Emulator {
             frame_count: 0,
             cycle_count: 0,
             tasks: Vec::new(),
+            scheduler_cursor: 0,
             main_wait: None,
             active_task: None,
             semaphores: HashMap::new(),
@@ -1511,6 +1534,7 @@ impl Default for Emulator {
             app: None,
             import_addrs: HashMap::new(),
             hooked_addrs: HashMap::new(),
+            hook_filter: vec![0; HOOK_FILTER_WORDS].into_boxed_slice(),
             open_files: HashMap::new(),
             next_file_handle: 1,
             app_main_entry: None,
@@ -1551,6 +1575,42 @@ mod tests {
 
         assert_eq!(emu.memory.read_u32(0x2000).unwrap(), 0x1234);
         assert!(emu.tasks.is_empty());
+    }
+
+    #[test]
+    fn test_tick_uses_interpreter_cycle_cost() {
+        let mut emu = Emulator::default();
+        emu.start();
+
+        emu.tick().unwrap();
+
+        assert_eq!(
+            emu.cpu.instruction_count,
+            CYCLES_PER_FRAME / CPU_CYCLES_PER_INSTRUCTION
+        );
+        assert_eq!(emu.cycle_count, CYCLES_PER_FRAME);
+    }
+
+    #[test]
+    fn test_tick_stops_after_framebuffer_submission() {
+        let mut emu = Emulator::default();
+        let hook_address = 0x1000;
+        emu.hooked_addrs
+            .insert(hook_address, "lcd_set_frame".to_string());
+        let (word, mask) = hook_filter_location(hook_address);
+        emu.hook_filter[word] |= mask;
+        emu.memory
+            .write_u8(crate::video::VM_LCD_FB_ADDRESS, 1)
+            .unwrap();
+        emu.cpu.regs.pc = hook_address;
+        emu.cpu.regs.write(31, hook_address + 4);
+        emu.start();
+
+        emu.tick().unwrap();
+
+        assert_eq!(emu.cpu.regs.pc, hook_address + 4);
+        assert_eq!(emu.cpu.instruction_count, 0);
+        assert_eq!(emu.cycle_count, CYCLES_PER_FRAME);
     }
 
     #[test]

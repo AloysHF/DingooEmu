@@ -170,6 +170,7 @@ impl Cpu {
             0x2A => self.execute_swl(instr, memory),      // SWL
             0x2B => self.execute_sw(instr, memory),       // SW
             0x2E => self.execute_swr(instr, memory),      // SWR
+            0x33 => Ok(()),                               // PREF
             _ => {
                 // TODO: Implement more instructions
                 log::warn!(
@@ -900,5 +901,21 @@ mod tests {
         cpu.start();
         cpu.step(&mut mem).unwrap();
         assert_eq!(cpu.regs.read(8), 0xABCD_0000);
+    }
+
+    #[test]
+    fn test_pref_is_ignored() {
+        let mut cpu = Cpu::new(0);
+        let mut mem = Memory::new();
+        let pref = (0x33 << 26) | (4 << 21) | (7 << 16) | 0x1234;
+        mem.write_u32(0, pref).unwrap();
+        cpu.regs.write(4, 0x1000);
+        cpu.start();
+
+        cpu.step(&mut mem).unwrap();
+
+        assert_eq!(cpu.regs.pc, 4);
+        assert_eq!(cpu.regs.read(4), 0x1000);
+        assert_eq!(cpu.instruction_count, 1);
     }
 }

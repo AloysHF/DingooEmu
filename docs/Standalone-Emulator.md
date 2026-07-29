@@ -72,6 +72,14 @@ and stereo streams, guest volume controls, and automatic device resampling.
 If the default output device cannot be opened, emulation continues without
 audio and logs a warning.
 
+## Performance
+
+Use a release build for normal gameplay. The interpreter uses multi-cycle CPU
+steps, treats guest frame submissions as frontend frame boundaries, and
+advances any remaining clock budget after a completed frame. This keeps
+timers, task delays, video, and audio synchronized at 60 Hz without requiring
+the host to dispatch all 336 million hardware clock cycles individually.
+
 ## Screenshot Mode
 
 Take a headless screenshot for automated testing or preview generation:
