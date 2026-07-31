@@ -264,6 +264,7 @@ fn set_performance_level() {
 struct CoreOptions {
     volume: u8,
     repeat_delay: u32,
+    repeat_period: u32,
 }
 
 impl Default for CoreOptions {
@@ -271,6 +272,7 @@ impl Default for CoreOptions {
         Self {
             volume: 100,
             repeat_delay: 24,
+            repeat_period: 6,
         }
     }
 }
@@ -284,6 +286,10 @@ fn core_option_variables() -> Vec<RetroVariable> {
         RetroVariable {
             key: c"dingooemu_repeat_delay".as_ptr(),
             value: c"Key Auto-Repeat Delay (frames); 24|0|2|4|6|8|10|12|16|20|30|45|60".as_ptr(),
+        },
+        RetroVariable {
+            key: c"dingooemu_repeat_period".as_ptr(),
+            value: c"Key Auto-Repeat Period (frames); 6|1|2|3|4|5|8|10|12|15|20|30".as_ptr(),
         },
         RetroVariable {
             key: ptr::null(),
@@ -338,13 +344,20 @@ fn read_core_options(mut get: impl FnMut(&CStr) -> Option<String>) -> CoreOption
     {
         options.repeat_delay = delay;
     }
+    if let Some(period) =
+        get(c"dingooemu_repeat_period").and_then(|value| value.parse::<u32>().ok())
+    {
+        options.repeat_period = period.max(1);
+    }
     options
 }
 
 fn apply_core_options(emulator: &mut Emulator) {
     let options = read_core_options(get_core_option);
     emulator.audio.set_master_volume(options.volume);
-    emulator.input.set_repeat_timing(options.repeat_delay, 6);
+    emulator
+        .input
+        .set_repeat_timing(options.repeat_delay, options.repeat_period);
 }
 
 fn input_descriptors() -> [RetroInputDescriptor; 13] {
@@ -542,6 +555,18 @@ mod tests {
         let options =
             read_core_options(|key| (key == c"dingooemu_repeat_delay").then(|| "12".to_string()));
         assert_eq!(options.repeat_delay, 12);
+    }
+
+    #[test]
+    fn repeat_period_option_rejects_zero_semantically() {
+        let variables = core_option_variables();
+        assert_eq!(
+            unsafe { CStr::from_ptr(variables[2].key) },
+            c"dingooemu_repeat_period"
+        );
+        let options =
+            read_core_options(|key| (key == c"dingooemu_repeat_period").then(|| "0".to_string()));
+        assert_eq!(options.repeat_period, 1);
     }
 
     #[test]
