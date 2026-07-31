@@ -22,6 +22,9 @@ pub struct Input {
     released: u32,
     /// Whether a system/input event is pending
     event_pending: bool,
+    repeat_delay: u32,
+    repeat_period: u32,
+    held_frames: [u32; 32],
 }
 
 impl Input {
@@ -32,6 +35,9 @@ impl Input {
             pressed: 0,
             released: 0,
             event_pending: false,
+            repeat_delay: 0,
+            repeat_period: 1,
+            held_frames: [0; 32],
         }
     }
 
@@ -48,7 +54,30 @@ impl Input {
         if changed != 0 {
             self.event_pending = true;
         }
+        for bit in 0..32 {
+            let mask = 1u32 << bit;
+            if buttons & mask == 0 {
+                self.held_frames[bit] = 0;
+            } else if self.buttons & mask == 0 {
+                self.held_frames[bit] = 1;
+            } else {
+                self.held_frames[bit] = self.held_frames[bit].saturating_add(1);
+                let held = self.held_frames[bit];
+                if self.repeat_delay > 0
+                    && held >= self.repeat_delay
+                    && (held - self.repeat_delay).is_multiple_of(self.repeat_period)
+                {
+                    self.pressed |= mask;
+                    self.event_pending = true;
+                }
+            }
+        }
         self.buttons = buttons;
+    }
+
+    pub fn set_repeat_timing(&mut self, delay: u32, period: u32) {
+        self.repeat_delay = delay;
+        self.repeat_period = period.max(1);
     }
 
     /// Get and clear the Dingoo key status structure fields.
@@ -107,5 +136,21 @@ mod tests {
 
         input.release(BUTTON_A);
         assert!(!input.is_pressed(BUTTON_A));
+    }
+
+    #[test]
+    fn held_button_repeats_after_configured_delay() {
+        let mut input = Input::new();
+        input.set_repeat_timing(3, 2);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.take_status().0, BUTTON_A);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.take_status().0, 0);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.take_status().0, BUTTON_A);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.take_status().0, 0);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.take_status().0, BUTTON_A);
     }
 }

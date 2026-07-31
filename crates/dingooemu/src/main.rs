@@ -114,6 +114,14 @@ struct Args {
     #[arg(long)]
     show_gamepad: bool,
 
+    /// Frames before a held button starts repeating
+    #[arg(long = "repeat-delay", default_value_t = 24)]
+    repeat_delay: u32,
+
+    /// Frames between repeated button presses
+    #[arg(long = "repeat-period", default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..))]
+    repeat_period: u32,
+
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -144,6 +152,8 @@ fn main() -> anyhow::Result<()> {
     log::info!("Loading game: {}", args.path);
     let mut emu = Emulator::from_path(&args.path)?;
     emu.audio.set_master_volume(args.volume);
+    emu.input
+        .set_repeat_timing(args.repeat_delay, args.repeat_period);
 
     // Start emulation
     emu.start();
@@ -364,5 +374,20 @@ mod tests {
                 .unwrap()
                 .show_gamepad
         );
+    }
+
+    #[test]
+    fn repeat_timing_is_configurable_and_period_rejects_zero() {
+        let args = Args::try_parse_from([
+            "dingoo-emu",
+            "--repeat-delay",
+            "10",
+            "--repeat-period",
+            "2",
+            "game.app",
+        ])
+        .unwrap();
+        assert_eq!((args.repeat_delay, args.repeat_period), (10, 2));
+        assert!(Args::try_parse_from(["dingoo-emu", "--repeat-period", "0", "game.app"]).is_err());
     }
 }

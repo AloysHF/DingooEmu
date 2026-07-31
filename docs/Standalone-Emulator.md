@@ -50,6 +50,8 @@ dingooemu [OPTIONS] <PATH>
 | `--swap-ab` | flag | off | Exchange the emulated A and B button masks. |
 | `--filter <MODE>` | `nearest`, `bilinear`, `bicubic`, `xbrz` | `nearest` | Select the window scaling filter. |
 | `--show-gamepad` | flag | off | Overlay the current logical Dingoo button state. |
+| `--repeat-delay <N>` | frames | `24` | Frames before a held button begins generating repeat presses. |
+| `--repeat-period <N>` | frames, at least `1` | `6` | Frames between repeat presses after the delay. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -93,6 +95,9 @@ black bars when the window or desktop has a different aspect ratio.
 
 Use `--show-gamepad` when testing mappings or recording demonstrations. The
 overlay is drawn at the native resolution before the selected display filter.
+
+At 60 Hz, the default repeat delay is about 0.4 seconds and the default repeat
+period is about 0.1 seconds. Set `--repeat-delay 0` to disable synthetic repeat.
 
 ## Audio Output
 
