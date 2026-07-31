@@ -37,6 +37,7 @@ struct OpenFile {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TaskWait {
+    AudioWrite,
     Semaphore(u32),
     UntilCycle(u64),
 }
@@ -433,13 +434,17 @@ impl Emulator {
     fn active_context_waiting(&mut self) -> bool {
         let cycle_count = self.cycle_count;
         let wait = if let Some(task_index) = self.active_task {
-            &mut self.tasks[task_index].wait
+            self.tasks[task_index].wait
         } else {
-            &mut self.main_wait
+            self.main_wait
         };
-        match *wait {
+        match wait {
+            Some(TaskWait::AudioWrite) if self.audio.can_write() => {
+                self.clear_active_wait();
+                false
+            }
             Some(TaskWait::UntilCycle(deadline)) if cycle_count >= deadline => {
-                *wait = None;
+                self.clear_active_wait();
                 false
             }
             Some(_) => true,
@@ -1226,6 +1231,12 @@ impl Emulator {
                 let count = self.cpu.regs.read(6);
                 let written = if count == 0 || count > MAX_AUDIO_WRITE_BYTES {
                     false
+                } else if !self.audio.can_write() {
+                    self.set_active_wait(TaskWait::AudioWrite);
+                    log::trace!(
+                        "  waveout_write({buffer_ptr:#010x}, {count}) deferred until queue space is available"
+                    );
+                    return Ok(());
                 } else {
                     let mut data = Vec::with_capacity(count as usize);
                     for offset in 0..count {
@@ -1493,6 +1504,14 @@ impl Emulator {
                 non_zero_count,
                 fb_data.len()
             );
+        }
+    }
+
+    fn clear_active_wait(&mut self) {
+        if let Some(task_index) = self.active_task {
+            self.tasks[task_index].wait = None;
+        } else {
+            self.main_wait = None;
         }
     }
 
@@ -1891,6 +1910,49 @@ mod tests {
 
         assert_eq!(emu.cpu.regs.read(2), 1);
         assert!(emu.take_audio_samples().iter().any(|&sample| sample != 0));
+    }
+
+    #[cfg(not(feature = "standalone"))]
+    #[test]
+    fn test_waveout_write_retries_after_queue_space_is_available() {
+        let mut emu = Emulator::default();
+        let config = AudioConfig::new(16_000, 16, 1, 100).unwrap();
+        assert!(emu.audio.open(config));
+        assert!(emu.audio.write(&vec![0; 32_000]));
+        assert!(!emu.audio.can_write());
+
+        let hook_address = 0x4000;
+        let return_address = 0x1234;
+        let buffer_ptr = 0x2000;
+        emu.memory
+            .load_data(buffer_ptr, &1_000i16.to_le_bytes())
+            .unwrap();
+        emu.cpu.regs.pc = hook_address;
+        emu.cpu.regs.write(2, 0xdead_beef);
+        emu.cpu.regs.write(5, buffer_ptr);
+        emu.cpu.regs.write(6, 2);
+        emu.cpu.regs.write(31, return_address);
+
+        emu.handle_sdk_call(hook_address, "waveout_write").unwrap();
+
+        assert_eq!(emu.main_wait, Some(TaskWait::AudioWrite));
+        assert_eq!(emu.cpu.regs.pc, hook_address);
+        assert_eq!(emu.cpu.regs.read(2), 0xdead_beef);
+
+        for _ in 0..60 {
+            if emu.audio.can_write() {
+                break;
+            }
+            emu.take_audio_samples();
+        }
+        assert!(emu.audio.can_write());
+        assert!(!emu.active_context_waiting());
+
+        emu.handle_sdk_call(hook_address, "waveout_write").unwrap();
+
+        assert_eq!(emu.main_wait, None);
+        assert_eq!(emu.cpu.regs.pc, return_address);
+        assert_eq!(emu.cpu.regs.read(2), 1);
     }
 
     #[test]

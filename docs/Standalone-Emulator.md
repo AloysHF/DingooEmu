@@ -70,7 +70,8 @@ The standalone emulator sends Dingoo PCM audio to the default system output
 device. It supports unsigned 8-bit and signed 16-bit little-endian PCM, mono
 and stereo streams, guest volume controls, and automatic device resampling.
 If the default output device cannot be opened, emulation continues without
-audio and logs a warning.
+audio and logs a warning. When the output queue is full, the guest audio task
+waits and retries the same buffer so playback data is not skipped.
 
 ## Performance
 
