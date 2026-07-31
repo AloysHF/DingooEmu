@@ -52,6 +52,7 @@ dingooemu [OPTIONS] <PATH>
 | `--show-gamepad` | flag | off | Overlay the current logical Dingoo button state. |
 | `--repeat-delay <N>` | frames | `24` | Frames before a held button begins generating repeat presses. |
 | `--repeat-period <N>` | frames, at least `1` | `6` | Frames between repeat presses after the delay. |
+| `--cheat <RULE>` | rule | — | Freeze a memory location or MIPS register once per frame; may be repeated. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -98,6 +99,19 @@ overlay is drawn at the native resolution before the selected display filter.
 
 At 60 Hz, the default repeat delay is about 0.4 seconds and the default repeat
 period is about 0.1 seconds. Set `--repeat-delay 0` to disable synthetic repeat.
+
+## Cheat Rules
+
+Cheat rules are applied before every emulated frame. Supported targets are
+`mem8`, `mem16`, `mem32`, and MIPS registers `r0` through `r31`. Decimal and
+`0x`-prefixed hexadecimal values are accepted:
+
+```bash
+dingooemu --cheat mem8:0x80100000=99 --cheat reg:r4=0x1234 game.app
+```
+
+Writes still pass through the emulator's normal memory validation. Invalid or
+out-of-range rules stop startup with a clear error instead of being ignored.
 
 ## Audio Output
 

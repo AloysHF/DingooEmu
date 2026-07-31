@@ -1,3 +1,4 @@
+mod cheat;
 mod gamepad_overlay;
 mod keyboard;
 mod scaler;
@@ -7,6 +8,7 @@ use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator};
 use minifb::{Key, Window, WindowOptions};
 use std::path::PathBuf;
 
+use cheat::CheatRule;
 use keyboard::{KeyboardMapper, RemapSpec};
 use scaler::{DisplayScaler, ScaleFilter};
 
@@ -122,6 +124,10 @@ struct Args {
     #[arg(long = "repeat-period", default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..))]
     repeat_period: u32,
 
+    /// Freeze a memory address or MIPS register using TARGET=VALUE syntax
+    #[arg(long = "cheat", value_name = "RULE")]
+    cheats: Vec<CheatRule>,
+
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -161,6 +167,7 @@ fn main() -> anyhow::Result<()> {
     // Screenshot mode: run headless for N frames, save PNG, and exit
     if let Some(ref screenshot_path) = args.screenshot {
         for frame in 0..args.screenshot_frames {
+            apply_cheats(&args.cheats, &mut emu)?;
             emu.tick()?;
             if frame % 60 == 0 {
                 log::info!("Frame {}", frame);
@@ -175,6 +182,7 @@ fn main() -> anyhow::Result<()> {
         // Headless mode: run for the requested number of frames
         log::info!("Running in headless mode");
         for frame in 0..args.frames {
+            apply_cheats(&args.cheats, &mut emu)?;
             emu.tick()?;
             if frame % 60 == 0 {
                 log::info!("Frame {}", frame);
@@ -221,6 +229,7 @@ fn main() -> anyhow::Result<()> {
             emu.set_buttons(buttons);
 
             // Run one frame
+            apply_cheats(&args.cheats, &mut emu)?;
             emu.tick()?;
 
             // Get framebuffer and convert to XRGB8888
@@ -247,6 +256,13 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn apply_cheats(cheats: &[CheatRule], emulator: &mut Emulator) -> anyhow::Result<()> {
+    for cheat in cheats {
+        cheat.apply(emulator)?;
+    }
     Ok(())
 }
 
@@ -389,5 +405,19 @@ mod tests {
         .unwrap();
         assert_eq!((args.repeat_delay, args.repeat_period), (10, 2));
         assert!(Args::try_parse_from(["dingoo-emu", "--repeat-period", "0", "game.app"]).is_err());
+    }
+
+    #[test]
+    fn repeated_cheat_rules_are_parsed() {
+        let args = Args::try_parse_from([
+            "dingoo-emu",
+            "--cheat",
+            "mem8:0x100=1",
+            "--cheat",
+            "reg:r4=7",
+            "game.app",
+        ])
+        .unwrap();
+        assert_eq!(args.cheats.len(), 2);
     }
 }
