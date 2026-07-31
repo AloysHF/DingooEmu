@@ -27,6 +27,10 @@ struct Args {
     #[arg(long)]
     headless: bool,
 
+    /// Number of frames to run in headless mode
+    #[arg(long, default_value_t = 300)]
+    frames: u32,
+
     /// Take a screenshot after N frames and exit (saves as PNG)
     #[arg(short = 'S', long = "screenshot", value_name = "PATH")]
     screenshot: Option<PathBuf>,
@@ -64,15 +68,15 @@ fn main() -> anyhow::Result<()> {
     }
 
     if args.headless {
-        // Headless mode: run for a fixed number of frames
+        // Headless mode: run for the requested number of frames
         log::info!("Running in headless mode");
-        for frame in 0..300 {
+        for frame in 0..args.frames {
             emu.tick()?;
             if frame % 60 == 0 {
                 log::info!("Frame {}", frame);
             }
         }
-        log::info!("Headless run complete");
+        log::info!("Headless run complete: {} frames", args.frames);
     } else {
         // Windowed mode
         let width = (SCREEN_WIDTH * args.scale) as usize;
@@ -180,5 +184,21 @@ mod tests {
     fn scale_rejects_zero_and_excessive_values() {
         assert!(Args::try_parse_from(["dingoo-emu", "--scale", "0", "game.app"]).is_err());
         assert!(Args::try_parse_from(["dingoo-emu", "--scale", "17", "game.app"]).is_err());
+    }
+
+    #[test]
+    fn headless_frame_count_defaults_to_300_and_is_configurable() {
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "game.app"])
+                .unwrap()
+                .frames,
+            300
+        );
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "--headless", "--frames", "12", "game.app"])
+                .unwrap()
+                .frames,
+            12
+        );
     }
 }
