@@ -53,6 +53,7 @@ dingooemu [OPTIONS] <PATH>
 | `--repeat-delay <N>` | frames | `24` | Frames before a held button begins generating repeat presses. |
 | `--repeat-period <N>` | frames, at least `1` | `6` | Frames between repeat presses after the delay. |
 | `--cheat <RULE>` | rule | — | Freeze a memory location or MIPS register once per frame; may be repeated. |
+| `--unknown-instruction-policy <MODE>` | `stop`, `skip` | `skip` | Stop on or log and skip an unimplemented MIPS instruction. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -112,6 +113,10 @@ dingooemu --cheat mem8:0x80100000=99 --cheat reg:r4=0x1234 game.app
 
 Writes still pass through the emulator's normal memory validation. Invalid or
 out-of-range rules stop startup with a clear error instead of being ignored.
+
+For compatibility testing, `--unknown-instruction-policy stop` turns the first
+unimplemented MIPS instruction into an execution error. The default `skip`
+behavior logs the instruction and continues, matching previous releases.
 
 ## Audio Output
 

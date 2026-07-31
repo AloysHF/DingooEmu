@@ -3,7 +3,8 @@ mod gamepad_overlay;
 mod keyboard;
 mod scaler;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use dingooemu_core::cpu::UnknownInstructionPolicy;
 use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator};
 use minifb::{Key, Window, WindowOptions};
 use std::path::PathBuf;
@@ -11,6 +12,22 @@ use std::path::PathBuf;
 use cheat::CheatRule;
 use keyboard::{KeyboardMapper, RemapSpec};
 use scaler::{DisplayScaler, ScaleFilter};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum UnknownInstructionMode {
+    Stop,
+    #[default]
+    Skip,
+}
+
+impl From<UnknownInstructionMode> for UnknownInstructionPolicy {
+    fn from(mode: UnknownInstructionMode) -> Self {
+        match mode {
+            UnknownInstructionMode::Stop => Self::Stop,
+            UnknownInstructionMode::Skip => Self::Skip,
+        }
+    }
+}
 
 #[cfg(target_os = "windows")]
 mod screen {
@@ -128,6 +145,10 @@ struct Args {
     #[arg(long = "cheat", value_name = "RULE")]
     cheats: Vec<CheatRule>,
 
+    /// Behavior when an unknown MIPS instruction is encountered
+    #[arg(long, value_enum, default_value_t = UnknownInstructionMode::Skip)]
+    unknown_instruction_policy: UnknownInstructionMode,
+
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -157,6 +178,8 @@ fn main() -> anyhow::Result<()> {
     // Load the game
     log::info!("Loading game: {}", args.path);
     let mut emu = Emulator::from_path(&args.path)?;
+    emu.cpu
+        .set_unknown_instruction_policy(args.unknown_instruction_policy.into());
     emu.audio.set_master_volume(args.volume);
     emu.input
         .set_repeat_timing(args.repeat_delay, args.repeat_period);
@@ -419,5 +442,25 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.cheats.len(), 2);
+    }
+
+    #[test]
+    fn unknown_instruction_policy_accepts_stop_and_skip() {
+        for (name, expected) in [
+            ("stop", UnknownInstructionMode::Stop),
+            ("skip", UnknownInstructionMode::Skip),
+        ] {
+            assert_eq!(
+                Args::try_parse_from([
+                    "dingoo-emu",
+                    "--unknown-instruction-policy",
+                    name,
+                    "game.app",
+                ])
+                .unwrap()
+                .unknown_instruction_policy,
+                expected
+            );
+        }
     }
 }
