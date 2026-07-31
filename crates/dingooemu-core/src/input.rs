@@ -25,6 +25,7 @@ pub struct Input {
     repeat_delay: u32,
     repeat_period: u32,
     held_frames: [u32; 32],
+    swap_ab: bool,
 }
 
 impl Input {
@@ -38,6 +39,7 @@ impl Input {
             repeat_delay: 0,
             repeat_period: 1,
             held_frames: [0; 32],
+            swap_ab: false,
         }
     }
 
@@ -48,6 +50,14 @@ impl Input {
 
     /// Set the button state
     pub fn set_buttons(&mut self, buttons: u32) {
+        let buttons = if self.swap_ab {
+            let without_ab = buttons & !(BUTTON_A | BUTTON_B);
+            without_ab
+                | if buttons & BUTTON_A != 0 { BUTTON_B } else { 0 }
+                | if buttons & BUTTON_B != 0 { BUTTON_A } else { 0 }
+        } else {
+            buttons
+        };
         let changed = self.buttons ^ buttons;
         self.pressed |= changed & buttons;
         self.released |= changed & self.buttons;
@@ -78,6 +88,10 @@ impl Input {
     pub fn set_repeat_timing(&mut self, delay: u32, period: u32) {
         self.repeat_delay = delay;
         self.repeat_period = period.max(1);
+    }
+
+    pub fn set_swap_ab(&mut self, swap_ab: bool) {
+        self.swap_ab = swap_ab;
     }
 
     /// Get and clear the Dingoo key status structure fields.
@@ -152,5 +166,15 @@ mod tests {
         assert_eq!(input.take_status().0, 0);
         input.set_buttons(BUTTON_A);
         assert_eq!(input.take_status().0, BUTTON_A);
+    }
+
+    #[test]
+    fn swap_ab_changes_logical_button_state() {
+        let mut input = Input::new();
+        input.set_swap_ab(true);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.buttons(), BUTTON_B);
+        input.set_buttons(BUTTON_B);
+        assert_eq!(input.buttons(), BUTTON_A);
     }
 }

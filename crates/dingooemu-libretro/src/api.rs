@@ -265,6 +265,7 @@ struct CoreOptions {
     volume: u8,
     repeat_delay: u32,
     repeat_period: u32,
+    swap_ab: bool,
 }
 
 impl Default for CoreOptions {
@@ -273,6 +274,7 @@ impl Default for CoreOptions {
             volume: 100,
             repeat_delay: 24,
             repeat_period: 6,
+            swap_ab: false,
         }
     }
 }
@@ -290,6 +292,10 @@ fn core_option_variables() -> Vec<RetroVariable> {
         RetroVariable {
             key: c"dingooemu_repeat_period".as_ptr(),
             value: c"Key Auto-Repeat Period (frames); 6|1|2|3|4|5|8|10|12|15|20|30".as_ptr(),
+        },
+        RetroVariable {
+            key: c"dingooemu_swap_ab".as_ptr(),
+            value: c"Swap A/B Buttons; disabled|enabled".as_ptr(),
         },
         RetroVariable {
             key: ptr::null(),
@@ -349,6 +355,9 @@ fn read_core_options(mut get: impl FnMut(&CStr) -> Option<String>) -> CoreOption
     {
         options.repeat_period = period.max(1);
     }
+    if let Some(swap) = get(c"dingooemu_swap_ab") {
+        options.swap_ab = swap == "enabled";
+    }
     options
 }
 
@@ -358,6 +367,7 @@ fn apply_core_options(emulator: &mut Emulator) {
     emulator
         .input
         .set_repeat_timing(options.repeat_delay, options.repeat_period);
+    emulator.input.set_swap_ab(options.swap_ab);
 }
 
 fn input_descriptors() -> [RetroInputDescriptor; 13] {
@@ -567,6 +577,22 @@ mod tests {
         let options =
             read_core_options(|key| (key == c"dingooemu_repeat_period").then(|| "0".to_string()));
         assert_eq!(options.repeat_period, 1);
+    }
+
+    #[test]
+    fn swap_ab_option_defaults_to_disabled() {
+        let variables = core_option_variables();
+        assert_eq!(
+            unsafe { CStr::from_ptr(variables[3].key) },
+            c"dingooemu_swap_ab"
+        );
+        assert!(!read_core_options(|_| None).swap_ab);
+        assert!(
+            read_core_options(|key| {
+                (key == c"dingooemu_swap_ab").then(|| "enabled".to_string())
+            })
+            .swap_ab
+        );
     }
 
     #[test]
