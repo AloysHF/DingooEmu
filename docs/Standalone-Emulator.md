@@ -49,6 +49,7 @@ dingooemu [OPTIONS] <PATH>
 | `--remap <BUTTON:KEY>` | mapping | — | Replace a button's default keyboard mapping; may be repeated. |
 | `--swap-ab` | flag | off | Exchange the emulated A and B button masks. |
 | `--filter <MODE>` | `nearest`, `bilinear`, `bicubic`, `xbrz` | `nearest` | Select the window scaling filter. |
+| `--show-gamepad` | flag | off | Overlay the current logical Dingoo button state. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -89,6 +90,9 @@ meaning. It is applied after custom key remapping.
 `bicubic` uses sharper cubic interpolation, and `xbrz` applies edge-aware
 pixel-art smoothing. All modes preserve the native 4:3 aspect ratio and add
 black bars when the window or desktop has a different aspect ratio.
+
+Use `--show-gamepad` when testing mappings or recording demonstrations. The
+overlay is drawn at the native resolution before the selected display filter.
 
 ## Audio Output
 

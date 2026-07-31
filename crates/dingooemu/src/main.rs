@@ -1,3 +1,4 @@
+mod gamepad_overlay;
 mod keyboard;
 mod scaler;
 
@@ -109,6 +110,10 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ScaleFilter::Nearest)]
     filter: ScaleFilter,
 
+    /// Show the current Dingoo button state over the game frame
+    #[arg(long)]
+    show_gamepad: bool,
+
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -209,7 +214,15 @@ fn main() -> anyhow::Result<()> {
             emu.tick()?;
 
             // Get framebuffer and convert to XRGB8888
-            let buffer = emu.video.to_xrgb8888();
+            let mut buffer = emu.video.to_xrgb8888();
+            if args.show_gamepad {
+                gamepad_overlay::draw(
+                    &mut buffer,
+                    SCREEN_WIDTH as usize,
+                    SCREEN_HEIGHT as usize,
+                    buttons,
+                );
+            }
             let (window_width, window_height) = window.get_size();
             let output = display_scaler.render(
                 &buffer,
@@ -342,5 +355,14 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn show_gamepad_flag_is_parsed() {
+        assert!(
+            Args::try_parse_from(["dingoo-emu", "--show-gamepad", "game.app"])
+                .unwrap()
+                .show_gamepad
+        );
     }
 }
