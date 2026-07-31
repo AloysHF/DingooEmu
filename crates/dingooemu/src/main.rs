@@ -87,6 +87,10 @@ struct Args {
     #[arg(short, long, default_value_t = 100, value_parser = clap::value_parser!(u8).range(0..=100))]
     volume: u8,
 
+    /// Enable emulator debug logging
+    #[arg(long)]
+    debug_logging: bool,
+
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -105,11 +109,13 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Initialize logger
-    env_logger::init();
-
     // Parse command line arguments
     let args = Args::parse();
+
+    let default_log_filter = if args.debug_logging { "debug" } else { "info" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_log_filter))
+        .format_timestamp_millis()
+        .init();
 
     // Load the game
     log::info!("Loading game: {}", args.path);
@@ -303,5 +309,14 @@ mod tests {
             0
         );
         assert!(Args::try_parse_from(["dingoo-emu", "--volume", "101", "game.app"]).is_err());
+    }
+
+    #[test]
+    fn debug_logging_flag_is_parsed() {
+        assert!(
+            Args::try_parse_from(["dingoo-emu", "--debug-logging", "game.app"])
+                .unwrap()
+                .debug_logging
+        );
     }
 }

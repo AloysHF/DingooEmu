@@ -45,6 +45,7 @@ dingooemu [OPTIONS] <PATH>
 | `-s, --scale <N>` | `1`–`16` | `2` | Validated integer scaling factor for the window. |
 | `-f, --fullscreen` | flag | off | Open a borderless window at the desktop resolution. |
 | `-v, --volume <N>` | `0`–`100` | `100` | Set the host master volume; `0` mutes output. |
+| `--debug-logging` | flag | off | Enable debug-level emulator logging unless `RUST_LOG` overrides it. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -130,6 +131,9 @@ dingooemu --fullscreen path/to/game.app
 
 # Run at 35% master volume
 dingooemu --volume 35 path/to/game.app
+
+# Enable detailed emulator diagnostics
+dingooemu --debug-logging path/to/game.app
 
 # Take screenshot after 60 frames
 dingooemu --screenshot screenshot.png --screenshot-frames 60 game.app
