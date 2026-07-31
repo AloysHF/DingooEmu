@@ -83,6 +83,10 @@ struct Args {
     #[arg(short, long)]
     fullscreen: bool,
 
+    /// Master audio volume (0-100)
+    #[arg(short, long, default_value_t = 100, value_parser = clap::value_parser!(u8).range(0..=100))]
+    volume: u8,
+
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -110,6 +114,7 @@ fn main() -> anyhow::Result<()> {
     // Load the game
     log::info!("Loading game: {}", args.path);
     let mut emu = Emulator::from_path(&args.path)?;
+    emu.audio.set_master_volume(args.volume);
 
     // Start emulation
     emu.start();
@@ -281,5 +286,22 @@ mod tests {
                 .unwrap()
                 .fullscreen
         );
+    }
+
+    #[test]
+    fn volume_accepts_percent_range() {
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "game.app"])
+                .unwrap()
+                .volume,
+            100
+        );
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "--volume", "0", "game.app"])
+                .unwrap()
+                .volume,
+            0
+        );
+        assert!(Args::try_parse_from(["dingoo-emu", "--volume", "101", "game.app"]).is_err());
     }
 }

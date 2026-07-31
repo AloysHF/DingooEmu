@@ -55,6 +55,7 @@ impl AudioConfig {
 pub struct Audio {
     config: Option<AudioConfig>,
     volume: u8,
+    master_volume: u8,
     muted: bool,
     #[cfg(feature = "standalone")]
     mixer_device: Option<rodio::MixerDeviceSink>,
@@ -75,6 +76,7 @@ impl Audio {
         Self {
             config: None,
             volume: 100,
+            master_volume: 100,
             muted: false,
             #[cfg(feature = "standalone")]
             mixer_device: None,
@@ -226,6 +228,18 @@ impl Audio {
         true
     }
 
+    pub fn set_master_volume(&mut self, volume: u8) {
+        self.master_volume = volume.min(100);
+        #[cfg(feature = "standalone")]
+        if let Some(player) = self.player.as_ref() {
+            player.set_volume(self.effective_volume());
+        }
+    }
+
+    pub fn master_volume(&self) -> u8 {
+        self.master_volume
+    }
+
     pub fn set_muted(&mut self, muted: bool) -> bool {
         self.muted = muted;
         #[cfg(feature = "standalone")]
@@ -268,9 +282,9 @@ impl Audio {
             return 0.0;
         }
         if self.volume <= 100 {
-            self.volume as f32 / 100.0
+            self.volume as f32 / 100.0 * self.master_volume as f32 / 100.0
         } else {
-            self.volume as f32 / 255.0
+            self.volume as f32 / 255.0 * self.master_volume as f32 / 100.0
         }
     }
 }
@@ -364,6 +378,15 @@ mod tests {
         let samples = decode_pcm(&[0, 128, 255], SampleFormat::U8, 2);
 
         assert_eq!(samples.len(), 2);
+    }
+
+    #[test]
+    fn master_volume_is_clamped_to_percent_range() {
+        let mut audio = Audio::new();
+        audio.set_master_volume(35);
+        assert_eq!(audio.master_volume(), 35);
+        audio.set_master_volume(255);
+        assert_eq!(audio.master_volume(), 100);
     }
 
     #[cfg(not(feature = "standalone"))]
