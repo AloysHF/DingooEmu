@@ -46,6 +46,7 @@ dingooemu [OPTIONS] <PATH>
 | `-f, --fullscreen` | flag | off | Open a borderless window at the desktop resolution. |
 | `-v, --volume <N>` | `0`–`100` | `100` | Set the host master volume; `0` mutes output. |
 | `--debug-logging` | flag | off | Enable debug-level emulator logging unless `RUST_LOG` overrides it. |
+| `--remap <BUTTON:KEY>` | mapping | — | Replace a button's default keyboard mapping; may be repeated. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -67,6 +68,15 @@ dingooemu [OPTIONS] <PATH>
 | Left Shift | L shoulder |
 | Right Shift | R shoulder |
 | Esc | Exit |
+
+Button names accepted by `--remap` are `up`, `down`, `left`, `right`, `a`,
+`b`, `x`, `y`, `start`, `select`, `l`, and `r`. For example:
+
+```bash
+dingooemu --remap a:space --remap select:tab path/to/game.app
+```
+
+`escape` is reserved for exiting and cannot be assigned.
 
 ## Audio Output
 

@@ -1,7 +1,11 @@
+mod keyboard;
+
 use clap::Parser;
 use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator};
 use minifb::{Key, Window, WindowOptions};
 use std::path::PathBuf;
+
+use keyboard::{KeyboardMapper, RemapSpec};
 
 #[cfg(target_os = "windows")]
 mod screen {
@@ -91,6 +95,10 @@ struct Args {
     #[arg(long)]
     debug_logging: bool,
 
+    /// Remap a Dingoo button using BUTTON:KEY syntax
+    #[arg(long = "remap", value_name = "BUTTON:KEY")]
+    remappings: Vec<RemapSpec>,
+
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -178,11 +186,12 @@ fn main() -> anyhow::Result<()> {
 
         // Limit to ~60fps
         window.set_target_fps(60);
+        let keyboard = KeyboardMapper::new(&args.remappings);
 
         // Main loop
         while window.is_open() && !window.is_key_down(Key::Escape) {
             // Poll input
-            let buttons = poll_input(&window);
+            let buttons = keyboard.pressed_buttons(&window);
             emu.set_buttons(buttons);
 
             // Run one frame
@@ -197,50 +206,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Poll keyboard input and convert to Dingoo button mask
-fn poll_input(window: &Window) -> u32 {
-    let mut buttons = 0u32;
-
-    if window.is_key_down(Key::Up) || window.is_key_down(Key::W) {
-        buttons |= dingooemu_core::input::BUTTON_UP;
-    }
-    if window.is_key_down(Key::Down) || window.is_key_down(Key::S) {
-        buttons |= dingooemu_core::input::BUTTON_DOWN;
-    }
-    if window.is_key_down(Key::Left) || window.is_key_down(Key::A) {
-        buttons |= dingooemu_core::input::BUTTON_LEFT;
-    }
-    if window.is_key_down(Key::Right) || window.is_key_down(Key::D) {
-        buttons |= dingooemu_core::input::BUTTON_RIGHT;
-    }
-    if window.is_key_down(Key::L) {
-        buttons |= dingooemu_core::input::BUTTON_A;
-    }
-    if window.is_key_down(Key::K) {
-        buttons |= dingooemu_core::input::BUTTON_B;
-    }
-    if window.is_key_down(Key::I) {
-        buttons |= dingooemu_core::input::BUTTON_X;
-    }
-    if window.is_key_down(Key::J) {
-        buttons |= dingooemu_core::input::BUTTON_Y;
-    }
-    if window.is_key_down(Key::Key1) || window.is_key_down(Key::Q) {
-        buttons |= dingooemu_core::input::BUTTON_SELECT;
-    }
-    if window.is_key_down(Key::Key0) || window.is_key_down(Key::O) {
-        buttons |= dingooemu_core::input::BUTTON_START;
-    }
-    if window.is_key_down(Key::LeftShift) {
-        buttons |= dingooemu_core::input::BUTTON_L;
-    }
-    if window.is_key_down(Key::RightShift) {
-        buttons |= dingooemu_core::input::BUTTON_R;
-    }
-
-    buttons
 }
 
 #[cfg(test)]
@@ -318,5 +283,19 @@ mod tests {
                 .unwrap()
                 .debug_logging
         );
+    }
+
+    #[test]
+    fn repeated_remap_options_are_parsed() {
+        let args = Args::try_parse_from([
+            "dingoo-emu",
+            "--remap",
+            "a:space",
+            "--remap",
+            "select:tab",
+            "game.app",
+        ])
+        .unwrap();
+        assert_eq!(args.remappings.len(), 2);
     }
 }
