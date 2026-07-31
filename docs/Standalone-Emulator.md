@@ -48,6 +48,7 @@ dingooemu [OPTIONS] <PATH>
 | `--debug-logging` | flag | off | Enable debug-level emulator logging unless `RUST_LOG` overrides it. |
 | `--remap <BUTTON:KEY>` | mapping | — | Replace a button's default keyboard mapping; may be repeated. |
 | `--swap-ab` | flag | off | Exchange the emulated A and B button masks. |
+| `--filter <MODE>` | `nearest`, `bilinear`, `bicubic`, `xbrz` | `nearest` | Select the window scaling filter. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -81,6 +82,13 @@ dingooemu --remap a:space --remap select:tab path/to/game.app
 
 Use `--swap-ab` to keep the physical keys while exchanging their in-game A/B
 meaning. It is applied after custom key remapping.
+
+## Display Filters
+
+`nearest` preserves hard pixel edges, `bilinear` smooths adjacent pixels,
+`bicubic` uses sharper cubic interpolation, and `xbrz` applies edge-aware
+pixel-art smoothing. All modes preserve the native 4:3 aspect ratio and add
+black bars when the window or desktop has a different aspect ratio.
 
 ## Audio Output
 

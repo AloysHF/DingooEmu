@@ -1,4 +1,5 @@
 mod keyboard;
+mod scaler;
 
 use clap::Parser;
 use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator};
@@ -6,6 +7,7 @@ use minifb::{Key, Window, WindowOptions};
 use std::path::PathBuf;
 
 use keyboard::{KeyboardMapper, RemapSpec};
+use scaler::{DisplayScaler, ScaleFilter};
 
 #[cfg(target_os = "windows")]
 mod screen {
@@ -103,6 +105,10 @@ struct Args {
     #[arg(long = "swap-ab")]
     swap_ab: bool,
 
+    /// Pixel scaling filter for display output
+    #[arg(long, value_enum, default_value_t = ScaleFilter::Nearest)]
+    filter: ScaleFilter,
+
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -178,7 +184,7 @@ fn main() -> anyhow::Result<()> {
             WindowOptions {
                 resize: !args.fullscreen,
                 borderless: args.fullscreen,
-                scale_mode: minifb::ScaleMode::AspectRatioStretch,
+                scale_mode: minifb::ScaleMode::Stretch,
                 ..WindowOptions::default()
             },
         )?;
@@ -191,6 +197,7 @@ fn main() -> anyhow::Result<()> {
         // Limit to ~60fps
         window.set_target_fps(60);
         let keyboard = KeyboardMapper::new(&args.remappings, args.swap_ab);
+        let mut display_scaler = DisplayScaler::new(args.filter);
 
         // Main loop
         while window.is_open() && !window.is_key_down(Key::Escape) {
@@ -203,9 +210,17 @@ fn main() -> anyhow::Result<()> {
 
             // Get framebuffer and convert to XRGB8888
             let buffer = emu.video.to_xrgb8888();
+            let (window_width, window_height) = window.get_size();
+            let output = display_scaler.render(
+                &buffer,
+                SCREEN_WIDTH as usize,
+                SCREEN_HEIGHT as usize,
+                window_width,
+                window_height,
+            );
 
             // Update window
-            window.update_with_buffer(&buffer, SCREEN_WIDTH as usize, SCREEN_HEIGHT as usize)?;
+            window.update_with_buffer(output, window_width.max(1), window_height.max(1))?;
         }
     }
 
@@ -310,5 +325,22 @@ mod tests {
                 .unwrap()
                 .swap_ab
         );
+    }
+
+    #[test]
+    fn every_display_filter_is_parsed() {
+        for (name, expected) in [
+            ("nearest", ScaleFilter::Nearest),
+            ("bilinear", ScaleFilter::Bilinear),
+            ("bicubic", ScaleFilter::Bicubic),
+            ("xbrz", ScaleFilter::Xbrz),
+        ] {
+            assert_eq!(
+                Args::try_parse_from(["dingoo-emu", "--filter", name, "game.app"])
+                    .unwrap()
+                    .filter,
+                expected
+            );
+        }
     }
 }
