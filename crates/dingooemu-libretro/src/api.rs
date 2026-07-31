@@ -263,11 +263,15 @@ fn set_performance_level() {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CoreOptions {
     volume: u8,
+    repeat_delay: u32,
 }
 
 impl Default for CoreOptions {
     fn default() -> Self {
-        Self { volume: 100 }
+        Self {
+            volume: 100,
+            repeat_delay: 24,
+        }
     }
 }
 
@@ -276,6 +280,10 @@ fn core_option_variables() -> Vec<RetroVariable> {
         RetroVariable {
             key: c"dingooemu_volume".as_ptr(),
             value: c"Audio Volume (%); 100|90|80|70|60|50|40|30|20|10|0".as_ptr(),
+        },
+        RetroVariable {
+            key: c"dingooemu_repeat_delay".as_ptr(),
+            value: c"Key Auto-Repeat Delay (frames); 24|0|2|4|6|8|10|12|16|20|30|45|60".as_ptr(),
         },
         RetroVariable {
             key: ptr::null(),
@@ -326,12 +334,17 @@ fn read_core_options(mut get: impl FnMut(&CStr) -> Option<String>) -> CoreOption
     if let Some(volume) = get(c"dingooemu_volume").and_then(|value| value.parse::<u8>().ok()) {
         options.volume = volume.min(100);
     }
+    if let Some(delay) = get(c"dingooemu_repeat_delay").and_then(|value| value.parse::<u32>().ok())
+    {
+        options.repeat_delay = delay;
+    }
     options
 }
 
 fn apply_core_options(emulator: &mut Emulator) {
     let options = read_core_options(get_core_option);
     emulator.audio.set_master_volume(options.volume);
+    emulator.input.set_repeat_timing(options.repeat_delay, 6);
 }
 
 fn input_descriptors() -> [RetroInputDescriptor; 13] {
@@ -517,6 +530,18 @@ mod tests {
         let options =
             read_core_options(|key| (key == c"dingooemu_volume").then(|| "30".to_string()));
         assert_eq!(options.volume, 30);
+    }
+
+    #[test]
+    fn repeat_delay_option_supports_live_typematic_control() {
+        let variables = core_option_variables();
+        assert_eq!(
+            unsafe { CStr::from_ptr(variables[1].key) },
+            c"dingooemu_repeat_delay"
+        );
+        let options =
+            read_core_options(|key| (key == c"dingooemu_repeat_delay").then(|| "12".to_string()));
+        assert_eq!(options.repeat_delay, 12);
     }
 
     #[test]

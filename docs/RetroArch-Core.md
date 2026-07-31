@@ -56,6 +56,7 @@ features unavailable so RetroArch does not present unsupported capabilities.
 | Option | Values | Default | Behavior |
 |---|---|---|---|
 | Audio Volume (%) | `100` to `0` in steps of 10 | `100` | Applies a host master gain without replacing the game's own volume. |
+| Key Auto-Repeat Delay | frame counts including `0` | `24` | Sets how long a held button waits before repeating; `0` disables repeat. |
 
 Core option changes are applied while content is running and restored after a
 RetroArch reset.
