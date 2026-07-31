@@ -42,7 +42,7 @@ dingooemu [OPTIONS] <PATH>
 | Option | Value | Default | Description |
 |---|---|---|---|
 | `<PATH>` | path | *required* | Path to the `.app` game file. |
-| `-s, --scale <N>` | `1`–`16` | `2` | Integer scaling factor for the window. |
+| `-s, --scale <N>` | `1`–`16` | `2` | Validated integer scaling factor for the window. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
 | `--screenshot-frames <N>` | integer | `30` | Number of frames to run before the screenshot is taken. |

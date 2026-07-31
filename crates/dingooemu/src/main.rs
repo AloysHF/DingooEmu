@@ -15,7 +15,12 @@ struct Args {
     path: String,
 
     /// Window scale factor
-    #[arg(short, long, default_value_t = 2)]
+    #[arg(
+        short,
+        long,
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u32).range(1..=16)
+    )]
     scale: u32,
 
     /// Run in headless mode (no window)
@@ -149,4 +154,31 @@ fn poll_input(window: &Window) -> u32 {
     }
 
     buttons
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_accepts_supported_range() {
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "--scale", "1", "game.app"])
+                .unwrap()
+                .scale,
+            1
+        );
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "--scale", "16", "game.app"])
+                .unwrap()
+                .scale,
+            16
+        );
+    }
+
+    #[test]
+    fn scale_rejects_zero_and_excessive_values() {
+        assert!(Args::try_parse_from(["dingoo-emu", "--scale", "0", "game.app"]).is_err());
+        assert!(Args::try_parse_from(["dingoo-emu", "--scale", "17", "game.app"]).is_err());
+    }
 }
