@@ -60,6 +60,7 @@ features unavailable so RetroArch does not present unsupported capabilities.
 | Key Auto-Repeat Period | `1`–`30` frame choices | `6` | Sets the interval between repeat press events. |
 | Swap A/B Buttons | `disabled`, `enabled` | `disabled` | Exchanges the emulated A and B button meanings. |
 | CPU/HLE Debug Logging | `disabled`, `enabled` | `disabled` | Enables detailed interpreter and HLE records in the frontend log. |
+| Unknown MIPS Instruction Policy | `skip`, `stop` | `skip` | Logs and skips unsupported instructions or stops with an execution error. |
 
 Core option changes are applied while content is running and restored after a
 RetroArch reset.

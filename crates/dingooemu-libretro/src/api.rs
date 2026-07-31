@@ -2,6 +2,7 @@ use std::ffi::{c_void, CStr};
 use std::os::raw::{c_char, c_uint};
 use std::ptr;
 
+use dingooemu_core::cpu::UnknownInstructionPolicy;
 use dingooemu_core::input::{
     BUTTON_A, BUTTON_B, BUTTON_DOWN, BUTTON_L, BUTTON_LEFT, BUTTON_R, BUTTON_RIGHT, BUTTON_SELECT,
     BUTTON_START, BUTTON_UP, BUTTON_X, BUTTON_Y,
@@ -267,6 +268,7 @@ struct CoreOptions {
     repeat_period: u32,
     swap_ab: bool,
     debug_logging: bool,
+    unknown_instruction_policy: UnknownInstructionPolicy,
 }
 
 impl Default for CoreOptions {
@@ -277,6 +279,7 @@ impl Default for CoreOptions {
             repeat_period: 6,
             swap_ab: false,
             debug_logging: false,
+            unknown_instruction_policy: UnknownInstructionPolicy::Skip,
         }
     }
 }
@@ -302,6 +305,10 @@ fn core_option_variables() -> Vec<RetroVariable> {
         RetroVariable {
             key: c"dingooemu_debug_logging".as_ptr(),
             value: c"CPU/HLE Debug Logging; disabled|enabled".as_ptr(),
+        },
+        RetroVariable {
+            key: c"dingooemu_unknown_instruction".as_ptr(),
+            value: c"Unknown MIPS Instruction Policy; skip|stop".as_ptr(),
         },
         RetroVariable {
             key: ptr::null(),
@@ -367,6 +374,13 @@ fn read_core_options(mut get: impl FnMut(&CStr) -> Option<String>) -> CoreOption
     if let Some(debug) = get(c"dingooemu_debug_logging") {
         options.debug_logging = debug == "enabled";
     }
+    if let Some(policy) = get(c"dingooemu_unknown_instruction") {
+        options.unknown_instruction_policy = if policy == "stop" {
+            UnknownInstructionPolicy::Stop
+        } else {
+            UnknownInstructionPolicy::Skip
+        };
+    }
     options
 }
 
@@ -378,6 +392,18 @@ fn apply_core_options(emulator: &mut Emulator) {
         .set_repeat_timing(options.repeat_delay, options.repeat_period);
     emulator.input.set_swap_ab(options.swap_ab);
     crate::logger::set_debug_logging(options.debug_logging);
+    emulator
+        .cpu
+        .set_unknown_instruction_policy(options.unknown_instruction_policy);
+    log::info!(
+        "Core options applied: volume={} repeat_delay={} repeat_period={} swap_ab={} debug_logging={} unknown_instruction={:?}",
+        options.volume,
+        options.repeat_delay,
+        options.repeat_period,
+        options.swap_ab,
+        options.debug_logging,
+        options.unknown_instruction_policy
+    );
 }
 
 fn input_descriptors() -> [RetroInputDescriptor; 13] {
@@ -618,6 +644,26 @@ mod tests {
                 (key == c"dingooemu_debug_logging").then(|| "enabled".to_string())
             })
             .debug_logging
+        );
+    }
+
+    #[test]
+    fn unknown_instruction_option_preserves_skip_default() {
+        let variables = core_option_variables();
+        assert_eq!(
+            unsafe { CStr::from_ptr(variables[5].key) },
+            c"dingooemu_unknown_instruction"
+        );
+        assert_eq!(
+            read_core_options(|_| None).unknown_instruction_policy,
+            UnknownInstructionPolicy::Skip
+        );
+        assert_eq!(
+            read_core_options(|key| {
+                (key == c"dingooemu_unknown_instruction").then(|| "stop".to_string())
+            })
+            .unknown_instruction_policy,
+            UnknownInstructionPolicy::Stop
         );
     }
 

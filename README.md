@@ -54,8 +54,9 @@ cargo build -p dingooemu-libretro --release
 
 The core file will be produced at `target/release/dingooemu_libretro.dll`
 (Windows) or `libdingooemu_libretro.so` (Linux). Basic gameplay features are
-available; save states, cheats, memory exposure, and core options are not yet
-implemented.
+available, including live volume, input-repeat, A/B layout, logging, and
+unknown-instruction core options. Save states, cheats, and memory exposure are
+not yet implemented.
 
 See the [RetroArch Core](docs/RetroArch-Core.md) guide for installation,
 supported features, and RetroPad mapping.
