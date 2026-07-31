@@ -43,6 +43,7 @@ dingooemu [OPTIONS] <PATH>
 |---|---|---|---|
 | `<PATH>` | path | *required* | Path to the `.app` game file. |
 | `-s, --scale <N>` | `1`–`16` | `2` | Validated integer scaling factor for the window. |
+| `-f, --fullscreen` | flag | off | Open a borderless window at the desktop resolution. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -122,6 +123,9 @@ dingooemu --scale 2 path/to/game.app
 
 # 4x scaling
 dingooemu --scale 4 path/to/game.app
+
+# Borderless fullscreen mode
+dingooemu --fullscreen path/to/game.app
 
 # Take screenshot after 60 frames
 dingooemu --screenshot screenshot.png --screenshot-frames 60 game.app

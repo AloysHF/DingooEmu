@@ -3,6 +3,62 @@ use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator};
 use minifb::{Key, Window, WindowOptions};
 use std::path::PathBuf;
 
+#[cfg(target_os = "windows")]
+mod screen {
+    unsafe extern "system" {
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+
+    pub fn size() -> (usize, usize) {
+        unsafe { (GetSystemMetrics(0) as usize, GetSystemMetrics(1) as usize) }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod screen {
+    type Display = *mut core::ffi::c_void;
+
+    #[link(name = "X11")]
+    unsafe extern "system" {
+        fn XOpenDisplay(name: *const u8) -> Display;
+        fn XCloseDisplay(display: Display) -> i32;
+        fn XDisplayWidth(display: Display, screen: i32) -> i32;
+        fn XDisplayHeight(display: Display, screen: i32) -> i32;
+    }
+
+    pub fn size() -> (usize, usize) {
+        unsafe {
+            let display = XOpenDisplay(std::ptr::null());
+            if display.is_null() {
+                return (800, 600);
+            }
+            let size = (
+                XDisplayWidth(display, 0) as usize,
+                XDisplayHeight(display, 0) as usize,
+            );
+            let _ = XCloseDisplay(display);
+            size
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod screen {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayPixelsWide(display: u32) -> usize;
+        fn CGDisplayPixelsHigh(display: u32) -> usize;
+    }
+
+    pub fn size() -> (usize, usize) {
+        unsafe {
+            let display = CGMainDisplayID();
+            (CGDisplayPixelsWide(display), CGDisplayPixelsHigh(display))
+        }
+    }
+}
+
 /// Dingoo A320 Emulator
 #[derive(Parser, Debug)]
 #[command(
@@ -22,6 +78,10 @@ struct Args {
         value_parser = clap::value_parser!(u32).range(1..=16)
     )]
     scale: u32,
+
+    /// Run in fullscreen mode
+    #[arg(short, long)]
+    fullscreen: bool,
 
     /// Run in headless mode (no window)
     #[arg(long)]
@@ -79,19 +139,31 @@ fn main() -> anyhow::Result<()> {
         log::info!("Headless run complete: {} frames", args.frames);
     } else {
         // Windowed mode
-        let width = (SCREEN_WIDTH * args.scale) as usize;
-        let height = (SCREEN_HEIGHT * args.scale) as usize;
+        let (width, height) = if args.fullscreen {
+            screen::size()
+        } else {
+            (
+                (SCREEN_WIDTH * args.scale) as usize,
+                (SCREEN_HEIGHT * args.scale) as usize,
+            )
+        };
 
         let mut window = Window::new(
             "Dingoo A320 Emulator",
             width,
             height,
             WindowOptions {
-                resize: false,
+                resize: !args.fullscreen,
+                borderless: args.fullscreen,
                 scale_mode: minifb::ScaleMode::AspectRatioStretch,
                 ..WindowOptions::default()
             },
         )?;
+
+        if args.fullscreen {
+            window.topmost(true);
+            window.set_position(0, 0);
+        }
 
         // Limit to ~60fps
         window.set_target_fps(60);
@@ -199,6 +271,15 @@ mod tests {
                 .unwrap()
                 .frames,
             12
+        );
+    }
+
+    #[test]
+    fn fullscreen_flag_is_parsed() {
+        assert!(
+            Args::try_parse_from(["dingoo-emu", "--fullscreen", "game.app"])
+                .unwrap()
+                .fullscreen
         );
     }
 }
