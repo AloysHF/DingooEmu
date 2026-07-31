@@ -1,23 +1,31 @@
-use std::os::raw::{c_char, c_int, c_uint};
+use std::ffi::c_void;
+use std::os::raw::{c_char, c_uint};
 
-/// System info structure
+pub type RetroEnvironmentCallback = Option<unsafe extern "C" fn(c_uint, *mut c_void) -> bool>;
+pub type RetroVideoRefreshCallback =
+    Option<unsafe extern "C" fn(*const c_void, c_uint, c_uint, usize)>;
+pub type RetroAudioSampleCallback = Option<unsafe extern "C" fn(i16, i16)>;
+pub type RetroAudioSampleBatchCallback = Option<unsafe extern "C" fn(*const i16, usize) -> usize>;
+pub type RetroInputPollCallback = Option<unsafe extern "C" fn()>;
+pub type RetroInputStateCallback =
+    Option<unsafe extern "C" fn(c_uint, c_uint, c_uint, c_uint) -> i16>;
+pub type RetroLogPrintfCallback = Option<unsafe extern "C" fn(c_uint, *const c_char)>;
+
 #[repr(C)]
 pub struct RetroSystemInfo {
     pub library_name: *const c_char,
     pub library_version: *const c_char,
     pub valid_extensions: *const c_char,
-    pub block_extract: bool,
     pub need_fullpath: bool,
+    pub block_extract: bool,
 }
 
-/// System A/V info structure
 #[repr(C)]
 pub struct RetroSystemAvInfo {
     pub geometry: RetroGameGeometry,
     pub timing: RetroSystemTiming,
 }
 
-/// Game geometry
 #[repr(C)]
 pub struct RetroGameGeometry {
     pub base_width: c_uint,
@@ -27,41 +35,31 @@ pub struct RetroGameGeometry {
     pub aspect_ratio: f32,
 }
 
-/// System timing
 #[repr(C)]
 pub struct RetroSystemTiming {
     pub fps: f64,
     pub sample_rate: f64,
 }
 
-/// Game info structure
 #[repr(C)]
 pub struct RetroGameInfo {
     pub path: *const c_char,
-    pub data: *const u8,
+    pub data: *const c_void,
     pub size: usize,
     pub meta: *const c_char,
 }
 
-/// Input descriptor
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct RetroInputDescriptor {
     pub port: c_uint,
     pub device: c_uint,
     pub index: c_uint,
+    pub id: c_uint,
     pub description: *const c_char,
 }
 
-/// Sensor interface
 #[repr(C)]
-pub struct RetroSensorInterface {
-    pub api_version: c_int,
-    pub set_sensor_state: Option<unsafe extern "C" fn(c_uint, c_int, c_uint) -> bool>,
-    pub poll_sensor_state: Option<unsafe extern "C" fn(c_uint) -> bool>,
-}
-
-/// Rumble interface
-#[repr(C)]
-pub struct RetroRumbleInterface {
-    pub set_rumble_state: Option<unsafe extern "C" fn(c_uint, c_uint, u16) -> bool>,
+pub struct RetroLogCallback {
+    pub log: RetroLogPrintfCallback,
 }

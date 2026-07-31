@@ -20,10 +20,9 @@ RetroArch's `cores/` directory, and copy `dingooemu_libretro.info` to its
 cargo build -p dingooemu-libretro --release
 ```
 
-Cargo names the cdylib after its lib target, so this produces `dingooemu.dll`
-on Windows (`libdingooemu.so` on Linux) under `target/release/`. Rename it to
-`dingooemu_libretro.<ext>` before dropping it into RetroArch's `cores/`
-directory.
+Cargo names the cdylib after its lib target, producing
+`dingooemu_libretro.dll` on Windows (`libdingooemu_libretro.so` on Linux)
+under `target/release/`.
 
 ## Mobile Platforms
 
@@ -45,6 +44,11 @@ platform-specific installation requirements:
 - PCM audio output resampled to 22050 Hz stereo
 - RetroPad input handling
 - `.app` content loading
+- Cold reset through RetroArch's **Reset** command
+
+The current basic core does not yet provide save states, cheats, frontend
+memory exposure, core options, or subsystem loading. The metadata marks these
+features unavailable so RetroArch does not present unsupported capabilities.
 
 ## RetroPad Button Mapping
 

@@ -92,7 +92,7 @@ pub enum ResourceKind {
 }
 
 /// Complete parsed .app file structure
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AppImage {
     /// Raw file data
     pub data: Vec<u8>,

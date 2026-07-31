@@ -27,7 +27,7 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
 - **Screenshot mode** — Headless frame capture for automated testing and preview generation
 - **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`
-- **RetroArch integration** — libretro core for use with RetroArch frontend
+- **RetroArch integration** — libretro core with video, audio, RetroPad input, and reset support
 - **Cross-platform** — Windows, Linux, macOS
 
 ## Usage
@@ -52,7 +52,10 @@ Build the libretro core and load it in RetroArch:
 cargo build -p dingooemu-libretro --release
 ```
 
-The core file will be produced at `target/release/dingooemu_libretro.dll` (Windows) or `libdingooemu_libretro.so` (Linux).
+The core file will be produced at `target/release/dingooemu_libretro.dll`
+(Windows) or `libdingooemu_libretro.so` (Linux). Basic gameplay features are
+available; save states, cheats, memory exposure, and core options are not yet
+implemented.
 
 See the [RetroArch Core](docs/RetroArch-Core.md) guide for installation,
 supported features, and RetroPad mapping.
@@ -76,10 +79,9 @@ The binary is produced at `target/release/dingooemu` (`.exe` on Windows).
 cargo build -p dingooemu-libretro --release
 ```
 
-Cargo names the cdylib after its lib target, so this produces `dingooemu.dll`
-on Windows (`libdingooemu.so` on Linux) under `target/release/`. RetroArch
-expects the core file to be named `dingooemu_libretro.<ext>`, so rename it
-accordingly before dropping it into RetroArch's `cores/` directory.
+Cargo names the cdylib after its lib target, producing
+`dingooemu_libretro.dll` on Windows (`libdingooemu_libretro.so` on Linux)
+under `target/release/`.
 
 ## Testing
 

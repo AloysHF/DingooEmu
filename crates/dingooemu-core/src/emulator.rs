@@ -305,6 +305,22 @@ impl Emulator {
         log::info!("Emulator stopped");
     }
 
+    /// Rebuild all mutable runtime state from the loaded app image.
+    pub fn reset(&mut self) -> Result<()> {
+        let app = self
+            .app
+            .clone()
+            .ok_or_else(|| "cannot reset an emulator without a loaded app".to_string())?;
+        let was_running = self.is_running();
+        let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
+        if was_running {
+            replacement.start();
+        }
+        *self = replacement;
+        log::info!("Emulator reset");
+        Ok(())
+    }
+
     /// Run one frame of emulation
     pub fn tick(&mut self) -> Result<()> {
         self.framebuffer_submitted = false;
@@ -1467,19 +1483,16 @@ impl Emulator {
     fn sync_framebuffer(&mut self) {
         let fb_data = &self.memory.framebuffer()[..crate::video::FRAMEBUFFER_SIZE];
 
-        if fb_data.iter().any(|&byte| byte != 0) {
-            self.framebuffer_submitted = true;
-            // Copy to video subsystem
-            let dst = self.video.framebuffer_mut();
-            dst.copy_from_slice(fb_data);
-            if log::log_enabled!(log::Level::Trace) {
-                let non_zero_count = fb_data.iter().filter(|&&byte| byte != 0).count();
-                log::trace!(
-                    "  sync_framebuffer: {}/{} non-zero bytes",
-                    non_zero_count,
-                    fb_data.len()
-                );
-            }
+        self.framebuffer_submitted = true;
+        let dst = self.video.framebuffer_mut();
+        dst.copy_from_slice(fb_data);
+        if log::log_enabled!(log::Level::Trace) {
+            let non_zero_count = fb_data.iter().filter(|&&byte| byte != 0).count();
+            log::trace!(
+                "  sync_framebuffer: {}/{} non-zero bytes",
+                non_zero_count,
+                fb_data.len()
+            );
         }
     }
 
@@ -1551,11 +1564,44 @@ impl Default for Emulator {
 mod tests {
     use super::*;
 
+    fn minimal_app() -> AppImage {
+        let mut data = vec![0u8; 132];
+        data[0..4].copy_from_slice(b"CCDL");
+        data[0x20..0x24].copy_from_slice(b"IMPT");
+        data[0x40..0x44].copy_from_slice(b"EXPT");
+        data[0x60..0x64].copy_from_slice(b"RAWD");
+        data[0x68..0x6c].copy_from_slice(&128u32.to_le_bytes());
+        data[0x6c..0x70].copy_from_slice(&4u32.to_le_bytes());
+        data[0x74..0x78].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        data[0x78..0x7c].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        data[0x7c..0x80].copy_from_slice(&4u32.to_le_bytes());
+        AppImage::parse(&data).unwrap()
+    }
+
     #[test]
     fn test_emulator_creation() {
         let emu = Emulator::default();
         assert_eq!(emu.frame_count(), 0);
         assert!(!emu.is_running());
+    }
+
+    #[test]
+    fn test_reset_rebuilds_loaded_runtime_state() {
+        let mut emu = Emulator::from_app(minimal_app()).unwrap();
+        emu.start();
+        emu.memory.write_u32(0x1000, 0x1234_5678).unwrap();
+        emu.set_buttons(crate::input::BUTTON_A);
+        emu.frame_count = 42;
+        emu.cycle_count = 123;
+
+        emu.reset().unwrap();
+
+        assert!(emu.is_running());
+        assert_eq!(emu.cpu.regs.pc, 0x8000_0000);
+        assert_eq!(emu.memory.read_u32(0x1000).unwrap(), 0);
+        assert_eq!(emu.input.buttons(), 0);
+        assert_eq!(emu.frame_count, 0);
+        assert_eq!(emu.cycle_count, 0);
     }
 
     #[test]
@@ -1599,9 +1645,7 @@ mod tests {
             .insert(hook_address, "lcd_set_frame".to_string());
         let (word, mask) = hook_filter_location(hook_address);
         emu.hook_filter[word] |= mask;
-        emu.memory
-            .write_u8(crate::video::VM_LCD_FB_ADDRESS, 1)
-            .unwrap();
+        emu.video.framebuffer_mut().fill(0xff);
         emu.cpu.regs.pc = hook_address;
         emu.cpu.regs.write(31, hook_address + 4);
         emu.start();
@@ -1611,6 +1655,7 @@ mod tests {
         assert_eq!(emu.cpu.regs.pc, hook_address + 4);
         assert_eq!(emu.cpu.instruction_count, 0);
         assert_eq!(emu.cycle_count, CYCLES_PER_FRAME);
+        assert!(emu.video.framebuffer().iter().all(|&byte| byte == 0));
     }
 
     #[test]
