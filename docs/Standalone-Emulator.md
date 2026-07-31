@@ -47,6 +47,7 @@ dingooemu [OPTIONS] <PATH>
 | `-v, --volume <N>` | `0`–`100` | `100` | Set the host master volume; `0` mutes output. |
 | `--debug-logging` | flag | off | Enable debug-level emulator logging unless `RUST_LOG` overrides it. |
 | `--remap <BUTTON:KEY>` | mapping | — | Replace a button's default keyboard mapping; may be repeated. |
+| `--swap-ab` | flag | off | Exchange the emulated A and B button masks. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -77,6 +78,9 @@ dingooemu --remap a:space --remap select:tab path/to/game.app
 ```
 
 `escape` is reserved for exiting and cannot be assigned.
+
+Use `--swap-ab` to keep the physical keys while exchanging their in-game A/B
+meaning. It is applied after custom key remapping.
 
 ## Audio Output
 

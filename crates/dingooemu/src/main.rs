@@ -99,6 +99,10 @@ struct Args {
     #[arg(long = "remap", value_name = "BUTTON:KEY")]
     remappings: Vec<RemapSpec>,
 
+    /// Swap the emulated A and B buttons
+    #[arg(long = "swap-ab")]
+    swap_ab: bool,
+
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -186,7 +190,7 @@ fn main() -> anyhow::Result<()> {
 
         // Limit to ~60fps
         window.set_target_fps(60);
-        let keyboard = KeyboardMapper::new(&args.remappings);
+        let keyboard = KeyboardMapper::new(&args.remappings, args.swap_ab);
 
         // Main loop
         while window.is_open() && !window.is_key_down(Key::Escape) {
@@ -297,5 +301,14 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.remappings.len(), 2);
+    }
+
+    #[test]
+    fn swap_ab_flag_is_parsed() {
+        assert!(
+            Args::try_parse_from(["dingoo-emu", "--swap-ab", "game.app"])
+                .unwrap()
+                .swap_ab
+        );
     }
 }

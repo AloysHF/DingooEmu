@@ -49,16 +49,17 @@ impl FromStr for RemapSpec {
 
 pub struct KeyboardMapper {
     mappings: Vec<(u32, Key)>,
+    swap_ab: bool,
 }
 
 impl KeyboardMapper {
-    pub fn new(remappings: &[RemapSpec]) -> Self {
+    pub fn new(remappings: &[RemapSpec], swap_ab: bool) -> Self {
         let mut mappings = DEFAULT_MAPPINGS.to_vec();
         for remapping in remappings {
             mappings.retain(|(button, _)| *button != remapping.button);
             mappings.push((remapping.button, remapping.key));
         }
-        Self { mappings }
+        Self { mappings, swap_ab }
     }
 
     pub fn pressed_buttons(&self, window: &Window) -> u32 {
@@ -66,10 +67,19 @@ impl KeyboardMapper {
     }
 
     fn buttons_from_key_state(&self, mut is_down: impl FnMut(Key) -> bool) -> u32 {
-        self.mappings
+        let buttons = self
+            .mappings
             .iter()
             .filter(|(_, key)| is_down(*key))
-            .fold(0, |buttons, (button, _)| buttons | button)
+            .fold(0, |buttons, (button, _)| buttons | button);
+        if self.swap_ab {
+            let without_ab = buttons & !(BUTTON_A | BUTTON_B);
+            without_ab
+                | if buttons & BUTTON_A != 0 { BUTTON_B } else { 0 }
+                | if buttons & BUTTON_B != 0 { BUTTON_A } else { 0 }
+        } else {
+            buttons
+        }
     }
 }
 
@@ -172,12 +182,19 @@ mod tests {
 
     #[test]
     fn remapping_replaces_all_default_keys_for_a_button() {
-        let mapper = KeyboardMapper::new(&["a:space".parse().unwrap()]);
+        let mapper = KeyboardMapper::new(&["a:space".parse().unwrap()], false);
         assert_eq!(
             mapper.buttons_from_key_state(|key| key == Key::Space),
             BUTTON_A
         );
         assert_eq!(mapper.buttons_from_key_state(|key| key == Key::L), 0);
+    }
+
+    #[test]
+    fn swap_ab_exchanges_logical_button_masks() {
+        let mapper = KeyboardMapper::new(&[], true);
+        assert_eq!(mapper.buttons_from_key_state(|key| key == Key::L), BUTTON_B);
+        assert_eq!(mapper.buttons_from_key_state(|key| key == Key::K), BUTTON_A);
     }
 
     #[test]
