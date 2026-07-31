@@ -45,10 +45,20 @@ platform-specific installation requirements:
 - RetroPad input handling
 - `.app` content loading
 - Cold reset through RetroArch's **Reset** command
+- Live core options, including host master volume
 
 The current basic core does not yet provide save states, cheats, frontend
-memory exposure, core options, or subsystem loading. The metadata marks these
+memory exposure or subsystem loading. The metadata marks these
 features unavailable so RetroArch does not present unsupported capabilities.
+
+## Core Options
+
+| Option | Values | Default | Behavior |
+|---|---|---|---|
+| Audio Volume (%) | `100` to `0` in steps of 10 | `100` | Applies a host master gain without replacing the game's own volume. |
+
+Core option changes are applied while content is running and restored after a
+RetroArch reset.
 
 ## RetroPad Button Mapping
 

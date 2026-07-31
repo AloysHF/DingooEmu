@@ -63,3 +63,10 @@ pub struct RetroInputDescriptor {
 pub struct RetroLogCallback {
     pub log: RetroLogPrintfCallback,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RetroVariable {
+    pub key: *const c_char,
+    pub value: *const c_char,
+}

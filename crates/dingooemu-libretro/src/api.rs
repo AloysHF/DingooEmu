@@ -21,6 +21,7 @@ const FRAMES_PER_SECOND: f64 = 60.0;
 #[no_mangle]
 pub extern "C" fn retro_set_environment(callback: RetroEnvironmentCallback) {
     callbacks::set_environment(callback);
+    set_core_options();
 }
 
 #[no_mangle]
@@ -137,6 +138,7 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
 
     match Emulator::from_path(path) {
         Ok(mut emulator) => {
+            apply_core_options(&mut emulator);
             emulator.start();
             unsafe { EMULATOR = Some(emulator) };
             log::info!("Loaded content: {path}");
@@ -165,6 +167,11 @@ pub extern "C" fn retro_unload_game() {
 
 #[no_mangle]
 pub extern "C" fn retro_run() {
+    if core_options_changed() {
+        if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
+            apply_core_options(emulator);
+        }
+    }
     let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
         return;
     };
@@ -201,6 +208,8 @@ pub extern "C" fn retro_reset() {
     };
     if let Err(error) = emulator.reset() {
         log::error!("Reset failed: {error}");
+    } else {
+        apply_core_options(emulator);
     }
 }
 
@@ -249,6 +258,80 @@ fn set_performance_level() {
         RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL,
         (&mut level as *mut u32).cast(),
     );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CoreOptions {
+    volume: u8,
+}
+
+impl Default for CoreOptions {
+    fn default() -> Self {
+        Self { volume: 100 }
+    }
+}
+
+fn core_option_variables() -> Vec<RetroVariable> {
+    vec![
+        RetroVariable {
+            key: c"dingooemu_volume".as_ptr(),
+            value: c"Audio Volume (%); 100|90|80|70|60|50|40|30|20|10|0".as_ptr(),
+        },
+        RetroVariable {
+            key: ptr::null(),
+            value: ptr::null(),
+        },
+    ]
+}
+
+fn set_core_options() {
+    let variables = core_option_variables();
+    callbacks::environment(
+        RETRO_ENVIRONMENT_SET_VARIABLES,
+        variables.as_ptr().cast_mut().cast(),
+    );
+}
+
+fn get_core_option(key: &CStr) -> Option<String> {
+    let mut variable = RetroVariable {
+        key: key.as_ptr(),
+        value: ptr::null(),
+    };
+    let success = callbacks::environment(
+        RETRO_ENVIRONMENT_GET_VARIABLE,
+        (&mut variable as *mut RetroVariable).cast(),
+    );
+    if success && !variable.value.is_null() {
+        unsafe {
+            CStr::from_ptr(variable.value)
+                .to_str()
+                .ok()
+                .map(str::to_owned)
+        }
+    } else {
+        None
+    }
+}
+
+fn core_options_changed() -> bool {
+    let mut updated = false;
+    callbacks::environment(
+        RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE,
+        (&mut updated as *mut bool).cast(),
+    ) && updated
+}
+
+fn read_core_options(mut get: impl FnMut(&CStr) -> Option<String>) -> CoreOptions {
+    let mut options = CoreOptions::default();
+    if let Some(volume) = get(c"dingooemu_volume").and_then(|value| value.parse::<u8>().ok()) {
+        options.volume = volume.min(100);
+    }
+    options
+}
+
+fn apply_core_options(emulator: &mut Emulator) {
+    let options = read_core_options(get_core_option);
+    emulator.audio.set_master_volume(options.volume);
 }
 
 fn input_descriptors() -> [RetroInputDescriptor; 13] {
@@ -344,6 +427,8 @@ mod tests {
                 true
             }
             RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL => true,
+            RETRO_ENVIRONMENT_SET_VARIABLES => true,
+            RETRO_ENVIRONMENT_GET_VARIABLE | RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE => false,
             RETRO_ENVIRONMENT_GET_LOG_INTERFACE => false,
             _ => false,
         }
@@ -414,6 +499,24 @@ mod tests {
             .iter()
             .all(|descriptor| !descriptor.description.is_null()));
         assert!(descriptors[12].description.is_null());
+    }
+
+    #[test]
+    fn volume_core_option_has_stable_key_and_default() {
+        let variables = core_option_variables();
+        assert_eq!(
+            unsafe { CStr::from_ptr(variables[0].key) },
+            c"dingooemu_volume"
+        );
+        assert!(unsafe { CStr::from_ptr(variables[0].value) }
+            .to_str()
+            .unwrap()
+            .ends_with("; 100|90|80|70|60|50|40|30|20|10|0"));
+        assert!(variables.last().unwrap().key.is_null());
+
+        let options =
+            read_core_options(|key| (key == c"dingooemu_volume").then(|| "30".to_string()));
+        assert_eq!(options.volume, 30);
     }
 
     #[test]
