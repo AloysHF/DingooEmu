@@ -59,6 +59,7 @@ features unavailable so RetroArch does not present unsupported capabilities.
 | Key Auto-Repeat Delay | frame counts including `0` | `24` | Sets how long a held button waits before repeating; `0` disables repeat. |
 | Key Auto-Repeat Period | `1`–`30` frame choices | `6` | Sets the interval between repeat press events. |
 | Swap A/B Buttons | `disabled`, `enabled` | `disabled` | Exchanges the emulated A and B button meanings. |
+| CPU/HLE Debug Logging | `disabled`, `enabled` | `disabled` | Enables detailed interpreter and HLE records in the frontend log. |
 
 Core option changes are applied while content is running and restored after a
 RetroArch reset.

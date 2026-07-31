@@ -266,6 +266,7 @@ struct CoreOptions {
     repeat_delay: u32,
     repeat_period: u32,
     swap_ab: bool,
+    debug_logging: bool,
 }
 
 impl Default for CoreOptions {
@@ -275,6 +276,7 @@ impl Default for CoreOptions {
             repeat_delay: 24,
             repeat_period: 6,
             swap_ab: false,
+            debug_logging: false,
         }
     }
 }
@@ -296,6 +298,10 @@ fn core_option_variables() -> Vec<RetroVariable> {
         RetroVariable {
             key: c"dingooemu_swap_ab".as_ptr(),
             value: c"Swap A/B Buttons; disabled|enabled".as_ptr(),
+        },
+        RetroVariable {
+            key: c"dingooemu_debug_logging".as_ptr(),
+            value: c"CPU/HLE Debug Logging; disabled|enabled".as_ptr(),
         },
         RetroVariable {
             key: ptr::null(),
@@ -358,6 +364,9 @@ fn read_core_options(mut get: impl FnMut(&CStr) -> Option<String>) -> CoreOption
     if let Some(swap) = get(c"dingooemu_swap_ab") {
         options.swap_ab = swap == "enabled";
     }
+    if let Some(debug) = get(c"dingooemu_debug_logging") {
+        options.debug_logging = debug == "enabled";
+    }
     options
 }
 
@@ -368,6 +377,7 @@ fn apply_core_options(emulator: &mut Emulator) {
         .input
         .set_repeat_timing(options.repeat_delay, options.repeat_period);
     emulator.input.set_swap_ab(options.swap_ab);
+    crate::logger::set_debug_logging(options.debug_logging);
 }
 
 fn input_descriptors() -> [RetroInputDescriptor; 13] {
@@ -592,6 +602,22 @@ mod tests {
                 (key == c"dingooemu_swap_ab").then(|| "enabled".to_string())
             })
             .swap_ab
+        );
+    }
+
+    #[test]
+    fn debug_logging_option_defaults_to_disabled() {
+        let variables = core_option_variables();
+        assert_eq!(
+            unsafe { CStr::from_ptr(variables[4].key) },
+            c"dingooemu_debug_logging"
+        );
+        assert!(!read_core_options(|_| None).debug_logging);
+        assert!(
+            read_core_options(|key| {
+                (key == c"dingooemu_debug_logging").then(|| "enabled".to_string())
+            })
+            .debug_logging
         );
     }
 

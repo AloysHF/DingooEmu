@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::callbacks;
 use crate::constants::{RETRO_LOG_DEBUG, RETRO_LOG_ERROR, RETRO_LOG_INFO, RETRO_LOG_WARN};
@@ -6,10 +7,11 @@ use crate::constants::{RETRO_LOG_DEBUG, RETRO_LOG_ERROR, RETRO_LOG_INFO, RETRO_L
 struct LibretroLogger;
 
 static LOGGER: LibretroLogger = LibretroLogger;
+static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 
 impl log::Log for LibretroLogger {
-    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
-        true
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info || DEBUG_LOGGING.load(Ordering::Relaxed)
     }
 
     fn log(&self, record: &log::Record<'_>) {
@@ -34,6 +36,28 @@ impl log::Log for LibretroLogger {
 
 pub fn initialize() {
     if log::set_logger(&LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Info);
+        log::set_max_level(log::LevelFilter::Debug);
+    }
+}
+
+pub fn set_debug_logging(enabled: bool) {
+    DEBUG_LOGGING.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log::Log;
+
+    #[test]
+    fn debug_records_follow_live_setting() {
+        let debug = log::Metadata::builder().level(log::Level::Debug).build();
+        let info = log::Metadata::builder().level(log::Level::Info).build();
+        set_debug_logging(false);
+        assert!(!LOGGER.enabled(&debug));
+        assert!(LOGGER.enabled(&info));
+        set_debug_logging(true);
+        assert!(LOGGER.enabled(&debug));
+        set_debug_logging(false);
     }
 }
