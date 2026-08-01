@@ -1206,9 +1206,6 @@ impl Emulator {
         let Some(file) = self.open_files.get_mut(&handle) else {
             return Ok(0);
         };
-        if !file.writable {
-            return Ok(0);
-        }
         let requested = (size as usize).saturating_mul(count as usize);
         if requested == 0 {
             return Ok(0);
@@ -1243,6 +1240,9 @@ impl Emulator {
         let Some(file) = self.open_files.get_mut(&handle) else {
             return Ok(0);
         };
+        if !file.writable {
+            return Ok(0);
+        }
         let end = file.position.saturating_add(requested);
         if file.data.len() < end {
             file.data.resize(end, 0);
@@ -2325,6 +2325,35 @@ mod tests {
         assert_eq!(emu.open_files[&reopened].data, b"abcdef");
 
         std::fs::remove_dir_all(save_directory).unwrap();
+    }
+
+    #[test]
+    fn test_read_only_file_can_be_read_but_not_written() {
+        let mut emu = Emulator::default();
+        let handle = 7;
+        emu.open_files.insert(
+            handle,
+            OpenFile {
+                data: b"resource".to_vec(),
+                position: 0,
+                data_ptr: 0,
+                save_path: None,
+                writable: false,
+                dirty: false,
+            },
+        );
+
+        assert_eq!(emu.read_file(0x100, 1, 8, handle).unwrap(), 8);
+        let read_back = (0..8)
+            .map(|offset| emu.memory.read_u8(0x100 + offset).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(read_back, b"resource");
+
+        emu.open_files.get_mut(&handle).unwrap().position = 0;
+        emu.memory.load_data(0x200, b"modified").unwrap();
+        assert_eq!(emu.write_file(0x200, 1, 8, handle).unwrap(), 0);
+        assert_eq!(emu.open_files[&handle].data, b"resource");
+        assert!(!emu.open_files[&handle].dirty);
     }
 
     #[test]
