@@ -528,6 +528,7 @@ dependencies = [
  "env_logger",
  "log",
  "minifb",
+ "serde_json",
 ]
 
 [[package]]

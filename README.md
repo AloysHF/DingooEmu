@@ -22,6 +22,7 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 - **MIPS32 CPU interpreter** — Ingenic JZ4740 XBurst compatible instruction set
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
 - **HLE (High-Level Emulation)** — Dingoo SDK functions for graphics, input, audio, timing, files, and companion-content discovery implemented in Rust
+- **Auditable compatibility diagnostics** — Aggregate unknown SDK calls with strict validation and machine-readable JSON reports
 - **`.app` file support** — Parse and load Dingoo A320 game container format
 - **Frame rendering** — 320×240 RGB565 framebuffer with XRGB8888 output
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
@@ -94,6 +95,10 @@ Run the unit tests:
 ```bash
 cargo test --workspace
 ```
+
+Compatibility runs can generate one unknown-HLE report per game with
+`scripts/batch-screenshots.ps1`. Use `-UnknownHlePolicy stop` to make any
+non-allowlisted SDK gap fail immediately.
 
 ## Architecture
 

@@ -2,11 +2,11 @@ use crate::app_loader::{AppImage, ResourceKind};
 use crate::audio::{Audio, AudioConfig};
 use crate::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::cpu::Cpu;
-use crate::error::Result;
+use crate::error::{Result, SimulatorError};
 use crate::input::Input;
 use crate::memory::Memory;
 use crate::video::Video;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
 mod sdk_hle;
@@ -25,6 +25,26 @@ const MAX_GUEST_TASKS: usize = 16;
 const HOOK_FILTER_WORDS: usize = 1_024;
 const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
 const FILE_SEARCH_NAME_CAPACITY: usize = 256;
+
+/// Behavior when the guest calls an SDK function without an HLE implementation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnknownHlePolicy {
+    /// Record the call and return zero to preserve compatibility.
+    #[default]
+    Report,
+    /// Record the call and stop unless the function name is allowlisted.
+    Stop,
+}
+
+/// Aggregated diagnostics for one unknown SDK HLE function.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct UnknownHleCall {
+    pub name: String,
+    pub count: u64,
+    pub import_address: u32,
+    pub first_pc: u32,
+    pub first_arguments: [u32; 4],
+}
 
 fn hook_filter_location(address: u32) -> (usize, u64) {
     let bit_index = (address as usize >> 2) & (HOOK_FILTER_WORDS * u64::BITS as usize - 1);
@@ -179,6 +199,12 @@ pub struct Emulator {
     import_addrs: HashMap<u32, String>,
     /// Hooked addresses (for SDK function interception)
     hooked_addrs: HashMap<u32, String>,
+    /// Behavior for SDK imports without an HLE implementation
+    unknown_hle_policy: UnknownHlePolicy,
+    /// Function names allowed to retain compatibility-stub behavior in strict mode
+    unknown_hle_allowlist: BTreeSet<String>,
+    /// Unknown SDK calls aggregated by function name for diagnostics
+    unknown_hle_calls: BTreeMap<String, UnknownHleCall>,
     /// Fast rejection filter for non-hook instruction addresses
     hook_filter: Box<[u64]>,
     /// Open guest resource files
@@ -319,6 +345,9 @@ impl Emulator {
             app: Some(app),
             import_addrs,
             hooked_addrs,
+            unknown_hle_policy: UnknownHlePolicy::default(),
+            unknown_hle_allowlist: BTreeSet::new(),
+            unknown_hle_calls: BTreeMap::new(),
             hook_filter,
             open_files: HashMap::new(),
             save_directory,
@@ -369,6 +398,79 @@ impl Emulator {
         log::info!("Emulator started");
     }
 
+    /// Configure how unknown SDK HLE calls affect execution.
+    pub fn set_unknown_hle_policy(&mut self, policy: UnknownHlePolicy) {
+        self.unknown_hle_policy = policy;
+    }
+
+    /// Replace the exact function-name allowlist used by strict HLE mode.
+    pub fn set_unknown_hle_allowlist<I, S>(&mut self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.unknown_hle_allowlist = names.into_iter().map(Into::into).collect();
+    }
+
+    /// Return unknown HLE diagnostics in stable function-name order.
+    pub fn unknown_hle_calls(&self) -> impl ExactSizeIterator<Item = &UnknownHleCall> {
+        self.unknown_hle_calls.values()
+    }
+
+    /// Clear all unknown HLE observations collected during this run.
+    pub fn clear_unknown_hle_calls(&mut self) {
+        self.unknown_hle_calls.clear();
+    }
+
+    fn record_unknown_hle(
+        &mut self,
+        name: &str,
+        import_address: u32,
+        return_address: u32,
+    ) -> Result<()> {
+        let first_pc = return_address.wrapping_sub(8);
+        let first_arguments = [
+            self.cpu.regs.read(4),
+            self.cpu.regs.read(5),
+            self.cpu.regs.read(6),
+            self.cpu.regs.read(7),
+        ];
+        let is_first = if let Some(call) = self.unknown_hle_calls.get_mut(name) {
+            call.count = call.count.saturating_add(1);
+            false
+        } else {
+            self.unknown_hle_calls.insert(
+                name.to_string(),
+                UnknownHleCall {
+                    name: name.to_string(),
+                    count: 1,
+                    import_address,
+                    first_pc,
+                    first_arguments,
+                },
+            );
+            true
+        };
+
+        if is_first {
+            log::warn!(
+                "Unknown SDK HLE {name} first called at {first_pc:#010x} (import {import_address:#010x}); calls are aggregated"
+            );
+        }
+
+        if self.unknown_hle_policy == UnknownHlePolicy::Stop
+            && !self.unknown_hle_allowlist.contains(name)
+        {
+            return Err(SimulatorError::UnknownHle {
+                name: name.to_string(),
+                pc: first_pc,
+                import_address,
+                arguments: first_arguments,
+            });
+        }
+        Ok(())
+    }
+
     /// Stop the emulator
     pub fn stop(&mut self) {
         self.flush_save_files();
@@ -387,6 +489,8 @@ impl Emulator {
         let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
         replacement.save_directory = self.save_directory.clone();
         replacement.cheats = self.cheats.clone();
+        replacement.unknown_hle_policy = self.unknown_hle_policy;
+        replacement.unknown_hle_allowlist = self.unknown_hle_allowlist.clone();
         self.memory.copy_state_from(&replacement.memory);
         std::mem::swap(&mut replacement.memory, &mut self.memory);
         if was_running {
@@ -485,6 +589,9 @@ impl Emulator {
         let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
         replacement.save_directory = self.save_directory.clone();
         replacement.cheats = self.cheats.clone();
+        replacement.unknown_hle_policy = self.unknown_hle_policy;
+        replacement.unknown_hle_allowlist = self.unknown_hle_allowlist.clone();
+        replacement.unknown_hle_calls = self.unknown_hle_calls.clone();
         replacement.cpu = state.cpu;
         self.memory.copy_state_from(&state.memory);
         std::mem::swap(&mut replacement.memory, &mut self.memory);
@@ -1607,6 +1714,9 @@ impl Default for Emulator {
             app: None,
             import_addrs: HashMap::new(),
             hooked_addrs: HashMap::new(),
+            unknown_hle_policy: UnknownHlePolicy::default(),
+            unknown_hle_allowlist: BTreeSet::new(),
+            unknown_hle_calls: BTreeMap::new(),
             hook_filter: vec![0; HOOK_FILTER_WORDS].into_boxed_slice(),
             open_files: HashMap::new(),
             save_directory: None,
@@ -1640,16 +1750,19 @@ mod tests {
         AppImage::parse(&data).unwrap()
     }
 
-    fn invoke_sdk_import(emu: &mut Emulator, address: u32, function_name: &str) {
+    fn try_invoke_sdk_import(emu: &mut Emulator, address: u32, function_name: &str) -> Result<u64> {
         emu.hooked_addrs.insert(address, function_name.to_string());
         let (word, mask) = hook_filter_location(address);
         emu.hook_filter[word] |= mask;
         emu.cpu.regs.pc = address;
         emu.cpu.start();
 
+        emu.run_active_cpu_slice(CPU_CYCLES_PER_INSTRUCTION)
+    }
+
+    fn invoke_sdk_import(emu: &mut Emulator, address: u32, function_name: &str) {
         assert_eq!(
-            emu.run_active_cpu_slice(CPU_CYCLES_PER_INSTRUCTION)
-                .unwrap(),
+            try_invoke_sdk_import(emu, address, function_name).unwrap(),
             CPU_CYCLES_PER_INSTRUCTION
         );
     }
@@ -1659,6 +1772,74 @@ mod tests {
         let emu = Emulator::default();
         assert_eq!(emu.frame_count(), 0);
         assert!(!emu.is_running());
+    }
+
+    #[test]
+    fn unknown_hle_calls_are_aggregated_by_name() {
+        let mut emu = Emulator::default();
+        emu.cpu.regs.write(31, 0x8000_1008);
+        for (register, value) in (4..=7).zip([1, 2, 3, 4]) {
+            emu.cpu.regs.write(register, value);
+        }
+
+        invoke_sdk_import(&mut emu, 0x1000, "missing_sdk_call");
+        emu.cpu.regs.write(31, 0x8000_2008);
+        emu.cpu.regs.write(4, 99);
+        invoke_sdk_import(&mut emu, 0x1004, "missing_sdk_call");
+
+        let calls: Vec<_> = emu.unknown_hle_calls().cloned().collect();
+        assert_eq!(
+            calls,
+            vec![UnknownHleCall {
+                name: "missing_sdk_call".to_string(),
+                count: 2,
+                import_address: 0x1000,
+                first_pc: 0x8000_1000,
+                first_arguments: [1, 2, 3, 4],
+            }]
+        );
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(emu.cpu.regs.pc, 0x8000_2008);
+    }
+
+    #[test]
+    fn strict_unknown_hle_policy_stops_and_keeps_diagnostics() {
+        let mut emu = Emulator::default();
+        emu.set_unknown_hle_policy(UnknownHlePolicy::Stop);
+        emu.cpu.regs.write(31, 0x8000_3008);
+        emu.cpu.regs.write(4, 0x1234);
+
+        let error = try_invoke_sdk_import(&mut emu, 0x2000, "strict_missing").unwrap_err();
+        assert!(matches!(
+            error,
+            SimulatorError::UnknownHle {
+                ref name,
+                pc: 0x8000_3000,
+                import_address: 0x2000,
+                arguments: [0x1234, 0, 0, 0],
+            } if name == "strict_missing"
+        ));
+        assert_eq!(emu.unknown_hle_calls().len(), 1);
+    }
+
+    #[test]
+    fn strict_unknown_hle_allowlist_is_exact_and_survives_reset() {
+        let mut emu = Emulator::from_app(minimal_app()).unwrap();
+        emu.set_unknown_hle_policy(UnknownHlePolicy::Stop);
+        emu.set_unknown_hle_allowlist(["allowed_missing"]);
+        emu.cpu.regs.write(31, 0x8000_4008);
+
+        invoke_sdk_import(&mut emu, 0x3000, "allowed_missing");
+        assert_eq!(emu.unknown_hle_calls().len(), 1);
+
+        emu.reset().unwrap();
+        assert_eq!(emu.unknown_hle_policy, UnknownHlePolicy::Stop);
+        assert!(emu.unknown_hle_allowlist.contains("allowed_missing"));
+        assert_eq!(emu.unknown_hle_calls().len(), 0);
+
+        emu.cpu.regs.write(31, 0x8000_5008);
+        invoke_sdk_import(&mut emu, 0x3004, "allowed_missing");
+        assert!(try_invoke_sdk_import(&mut emu, 0x3008, "Allowed_Missing").is_err());
     }
 
     #[test]

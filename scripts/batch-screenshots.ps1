@@ -17,6 +17,16 @@
 
 .PARAMETER TimeoutSeconds
     Maximum time allowed for each game. Default: 120 seconds.
+
+.PARAMETER ReportDirectory
+    Directory for per-game unknown HLE JSON reports. Default: tmp/hle-reports.
+
+.PARAMETER UnknownHlePolicy
+    Unknown SDK HLE behavior. Use report for compatibility runs or stop for
+    strict validation. Default: report.
+
+.PARAMETER AllowUnknownHle
+    Exact unknown SDK function names allowed in strict mode.
 #>
 
 param(
@@ -26,7 +36,14 @@ param(
     [string]$Binary = "",
 
     [ValidateRange(1, [int]::MaxValue)]
-    [int]$TimeoutSeconds = 120
+    [int]$TimeoutSeconds = 120,
+
+    [string]$ReportDirectory = "",
+
+    [ValidateSet("report", "stop")]
+    [string]$UnknownHlePolicy = "report",
+
+    [string[]]$AllowUnknownHle = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +53,9 @@ $framesSpecified = $PSBoundParameters.ContainsKey("Frames")
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $gameDir = Join-Path $repoRoot "tmp\dingoo_game"
 $outDir = Join-Path $repoRoot "docs\images"
+if (-not $ReportDirectory) {
+    $ReportDirectory = Join-Path $repoRoot "tmp\hle-reports"
+}
 
 if (-not (Test-Path -LiteralPath $gameDir -PathType Container)) {
     Write-Error "Game directory not found: $gameDir"
@@ -43,6 +63,8 @@ if (-not (Test-Path -LiteralPath $gameDir -PathType Container)) {
 }
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+New-Item -ItemType Directory -Force -Path $ReportDirectory | Out-Null
+$ReportDirectory = (Resolve-Path -LiteralPath $ReportDirectory).Path
 
 if (-not $Binary) {
     $Binary = Join-Path $repoRoot "target\release\dingoo-emu.exe"
@@ -94,6 +116,7 @@ function Get-CaptureFrames {
         "7day.app" { return 30 }
         "仙剑奇侠传\仙剑奇侠传.APP" { return 1200 }
         "Decollation-Warrior.app" { return 30 }
+        "GooPlayer\GooPlayer.app" { return 300 }
         "Overlord-Fighter.app" { return 30 }
         "SameGoo\samegoo.app" { return 300 }
         "Snake.app" { return 30 }
@@ -106,8 +129,11 @@ function Invoke-ScreenshotCapture {
         [string]$Executable,
         [string]$GamePath,
         [string]$ScreenshotPath,
+        [string]$ReportPath,
         [int]$CaptureFrames,
-        [int]$Timeout
+        [int]$Timeout,
+        [string]$HlePolicy,
+        [string[]]$AllowedUnknownHle
     )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -121,6 +147,14 @@ function Invoke-ScreenshotCapture {
     $startInfo.ArgumentList.Add($ScreenshotPath)
     $startInfo.ArgumentList.Add("--screenshot-frames")
     $startInfo.ArgumentList.Add($CaptureFrames.ToString())
+    $startInfo.ArgumentList.Add("--unknown-hle-policy")
+    $startInfo.ArgumentList.Add($HlePolicy)
+    $startInfo.ArgumentList.Add("--hle-report")
+    $startInfo.ArgumentList.Add($ReportPath)
+    foreach ($name in $AllowedUnknownHle) {
+        $startInfo.ArgumentList.Add("--allow-unknown-hle")
+        $startInfo.ArgumentList.Add($name)
+    }
     $startInfo.Environment["RUST_LOG"] =
         "dingoo_emu=info,dingooemu_core::app_loader=info,dingooemu_core::cpu=off,dingooemu_core::emulator=warn"
     $startInfo.Environment["RUST_LOG_STYLE"] = "never"
@@ -165,6 +199,8 @@ function Invoke-ScreenshotCapture {
 Write-Host "Using binary: $Binary"
 Write-Host "Game dir:     $gameDir"
 Write-Host "Output dir:   $outDir"
+Write-Host "Report dir:   $ReportDirectory"
+Write-Host "HLE policy:   $UnknownHlePolicy"
 if ($framesSpecified) {
     Write-Host "Frames:       $Frames"
 } else {
@@ -208,9 +244,13 @@ foreach ($game in $games) {
 
     $safeName = $uniqueName
     $outPath = Join-Path $outDir "$safeName.png"
+    $reportPath = Join-Path $ReportDirectory "$safeName.json"
 
     if (Test-Path -LiteralPath $outPath) {
         Remove-Item -LiteralPath $outPath -Force
+    }
+    if (Test-Path -LiteralPath $reportPath) {
+        Remove-Item -LiteralPath $reportPath -Force
     }
 
     Write-Host -NoNewline "  $baseName ($captureFrames frames) ... "
@@ -220,8 +260,11 @@ foreach ($game in $games) {
             -Executable $Binary `
             -GamePath $game.FullName `
             -ScreenshotPath $outPath `
+            -ReportPath $reportPath `
             -CaptureFrames $captureFrames `
-            -Timeout $TimeoutSeconds
+            -Timeout $TimeoutSeconds `
+            -HlePolicy $UnknownHlePolicy `
+            -AllowedUnknownHle $AllowUnknownHle
 
         if ($result.TimedOut) {
             Write-Host "FAILED (timeout)" -ForegroundColor Red
@@ -238,17 +281,21 @@ foreach ($game in $games) {
                 }
             }
             $failed++
-        } elseif (Test-Path -LiteralPath $outPath -PathType Leaf) {
+        } elseif ((Test-Path -LiteralPath $outPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
             $size = (Get-Item -LiteralPath $outPath).Length
-            if ($size -gt 0) {
+            $reportSize = (Get-Item -LiteralPath $reportPath).Length
+            $report = Get-Content -Raw -LiteralPath $reportPath | ConvertFrom-Json
+            $hasUnknownHleList = $null -ne $report.PSObject.Properties["unknown_hle"]
+            if ($size -gt 0 -and $reportSize -gt 0 -and $hasUnknownHleList) {
                 Write-Host "OK ($([math]::Round($size / 1KB)) KB)" -ForegroundColor Green
                 $success++
             } else {
-                Write-Host "FAILED (empty output)" -ForegroundColor Red
+                Write-Host "FAILED (empty or invalid output)" -ForegroundColor Red
                 $failed++
             }
         } else {
-            Write-Host "FAILED (no output)" -ForegroundColor Red
+            Write-Host "FAILED (missing screenshot or HLE report)" -ForegroundColor Red
             $failed++
         }
     } catch {

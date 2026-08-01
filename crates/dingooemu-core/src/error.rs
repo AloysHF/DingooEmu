@@ -24,6 +24,17 @@ pub enum SimulatorError {
     #[error("SDK HLE error: {0}")]
     SdkHleError(String),
 
+    /// Unknown SDK HLE call rejected by the active policy
+    #[error(
+        "unknown SDK HLE {name} at {pc:#010x} (import {import_address:#010x}, arguments {arguments:#010x?})"
+    )]
+    UnknownHle {
+        name: String,
+        pc: u32,
+        import_address: u32,
+        arguments: [u32; 4],
+    },
+
     /// I/O error
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),

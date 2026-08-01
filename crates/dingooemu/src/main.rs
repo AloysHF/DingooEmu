@@ -5,9 +5,9 @@ mod scaler;
 use clap::{Parser, ValueEnum};
 use dingooemu_core::cheats::CheatRule;
 use dingooemu_core::cpu::UnknownInstructionPolicy;
-use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator};
+use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator, UnknownHlePolicy};
 use minifb::{Key, Window, WindowOptions};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use keyboard::{KeyboardMapper, RemapSpec};
 use scaler::{DisplayScaler, ScaleFilter};
@@ -24,6 +24,31 @@ impl From<UnknownInstructionMode> for UnknownInstructionPolicy {
         match mode {
             UnknownInstructionMode::Stop => Self::Stop,
             UnknownInstructionMode::Skip => Self::Skip,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum UnknownHleMode {
+    #[default]
+    Report,
+    Stop,
+}
+
+impl UnknownHleMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Report => "report",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+impl From<UnknownHleMode> for UnknownHlePolicy {
+    fn from(mode: UnknownHleMode) -> Self {
+        match mode {
+            UnknownHleMode::Report => Self::Report,
+            UnknownHleMode::Stop => Self::Stop,
         }
     }
 }
@@ -148,6 +173,18 @@ struct Args {
     #[arg(long, value_enum, default_value_t = UnknownInstructionMode::Skip)]
     unknown_instruction_policy: UnknownInstructionMode,
 
+    /// Behavior when an unknown SDK HLE function is called
+    #[arg(long, value_enum, default_value_t = UnknownHleMode::Report)]
+    unknown_hle_policy: UnknownHleMode,
+
+    /// Allow an exact unknown SDK function name in strict HLE mode
+    #[arg(long = "allow-unknown-hle", value_name = "NAME")]
+    allowed_unknown_hle: Vec<String>,
+
+    /// Write aggregated unknown SDK HLE diagnostics as JSON
+    #[arg(long = "hle-report", value_name = "PATH")]
+    hle_report: Option<PathBuf>,
+
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -179,6 +216,8 @@ fn main() -> anyhow::Result<()> {
     let mut emu = Emulator::from_path(&args.path)?;
     emu.cpu
         .set_unknown_instruction_policy(args.unknown_instruction_policy.into());
+    emu.set_unknown_hle_policy(args.unknown_hle_policy.into());
+    emu.set_unknown_hle_allowlist(args.allowed_unknown_hle.iter().cloned());
     emu.audio.set_master_volume(args.volume);
     emu.input
         .set_repeat_timing(args.repeat_delay, args.repeat_period);
@@ -186,9 +225,20 @@ fn main() -> anyhow::Result<()> {
         emu.set_parsed_cheat(index as u32, true, cheat)?;
     }
 
-    // Start emulation
     emu.start();
 
+    let emulation_result = run_emulation(&args, &mut emu);
+    log_unknown_hle_summary(&emu);
+    let report_result = write_unknown_hle_report(&args, &emu);
+    if let Err(error) = &report_result {
+        log::error!("Failed to write HLE diagnostics: {error}");
+    }
+    emulation_result?;
+    report_result?;
+    Ok(())
+}
+
+fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
     // Screenshot mode: run headless for N frames, save PNG, and exit
     if let Some(ref screenshot_path) = args.screenshot {
         for frame in 0..args.screenshot_frames {
@@ -278,6 +328,60 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn log_unknown_hle_summary(emu: &Emulator) {
+    let calls: Vec<_> = emu.unknown_hle_calls().collect();
+    if calls.is_empty() {
+        log::info!("Unknown SDK HLE summary: none");
+        return;
+    }
+
+    log::warn!(
+        "Unknown SDK HLE summary: {} function(s); compatibility return values may hide missing behavior",
+        calls.len()
+    );
+    for call in calls {
+        log::warn!(
+            "  {}: count={}, first_pc={:#010x}, import={:#010x}, arguments={:#010x?}",
+            call.name,
+            call.count,
+            call.first_pc,
+            call.import_address,
+            call.first_arguments
+        );
+    }
+}
+
+fn unknown_hle_report(args: &Args, emu: &Emulator) -> serde_json::Value {
+    let content = Path::new(&args.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&args.path);
+    let unknown_hle: Vec<_> = emu.unknown_hle_calls().collect();
+    serde_json::json!({
+        "schema_version": 1,
+        "content": content,
+        "policy": args.unknown_hle_policy.as_str(),
+        "allowlist": args.allowed_unknown_hle,
+        "unknown_hle": unknown_hle,
+    })
+}
+
+fn write_unknown_hle_report(args: &Args, emu: &Emulator) -> anyhow::Result<()> {
+    let Some(path) = args.hle_report.as_ref() else {
+        return Ok(());
+    };
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let output = serde_json::to_vec_pretty(&unknown_hle_report(args, emu))?;
+    std::fs::write(path, output)?;
+    log::info!("HLE diagnostics saved to: {}", path.display());
     Ok(())
 }
 
@@ -454,5 +558,51 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn unknown_hle_options_default_to_reporting_and_accept_strict_allowlists() {
+        let defaults = Args::try_parse_from(["dingoo-emu", "game.app"]).unwrap();
+        assert_eq!(defaults.unknown_hle_policy, UnknownHleMode::Report);
+        assert!(defaults.allowed_unknown_hle.is_empty());
+        assert!(defaults.hle_report.is_none());
+
+        let strict = Args::try_parse_from([
+            "dingoo-emu",
+            "--unknown-hle-policy",
+            "stop",
+            "--allow-unknown-hle",
+            "legacy_one",
+            "--allow-unknown-hle",
+            "legacy_two",
+            "--hle-report",
+            "report.json",
+            "game.app",
+        ])
+        .unwrap();
+        assert_eq!(strict.unknown_hle_policy, UnknownHleMode::Stop);
+        assert_eq!(strict.allowed_unknown_hle, ["legacy_one", "legacy_two"]);
+        assert_eq!(strict.hle_report, Some(PathBuf::from("report.json")));
+    }
+
+    #[test]
+    fn empty_unknown_hle_report_has_a_stable_schema() {
+        let args = Args::try_parse_from([
+            "dingoo-emu",
+            "--hle-report",
+            "report.json",
+            "folder/game.app",
+        ])
+        .unwrap();
+        assert_eq!(
+            unknown_hle_report(&args, &Emulator::default()),
+            serde_json::json!({
+                "schema_version": 1,
+                "content": "game.app",
+                "policy": "report",
+                "allowlist": [],
+                "unknown_hle": [],
+            })
+        );
     }
 }

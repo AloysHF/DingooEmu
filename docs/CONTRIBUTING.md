@@ -30,6 +30,19 @@ cargo build
 cargo test --workspace
 ```
 
+For compatibility changes, run the sample collection and retain the generated
+unknown-HLE diagnostics:
+
+```powershell
+pwsh -NoProfile -File scripts/batch-screenshots.ps1
+```
+
+The command writes screenshots to `docs/images` and one JSON report per game to
+`tmp/hle-reports`. Review each report's `unknown_hle` list instead of treating a
+non-empty screenshot as sufficient proof. Before declaring a representative
+sample clean, rerun it with `-UnknownHlePolicy stop`; any exception must use an
+explicit, reviewed `-AllowUnknownHle` name.
+
 ## Areas Where Help Is Needed
 
 We welcome contributions in the following areas:

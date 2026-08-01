@@ -42,9 +42,10 @@ pub(super) fn dispatch(emu: &mut Emulator, addr: u32, func_name: &str) -> Result
         HandlerResult::Complete => emu.cpu.regs.pc = return_address,
         HandlerResult::Deferred => {}
         HandlerResult::NotHandled => {
+            emu.record_unknown_hle(func_name, addr, return_address)?;
             emu.cpu.regs.write(2, 0);
             emu.cpu.regs.pc = return_address;
-            log::trace!("  {func_name}() = 0 (unimplemented stub)");
+            log::trace!("  {func_name}() = 0 (compatibility stub)");
         }
     }
     emu.cpu.regs.gpr[0] = 0;
