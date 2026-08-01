@@ -103,19 +103,21 @@ crates/
 │   └── src/
 │       ├── lib.rs               # Crate root (module declarations)
 │       ├── emulator.rs          # Shared Emulator (both front-ends)
-│       ├── cpu/                 # MIPS32 CPU interpreter
-│       │   ├── mod.rs           # CPU module root
-│       │   ├── registers.rs     # GPR, HI/LO, PC management
-│       │   ├── instructions.rs  # MIPS32 instruction decoder and execution
-│       │   └── cop0.rs          # Coprocessor 0 (system control)
+│       ├── emulator/
+│       │   └── sdk_hle/         # Runtime SDK dispatch and implementations
+│       │       ├── mod.rs       # Single HLE dispatcher
+│       │       ├── graphics.rs  # LCD and framebuffer calls
+│       │       ├── input.rs     # Buttons and input events
+│       │       ├── audio.rs     # PCM and wave output
+│       │       ├── files.rs     # Resources, files, and saves
+│       │       ├── tasks.rs     # Tasks and semaphores
+│       │       └── system.rs    # Memory, timing, and system calls
+│       ├── cpu.rs               # MIPS32 CPU interpreter
 │       ├── memory.rs            # Memory bus (32MB address space)
 │       ├── video.rs             # Framebuffer and screen rendering
 │       ├── audio.rs             # Audio engine (PCM output)
 │       ├── input.rs             # Button state management
 │       ├── app_loader.rs        # .app container parser
-│       ├── hle/                 # High-Level Emulation bridge
-│       │   ├── mod.rs           # HLE module root
-│       │   └── sdk.rs           # Dingoo SDK function implementations
 │       └── error.rs             # Error types
 ├── dingooemu/                   # Standalone binary (-> dingooemu)
 │   └── src/

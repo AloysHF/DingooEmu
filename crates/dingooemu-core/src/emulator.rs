@@ -5,10 +5,11 @@ use crate::cpu::Cpu;
 use crate::error::Result;
 use crate::input::Input;
 use crate::memory::Memory;
-use crate::sdk_hle::SdkHle;
 use crate::video::Video;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+
+mod sdk_hle;
 
 const CPU_CLOCK_HZ: u64 = 336_000_000;
 const FRAMES_PER_SECOND: u64 = 60;
@@ -143,8 +144,6 @@ pub struct Emulator {
     pub input: Input,
     /// PCM audio subsystem
     pub audio: Audio,
-    /// SDK HLE bridge
-    pub sdk: SdkHle,
     /// Frontend-managed memory and register freeze rules
     cheats: CheatManager,
     /// Frame count
@@ -253,8 +252,6 @@ impl Emulator {
 
         let input = Input::new();
         let audio = Audio::new();
-        let sdk = SdkHle::new();
-
         // Build import address map for SDK hooking
         // The game uses physical addressing, not KSEG0
         // So we need to hook physical addresses
@@ -298,7 +295,6 @@ impl Emulator {
             video,
             input,
             audio,
-            sdk,
             cheats: CheatManager::default(),
             frame_count: 0,
             cycle_count: 0,
@@ -594,7 +590,7 @@ impl Emulator {
                 .cloned();
             if let Some(func_name) = func_name {
                 log::trace!("SDK hook: PC={:#010x} = {}", pc, func_name);
-                self.handle_sdk_call(pc, &func_name)?;
+                sdk_hle::dispatch(self, pc, &func_name)?;
                 self.cycle_count = self.cycle_count.wrapping_add(CPU_CYCLES_PER_INSTRUCTION);
                 executed += CPU_CYCLES_PER_INSTRUCTION;
                 if self.framebuffer_submitted
@@ -1324,461 +1320,6 @@ impl Emulator {
         file.position = (next as usize).min(file.data.len());
         0
     }
-    /// Handle SDK function call at import address
-    fn handle_sdk_call(&mut self, addr: u32, func_name: &str) -> Result<()> {
-        log::trace!("SDK call: {:#010x} = {}", addr, func_name);
-
-        // Save return address from $ra
-        let ra = self.cpu.regs.read(31);
-
-        match func_name {
-            // Memory management
-            "malloc" => {
-                let size = self.cpu.regs.read(4); // $a0
-                let ptr = self.memory.malloc(size);
-                self.cpu.regs.write(2, ptr); // $v0
-                log::info!(
-                    "  malloc({}) = {:#010x} (heap_ptr={:#010x})",
-                    size,
-                    ptr,
-                    self.memory.heap_ptr()
-                );
-            }
-            "free" => {
-                let ptr = self.cpu.regs.read(4); // $a0
-                self.memory.free(ptr);
-                log::trace!("  free({:#010x})", ptr);
-            }
-            "realloc" => {
-                let ptr = self.cpu.regs.read(4); // $a0
-                let size = self.cpu.regs.read(5); // $a1
-                let new_ptr = self.memory.realloc(ptr, size);
-                self.cpu.regs.write(2, new_ptr); // $v0
-                log::trace!("  realloc({:#010x}, {}) = {:#010x}", ptr, size, new_ptr);
-            }
-            "memset" => {
-                let ptr = self.cpu.regs.read(4); // $a0
-                let value = self.cpu.regs.read(5) as u8; // $a1
-                let size = self.cpu.regs.read(6); // $a2
-                self.memory.memset(ptr, value, size);
-                self.cpu.regs.write(2, ptr); // $v0
-                log::trace!("  memset({:#010x}, {:#04x}, {})", ptr, value, size);
-            }
-            "memcpy" => {
-                let dest = self.cpu.regs.read(4); // $a0
-                let src = self.cpu.regs.read(5); // $a1
-                let size = self.cpu.regs.read(6); // $a2
-                self.memory.memcpy(dest, src, size)?;
-                self.cpu.regs.write(2, dest); // $v0
-                log::trace!("  memcpy({:#010x}, {:#010x}, {})", dest, src, size);
-            }
-            "strlen" => {
-                let ptr = self.cpu.regs.read(4); // $a0
-                let len = self.memory.read_string_len(ptr);
-                self.cpu.regs.write(2, len); // $v0
-                log::trace!("  strlen({:#010x}) = {}", ptr, len);
-            }
-            "__to_locale_ansi" => {
-                let ptr = self.cpu.regs.read(4);
-                let result = self.convert_guest_w_string_to_ansi(ptr);
-                self.cpu.regs.write(2, result);
-                log::trace!("  __to_locale_ansi({:#010x}) = {:#010x}", ptr, result);
-            }
-            "cmGetSysModel" => {
-                let ptr = self.cpu.regs.read(4);
-                for (index, word) in "A320\0".encode_utf16().enumerate() {
-                    self.memory
-                        .write_u16(ptr.wrapping_add((index * 2) as u32), word)?;
-                }
-                self.cpu.regs.write(2, 0);
-                log::trace!("  cmGetSysModel({:#010x}) = 0", ptr);
-            }
-            "U8TOU32" => {
-                let ptr = self.cpu.regs.read(4);
-                let value = self.memory.read_u32(ptr)?;
-                self.cpu.regs.write(2, value);
-                log::trace!("  U8TOU32({:#010x}) = {:#010x}", ptr, value);
-            }
-
-            // Graphics/LCD
-            "_lcd_get_frame" | "lcd_get_frame" | "lcd_get_cframe" => {
-                // Return fixed guest-visible framebuffer address
-                // The game writes directly to this address
-                let phys_addr = crate::video::VM_LCD_FB_ADDRESS;
-                self.cpu.regs.write(2, phys_addr); // $v0
-                log::trace!("  lcd_get_frame() = {:#010x}", phys_addr);
-            }
-            "_lcd_set_frame" | "lcd_set_frame" | "ap_lcd_set_frame" => {
-                self.sync_framebuffer();
-                log::trace!("  lcd_set_frame() - framebuffer updated");
-            }
-            "lcd_flip" => {
-                self.sync_framebuffer();
-                log::trace!("  lcd_flip() - framebuffer updated");
-            }
-            "LcdGetDisMode" => {
-                self.cpu.regs.write(2, 0); // $v0 = 0
-                log::trace!("  LcdGetDisMode() = 0");
-            }
-            "LCD_GetXSize" => {
-                self.cpu.regs.write(2, crate::video::SCREEN_WIDTH);
-                log::trace!("  LCD_GetXSize() = {}", crate::video::SCREEN_WIDTH);
-            }
-            "LCD_GetYSize" => {
-                self.cpu.regs.write(2, crate::video::SCREEN_HEIGHT);
-                log::trace!("  LCD_GetYSize() = {}", crate::video::SCREEN_HEIGHT);
-            }
-
-            // Input
-            "_kbd_get_status" | "kbd_get_status" => {
-                let status_ptr = self.cpu.regs.read(4); // $a0
-                let (pressed, released, status) = self.input.take_status();
-                self.memory.write_u32(status_ptr, pressed)?;
-                self.memory
-                    .write_u32(status_ptr.wrapping_add(4), released)?;
-                self.memory.write_u32(status_ptr.wrapping_add(8), status)?;
-                log::trace!(
-                    "  kbd_get_status({:#010x}) pressed={:#010x} released={:#010x} status={:#010x}",
-                    status_ptr,
-                    pressed,
-                    released,
-                    status
-                );
-            }
-            "_kbd_get_key" | "kbd_get_key" => {
-                // Convert bitmask to key code
-                let buttons = self.input.buttons();
-                let key = if buttons & crate::input::BUTTON_UP != 0 {
-                    20
-                } else if buttons & crate::input::BUTTON_DOWN != 0 {
-                    27
-                } else if buttons & crate::input::BUTTON_LEFT != 0 {
-                    28
-                } else if buttons & crate::input::BUTTON_RIGHT != 0 {
-                    18
-                } else if buttons & crate::input::BUTTON_A != 0 {
-                    31
-                } else if buttons & crate::input::BUTTON_B != 0 {
-                    21
-                } else if buttons & crate::input::BUTTON_X != 0 {
-                    16
-                } else if buttons & crate::input::BUTTON_Y != 0 {
-                    6
-                } else if buttons & crate::input::BUTTON_START != 0 {
-                    11
-                } else if buttons & crate::input::BUTTON_SELECT != 0 {
-                    10
-                } else if buttons & crate::input::BUTTON_L != 0 {
-                    8
-                } else if buttons & crate::input::BUTTON_R != 0 {
-                    29
-                } else {
-                    0
-                };
-                self.cpu.regs.write(2, key); // $v0
-                log::trace!("  kbd_get_key() = {}", key);
-            }
-
-            // Tasks and synchronization
-            "OSTaskCreate" => {
-                let entry = self.cpu.regs.read(4);
-                let data_ptr = self.cpu.regs.read(5);
-                let stack_ptr = self.cpu.regs.read(6);
-                let priority = self.cpu.regs.read(7);
-                let created = self.create_guest_task(entry, data_ptr, stack_ptr, priority);
-                self.cpu.regs.write(2, if created { 0 } else { u32::MAX });
-                log::trace!(
-                    "  OSTaskCreate({entry:#010x}, {data_ptr:#010x}, {stack_ptr:#010x}, {priority}) = {}",
-                    self.cpu.regs.read(2)
-                );
-            }
-            "OSSemCreate" => {
-                let count = self.cpu.regs.read(4);
-                let handle = self.create_semaphore(count);
-                self.cpu.regs.write(2, handle);
-                log::trace!("  OSSemCreate({count}) = {handle}");
-            }
-            "OSSemPend" => {
-                let handle = self.cpu.regs.read(4);
-                let error_ptr = self.cpu.regs.read(6);
-                let pending = self.pend_semaphore(handle);
-                if error_ptr != 0 {
-                    self.memory
-                        .write_u8(error_ptr, if pending { 0 } else { 1 })?;
-                }
-                log::trace!("  OSSemPend({handle}) = {pending}");
-            }
-            "OSSemPost" => {
-                let handle = self.cpu.regs.read(4);
-                let posted = self.post_semaphore(handle);
-                self.cpu.regs.write(2, if posted { 0 } else { 1 });
-                log::trace!("  OSSemPost({handle}) = {}", self.cpu.regs.read(2));
-            }
-            "OSSemDel" => {
-                let handle = self.cpu.regs.read(4);
-                let error_ptr = self.cpu.regs.read(6);
-                let removed = self.semaphores.remove(&handle).is_some();
-                if error_ptr != 0 {
-                    self.memory
-                        .write_u8(error_ptr, if removed { 0 } else { 1 })?;
-                }
-                self.cpu.regs.write(2, 0);
-                log::trace!("  OSSemDel({handle}) = {removed}");
-            }
-
-            // Audio
-            "_waveout_open" | "waveout_open" => {
-                let args_ptr = self.cpu.regs.read(4);
-                let config = AudioConfig::new(
-                    self.memory.read_u32(args_ptr)?,
-                    self.memory.read_u16(args_ptr.wrapping_add(4))?,
-                    self.memory.read_u8(args_ptr.wrapping_add(6))?,
-                    self.memory.read_u8(args_ptr.wrapping_add(7))?,
-                );
-                let opened = config.is_some_and(|config| self.audio.open(config));
-                self.cpu.regs.write(2, u32::from(opened));
-                log::trace!("  waveout_open({args_ptr:#010x}) = {opened}");
-            }
-            "waveout_write" => {
-                let buffer_ptr = self.cpu.regs.read(5);
-                let count = self.cpu.regs.read(6);
-                let written = if count == 0 || count > MAX_AUDIO_WRITE_BYTES {
-                    false
-                } else if !self.audio.can_write() {
-                    self.set_active_wait(TaskWait::AudioWrite);
-                    log::trace!(
-                        "  waveout_write({buffer_ptr:#010x}, {count}) deferred until queue space is available"
-                    );
-                    return Ok(());
-                } else {
-                    let mut data = Vec::with_capacity(count as usize);
-                    for offset in 0..count {
-                        data.push(self.memory.read_u8(buffer_ptr.wrapping_add(offset))?);
-                    }
-                    self.audio.write(&data)
-                };
-                self.cpu.regs.write(2, u32::from(written));
-                log::trace!(
-                    "  waveout_write({buffer_ptr:#010x}, {count}) = {}",
-                    u32::from(written)
-                );
-            }
-            "waveout_can_write" | "pcm_can_write" => {
-                let can_write = self.audio.can_write();
-                self.cpu.regs.write(2, u32::from(can_write));
-                log::trace!("  {func_name}() = {}", u32::from(can_write));
-            }
-            "waveout_close" | "waveout_close_at_once" => {
-                let closed = self.audio.close();
-                self.cpu.regs.write(2, u32::from(closed));
-                log::trace!("  {func_name}() = {}", u32::from(closed));
-            }
-            "_waveout_set_volume" | "waveout_set_volume" => {
-                let volume = self.cpu.regs.read(4);
-                let updated = self.audio.set_volume(volume);
-                self.cpu.regs.write(2, u32::from(updated));
-                log::trace!("  {func_name}({volume}) = {}", u32::from(updated));
-            }
-            "HP_Mute_sw" => {
-                let muted = self.cpu.regs.read(4) != 0;
-                let updated = self.audio.set_muted(muted);
-                self.cpu.regs.write(2, u32::from(updated));
-                log::trace!("  HP_Mute_sw({muted}) = {}", u32::from(updated));
-            }
-            "pcm_ioctl" => {
-                self.cpu.regs.write(2, 0);
-                log::trace!("  pcm_ioctl() = 0");
-            }
-
-            // Timer
-            "OSTimeGet" => {
-                let ticks = self
-                    .cycle_count
-                    .saturating_mul(OS_TICKS_PER_SECOND)
-                    .checked_div(CPU_CLOCK_HZ)
-                    .unwrap_or(0) as u32;
-                self.cpu.regs.write(2, ticks); // $v0
-                log::trace!("  OSTimeGet() = {}", ticks);
-            }
-            "GetTickCount" => {
-                let micros = self
-                    .cycle_count
-                    .saturating_mul(1_000_000)
-                    .checked_div(CPU_CLOCK_HZ)
-                    .unwrap_or(0);
-                self.cpu.regs.write(2, micros as u32); // $v0
-                log::trace!("  GetTickCount() = {}", micros as u32);
-            }
-            "delay_ms" | "mdelay" => {
-                let ms = self.cpu.regs.read(4); // $a0
-                let delay_cycles = (ms as u64).saturating_mul(CPU_CLOCK_HZ) / 1_000;
-                self.delay_active_until(self.cycle_count.saturating_add(delay_cycles));
-                log::trace!("  delay_ms({})", ms);
-            }
-            "StartSwTimer" => {
-                self.cpu.regs.write(2, 0); // $v0 = 0
-                log::trace!("  StartSwTimer() = 0");
-            }
-            "OSTimeDly" => {
-                let ticks = self.cpu.regs.read(4); // $a0
-                let delay_cycles =
-                    (ticks as u64).saturating_mul(CPU_CLOCK_HZ) / OS_TICKS_PER_SECOND;
-                self.delay_active_until(self.cycle_count.saturating_add(delay_cycles));
-                log::trace!("  OSTimeDly({})", ticks);
-            }
-            "udelay" => {
-                let us = self.cpu.regs.read(4); // $a0
-                let delay_cycles = (us as u64).saturating_mul(CPU_CLOCK_HZ) / 1_000_000;
-                self.delay_active_until(self.cycle_count.saturating_add(delay_cycles));
-                log::trace!("  udelay({})", us);
-            }
-            "_sys_judge_event" | "sys_judge_event" => {
-                let pending = u32::from(self.input.take_pending_event());
-                self.cpu.regs.write(2, pending);
-                log::trace!("  sys_judge_event() = {}", pending);
-            }
-
-            // Resource manager
-            "get_dl_handle" => {
-                self.cpu.regs.write(2, u32::from(self.app.is_some()));
-            }
-            "dl_res_open" => {
-                let name = self.resource_name_from_args(&[
-                    self.cpu.regs.read(6),
-                    self.cpu.regs.read(5),
-                    self.cpu.regs.read(4),
-                ]);
-                let handle = name
-                    .as_deref()
-                    .map(|name| self.open_resource_file(name))
-                    .unwrap_or(0);
-                self.cpu.regs.write(2, handle);
-            }
-            "dl_res_get_size" => {
-                let handle = self.cpu.regs.read(4);
-                let size = self
-                    .open_files
-                    .get(&handle)
-                    .map(|file| file.data.len() as u32)
-                    .unwrap_or(0);
-                self.cpu.regs.write(2, size);
-            }
-            "dl_res_get_data" => {
-                let handle = self.cpu.regs.read(4);
-                let buffer = self.cpu.regs.read(5);
-                let buffer_len = self.cpu.regs.read(6);
-                let read_len = self.cpu.regs.read(7);
-                let ret = self.read_resource_data(handle, buffer, buffer_len, read_len)?;
-                self.cpu.regs.write(2, ret);
-            }
-            "dl_res_close" => {
-                let handle = self.cpu.regs.read(4);
-                self.open_files.remove(&handle);
-                self.cpu.regs.write(2, 0);
-            }
-            // Resource-backed File I/O
-            "fopen" | "fsys_fopen" => {
-                let name = self.read_guest_c_string(self.cpu.regs.read(4));
-                let mode = self.read_guest_c_string(self.cpu.regs.read(5));
-                let handle = self.open_guest_file(&name, &mode);
-                self.cpu.regs.write(2, handle);
-                log::trace!("  {}({}, {}) = {}", func_name, name, mode, handle);
-            }
-            "fsys_fopenW" => {
-                let name = self.read_guest_w_string(self.cpu.regs.read(4));
-                let mode = self.read_guest_w_string(self.cpu.regs.read(5));
-                log::trace!("  fsys_fopenW({}, {})", name, mode);
-                let handle = self.open_guest_file(&name, &mode);
-                self.cpu.regs.write(2, handle);
-            }
-            "fclose" | "fsys_fclose" | "fsys_fcloseW" => {
-                let handle = self.cpu.regs.read(4);
-                let result = self.flush_save_file(handle);
-                self.open_files.remove(&handle);
-                self.cpu
-                    .regs
-                    .write(2, if result.is_ok() { 0 } else { u32::MAX });
-            }
-            "fread" | "fsys_fread" => {
-                let dest = self.cpu.regs.read(4);
-                let size = self.cpu.regs.read(5);
-                let count = self.cpu.regs.read(6);
-                let handle = self.cpu.regs.read(7);
-                let read = self.read_file(dest, size, count, handle)?;
-                self.cpu.regs.write(2, read);
-            }
-            "fseek" | "fsys_fseek" => {
-                let handle = self.cpu.regs.read(4);
-                let offset = self.cpu.regs.read(5) as i32;
-                let origin = self.cpu.regs.read(6);
-                let ret = self.seek_file(handle, offset, origin);
-                self.cpu.regs.write(2, ret);
-            }
-            "ftell" | "fsys_ftell" => {
-                let handle = self.cpu.regs.read(4);
-                let pos = self
-                    .open_files
-                    .get(&handle)
-                    .map(|file| file.position as u32)
-                    .unwrap_or(u32::MAX);
-                self.cpu.regs.write(2, pos);
-            }
-            "feof" | "fsys_feof" => {
-                let handle = self.cpu.regs.read(4);
-                let eof = self
-                    .open_files
-                    .get(&handle)
-                    .map(|file| u32::from(file.position >= file.data.len()))
-                    .unwrap_or(1);
-                self.cpu.regs.write(2, eof);
-            }
-            "fwrite" | "fsys_fwrite" => {
-                let src = self.cpu.regs.read(4);
-                let size = self.cpu.regs.read(5);
-                let count = self.cpu.regs.read(6);
-                let handle = self.cpu.regs.read(7);
-                let written = self.write_file(src, size, count, handle)?;
-                self.cpu.regs.write(2, written);
-                log::trace!("  {}() = {}", func_name, written);
-            }
-            // System (stubs)
-            "vxGoHome" | "abort" | "TaskMediaFunStop" => {
-                self.cpu.stop();
-                log::trace!("  {} -> stopping", func_name);
-            }
-            "sprintf" => {
-                let destination = self.cpu.regs.read(4);
-                let format = self.read_guest_c_string(self.cpu.regs.read(5));
-                let rendered = self.format_guest_printf(&format)?;
-                let mut bytes = rendered.as_bytes().to_vec();
-                bytes.push(0);
-                self.memory.load_data(destination, &bytes)?;
-                self.cpu.regs.write(2, rendered.len() as u32);
-                log::trace!("  sprintf({}) = {}", format, rendered.len());
-            }
-            "printf" | "fprintf" => {
-                self.cpu.regs.write(2, 0);
-                log::trace!("  {}() = 0 (stub)", func_name);
-            }
-
-            // Cache ops (no-op)
-            "__icache_invalidate_all" | "__dcache_writeback_all" => {
-                log::trace!("  {} (no-op)", func_name);
-            }
-
-            // Other stubs
-            _ => {
-                self.cpu.regs.write(2, 0); // Return 0 for unknown functions
-                log::trace!("  {}() = 0 (unimplemented stub)", func_name);
-            }
-        }
-
-        // Return to caller: jump to $ra
-        self.cpu.regs.pc = ra;
-        self.cpu.regs.gpr[0] = 0; // R0 is always zero
-
-        Ok(())
-    }
 
     /// Sync framebuffer from guest memory to video subsystem
     /// The game writes directly to the fixed framebuffer address
@@ -1878,7 +1419,6 @@ impl Default for Emulator {
             video: Video::new(),
             input: Input::new(),
             audio: Audio::new(),
-            sdk: SdkHle::new(),
             cheats: CheatManager::default(),
             frame_count: 0,
             cycle_count: 0,
@@ -1921,6 +1461,20 @@ mod tests {
         data[0x78..0x7c].copy_from_slice(&0x8000_0000u32.to_le_bytes());
         data[0x7c..0x80].copy_from_slice(&4u32.to_le_bytes());
         AppImage::parse(&data).unwrap()
+    }
+
+    fn invoke_sdk_import(emu: &mut Emulator, address: u32, function_name: &str) {
+        emu.hooked_addrs.insert(address, function_name.to_string());
+        let (word, mask) = hook_filter_location(address);
+        emu.hook_filter[word] |= mask;
+        emu.cpu.regs.pc = address;
+        emu.cpu.start();
+
+        assert_eq!(
+            emu.run_active_cpu_slice(CPU_CYCLES_PER_INSTRUCTION)
+                .unwrap(),
+            CPU_CYCLES_PER_INSTRUCTION
+        );
     }
 
     #[test]
@@ -2015,6 +1569,36 @@ mod tests {
     }
 
     #[test]
+    fn test_hle_modules_execute_through_runtime_hooks() {
+        let mut emu = Emulator::default();
+        let return_address = 0x9000;
+        emu.cpu.regs.write(31, return_address);
+
+        emu.memory.load_data(0x100, b"hello\0").unwrap();
+        emu.cpu.regs.write(4, 0x100);
+        invoke_sdk_import(&mut emu, 0x1000, "strlen");
+        assert_eq!(emu.cpu.regs.read(2), 5);
+        assert_eq!(emu.cpu.regs.pc, return_address);
+
+        invoke_sdk_import(&mut emu, 0x1004, "LCD_GetXSize");
+        assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_WIDTH);
+
+        emu.set_buttons(crate::input::BUTTON_A);
+        invoke_sdk_import(&mut emu, 0x1008, "kbd_get_key");
+        assert_eq!(emu.cpu.regs.read(2), 31);
+
+        invoke_sdk_import(&mut emu, 0x100c, "pcm_ioctl");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+
+        emu.cpu.regs.write(4, 2);
+        invoke_sdk_import(&mut emu, 0x1010, "OSSemCreate");
+        assert_eq!(emu.semaphores.get(&emu.cpu.regs.read(2)), Some(&2));
+
+        invoke_sdk_import(&mut emu, 0x1014, "get_dl_handle");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+    }
+
+    #[test]
     fn test_semaphore_wakes_waiting_main_task() {
         let mut emu = Emulator::default();
         let semaphore = emu.create_semaphore(0);
@@ -2063,10 +1647,10 @@ mod tests {
             ..Default::default()
         };
 
-        emu.handle_sdk_call(0, "OSTimeGet").unwrap();
+        invoke_sdk_import(&mut emu, 0, "OSTimeGet");
         assert_eq!(emu.cpu.regs.read(2), 1);
 
-        emu.handle_sdk_call(0, "GetTickCount").unwrap();
+        invoke_sdk_import(&mut emu, 0, "GetTickCount");
         assert_eq!(emu.cpu.regs.read(2), 10_000);
     }
 
@@ -2082,7 +1666,7 @@ mod tests {
         emu.cpu.regs.write(5, format);
         emu.cpu.regs.write(6, directory);
 
-        emu.handle_sdk_call(0, "sprintf").unwrap();
+        invoke_sdk_import(&mut emu, 0, "sprintf");
 
         assert_eq!(
             emu.read_guest_c_string(destination),
@@ -2107,7 +1691,7 @@ mod tests {
         emu.cpu.regs.write(29, stack);
         emu.memory.write_u32(stack + 16, 3).unwrap();
 
-        emu.handle_sdk_call(0, "sprintf").unwrap();
+        invoke_sdk_import(&mut emu, 0, "sprintf");
 
         assert_eq!(emu.read_guest_c_string(destination), "Ver: 1.2.0003");
         assert_eq!(emu.cpu.regs.read(2), 13);
@@ -2156,7 +1740,7 @@ mod tests {
         emu.cpu.regs.write(4, ptr);
         emu.cpu.regs.write(31, 0x1234);
 
-        emu.handle_sdk_call(0, "__to_locale_ansi").unwrap();
+        invoke_sdk_import(&mut emu, 0, "__to_locale_ansi");
 
         let output = emu.cpu.regs.read(2);
         assert_ne!(output, ptr);
@@ -2170,7 +1754,7 @@ mod tests {
         assert_eq!(emu.read_guest_w_string(ptr), "Ali中.app");
 
         emu.cpu.regs.write(4, ptr);
-        emu.handle_sdk_call(0, "__to_locale_ansi").unwrap();
+        invoke_sdk_import(&mut emu, 0, "__to_locale_ansi");
 
         assert_eq!(emu.cpu.regs.read(2), output);
         assert_eq!(emu.read_guest_c_string(output), "Ali?.app");
@@ -2183,7 +1767,7 @@ mod tests {
         emu.cpu.regs.write(4, ptr);
         emu.cpu.regs.write(31, 0x1234);
 
-        emu.handle_sdk_call(0, "cmGetSysModel").unwrap();
+        invoke_sdk_import(&mut emu, 0, "cmGetSysModel");
 
         assert_eq!(emu.cpu.regs.read(2), 0);
         assert_eq!(emu.cpu.regs.pc, 0x1234);
@@ -2199,7 +1783,7 @@ mod tests {
             .unwrap();
         emu.cpu.regs.write(4, ptr);
 
-        emu.handle_sdk_call(0, "U8TOU32").unwrap();
+        invoke_sdk_import(&mut emu, 0, "U8TOU32");
 
         assert_eq!(emu.cpu.regs.read(2), 0x0001_C218);
     }
@@ -2208,10 +1792,10 @@ mod tests {
     fn test_lcd_size_matches_a320_display() {
         let mut emu = Emulator::default();
 
-        emu.handle_sdk_call(0, "LCD_GetXSize").unwrap();
+        invoke_sdk_import(&mut emu, 0, "LCD_GetXSize");
         assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_WIDTH);
 
-        emu.handle_sdk_call(0, "LCD_GetYSize").unwrap();
+        invoke_sdk_import(&mut emu, 0, "LCD_GetYSize");
         assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_HEIGHT);
     }
 
@@ -2225,7 +1809,7 @@ mod tests {
         emu.memory.write_u8(args_ptr + 6, 1).unwrap();
         emu.memory.write_u8(args_ptr + 7, 100).unwrap();
         emu.cpu.regs.write(4, args_ptr);
-        emu.handle_sdk_call(0, "waveout_open").unwrap();
+        invoke_sdk_import(&mut emu, 0, "waveout_open");
 
         assert_eq!(emu.cpu.regs.read(2), 1);
         assert_eq!(emu.audio.config(), AudioConfig::new(16_000, 16, 1, 100));
@@ -2243,7 +1827,7 @@ mod tests {
         }
         emu.cpu.regs.write(5, buffer_ptr);
         emu.cpu.regs.write(6, 3_200);
-        emu.handle_sdk_call(0, "waveout_write").unwrap();
+        invoke_sdk_import(&mut emu, 0, "waveout_write");
 
         assert_eq!(emu.cpu.regs.read(2), 1);
         assert!(emu.take_audio_samples().iter().any(|&sample| sample != 0));
@@ -2270,7 +1854,7 @@ mod tests {
         emu.cpu.regs.write(6, 2);
         emu.cpu.regs.write(31, return_address);
 
-        emu.handle_sdk_call(hook_address, "waveout_write").unwrap();
+        invoke_sdk_import(&mut emu, hook_address, "waveout_write");
 
         assert_eq!(emu.main_wait, Some(TaskWait::AudioWrite));
         assert_eq!(emu.cpu.regs.pc, hook_address);
@@ -2285,7 +1869,7 @@ mod tests {
         assert!(emu.audio.can_write());
         assert!(!emu.active_context_waiting());
 
-        emu.handle_sdk_call(hook_address, "waveout_write").unwrap();
+        invoke_sdk_import(&mut emu, hook_address, "waveout_write");
 
         assert_eq!(emu.main_wait, None);
         assert_eq!(emu.cpu.regs.pc, return_address);
@@ -2310,7 +1894,7 @@ mod tests {
         emu.cpu.regs.write(4, 0x100);
         emu.cpu.regs.write(5, 0x120);
 
-        emu.handle_sdk_call(0, "fsys_fopen").unwrap();
+        invoke_sdk_import(&mut emu, 0, "fsys_fopen");
         let handle = emu.cpu.regs.read(2);
         assert_ne!(handle, 0);
 
@@ -2318,13 +1902,13 @@ mod tests {
         emu.cpu.regs.write(5, 2);
         emu.cpu.regs.write(6, 3);
         emu.cpu.regs.write(7, handle);
-        emu.handle_sdk_call(0, "fsys_fwrite").unwrap();
+        invoke_sdk_import(&mut emu, 0, "fsys_fwrite");
 
         assert_eq!(emu.cpu.regs.read(2), 3);
         assert_eq!(emu.open_files[&handle].data, b"abcdef");
 
         emu.cpu.regs.write(4, handle);
-        emu.handle_sdk_call(0, "fsys_fclose").unwrap();
+        invoke_sdk_import(&mut emu, 0, "fsys_fclose");
         assert_eq!(emu.cpu.regs.read(2), 0);
         assert_eq!(
             std::fs::read(save_directory.join("test.log")).unwrap(),
@@ -2334,7 +1918,7 @@ mod tests {
         emu.memory.load_data(0x120, b"r\0").unwrap();
         emu.cpu.regs.write(4, 0x100);
         emu.cpu.regs.write(5, 0x120);
-        emu.handle_sdk_call(0, "fsys_fopen").unwrap();
+        invoke_sdk_import(&mut emu, 0, "fsys_fopen");
         let reopened = emu.cpu.regs.read(2);
         assert_eq!(emu.open_files[&reopened].data, b"abcdef");
 
