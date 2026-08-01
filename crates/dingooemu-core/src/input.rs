@@ -13,6 +13,7 @@ pub const BUTTON_L: u32 = 1 << 8;
 pub const BUTTON_R: u32 = 1 << 29;
 
 /// Input subsystem
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Input {
     /// Current button state (bitmask)
     buttons: u32,
@@ -22,6 +23,10 @@ pub struct Input {
     released: u32,
     /// Whether a system/input event is pending
     event_pending: bool,
+    repeat_delay: u32,
+    repeat_period: u32,
+    held_frames: [u32; 32],
+    swap_ab: bool,
 }
 
 impl Input {
@@ -32,6 +37,10 @@ impl Input {
             pressed: 0,
             released: 0,
             event_pending: false,
+            repeat_delay: 0,
+            repeat_period: 1,
+            held_frames: [0; 32],
+            swap_ab: false,
         }
     }
 
@@ -42,13 +51,48 @@ impl Input {
 
     /// Set the button state
     pub fn set_buttons(&mut self, buttons: u32) {
+        let buttons = if self.swap_ab {
+            let without_ab = buttons & !(BUTTON_A | BUTTON_B);
+            without_ab
+                | if buttons & BUTTON_A != 0 { BUTTON_B } else { 0 }
+                | if buttons & BUTTON_B != 0 { BUTTON_A } else { 0 }
+        } else {
+            buttons
+        };
         let changed = self.buttons ^ buttons;
         self.pressed |= changed & buttons;
         self.released |= changed & self.buttons;
         if changed != 0 {
             self.event_pending = true;
         }
+        for bit in 0..32 {
+            let mask = 1u32 << bit;
+            if buttons & mask == 0 {
+                self.held_frames[bit] = 0;
+            } else if self.buttons & mask == 0 {
+                self.held_frames[bit] = 1;
+            } else {
+                self.held_frames[bit] = self.held_frames[bit].saturating_add(1);
+                let held = self.held_frames[bit];
+                if self.repeat_delay > 0
+                    && held >= self.repeat_delay
+                    && (held - self.repeat_delay).is_multiple_of(self.repeat_period)
+                {
+                    self.pressed |= mask;
+                    self.event_pending = true;
+                }
+            }
+        }
         self.buttons = buttons;
+    }
+
+    pub fn set_repeat_timing(&mut self, delay: u32, period: u32) {
+        self.repeat_delay = delay;
+        self.repeat_period = period.max(1);
+    }
+
+    pub fn set_swap_ab(&mut self, swap_ab: bool) {
+        self.swap_ab = swap_ab;
     }
 
     /// Get and clear the Dingoo key status structure fields.
@@ -107,5 +151,31 @@ mod tests {
 
         input.release(BUTTON_A);
         assert!(!input.is_pressed(BUTTON_A));
+    }
+
+    #[test]
+    fn held_button_repeats_after_configured_delay() {
+        let mut input = Input::new();
+        input.set_repeat_timing(3, 2);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.take_status().0, BUTTON_A);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.take_status().0, 0);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.take_status().0, BUTTON_A);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.take_status().0, 0);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.take_status().0, BUTTON_A);
+    }
+
+    #[test]
+    fn swap_ab_changes_logical_button_state() {
+        let mut input = Input::new();
+        input.set_swap_ab(true);
+        input.set_buttons(BUTTON_A);
+        assert_eq!(input.buttons(), BUTTON_B);
+        input.set_buttons(BUTTON_B);
+        assert_eq!(input.buttons(), BUTTON_A);
     }
 }

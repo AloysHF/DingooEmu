@@ -1,7 +1,88 @@
-use clap::Parser;
+mod gamepad_overlay;
+mod keyboard;
+mod scaler;
+
+use clap::{Parser, ValueEnum};
+use dingooemu_core::cheats::CheatRule;
+use dingooemu_core::cpu::UnknownInstructionPolicy;
 use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator};
 use minifb::{Key, Window, WindowOptions};
 use std::path::PathBuf;
+
+use keyboard::{KeyboardMapper, RemapSpec};
+use scaler::{DisplayScaler, ScaleFilter};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum UnknownInstructionMode {
+    Stop,
+    #[default]
+    Skip,
+}
+
+impl From<UnknownInstructionMode> for UnknownInstructionPolicy {
+    fn from(mode: UnknownInstructionMode) -> Self {
+        match mode {
+            UnknownInstructionMode::Stop => Self::Stop,
+            UnknownInstructionMode::Skip => Self::Skip,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod screen {
+    unsafe extern "system" {
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+
+    pub fn size() -> (usize, usize) {
+        unsafe { (GetSystemMetrics(0) as usize, GetSystemMetrics(1) as usize) }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod screen {
+    type Display = *mut core::ffi::c_void;
+
+    #[link(name = "X11")]
+    unsafe extern "system" {
+        fn XOpenDisplay(name: *const u8) -> Display;
+        fn XCloseDisplay(display: Display) -> i32;
+        fn XDisplayWidth(display: Display, screen: i32) -> i32;
+        fn XDisplayHeight(display: Display, screen: i32) -> i32;
+    }
+
+    pub fn size() -> (usize, usize) {
+        unsafe {
+            let display = XOpenDisplay(std::ptr::null());
+            if display.is_null() {
+                return (800, 600);
+            }
+            let size = (
+                XDisplayWidth(display, 0) as usize,
+                XDisplayHeight(display, 0) as usize,
+            );
+            let _ = XCloseDisplay(display);
+            size
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod screen {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayPixelsWide(display: u32) -> usize;
+        fn CGDisplayPixelsHigh(display: u32) -> usize;
+    }
+
+    pub fn size() -> (usize, usize) {
+        unsafe {
+            let display = CGMainDisplayID();
+            (CGDisplayPixelsWide(display), CGDisplayPixelsHigh(display))
+        }
+    }
+}
 
 /// Dingoo A320 Emulator
 #[derive(Parser, Debug)]
@@ -15,12 +96,65 @@ struct Args {
     path: String,
 
     /// Window scale factor
-    #[arg(short, long, default_value_t = 2)]
+    #[arg(
+        short,
+        long,
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u32).range(1..=16)
+    )]
     scale: u32,
+
+    /// Run in fullscreen mode
+    #[arg(short, long)]
+    fullscreen: bool,
+
+    /// Master audio volume (0-100)
+    #[arg(short, long, default_value_t = 100, value_parser = clap::value_parser!(u8).range(0..=100))]
+    volume: u8,
+
+    /// Enable emulator debug logging
+    #[arg(long)]
+    debug_logging: bool,
+
+    /// Remap a Dingoo button using BUTTON:KEY syntax
+    #[arg(long = "remap", value_name = "BUTTON:KEY")]
+    remappings: Vec<RemapSpec>,
+
+    /// Swap the emulated A and B buttons
+    #[arg(long = "swap-ab")]
+    swap_ab: bool,
+
+    /// Pixel scaling filter for display output
+    #[arg(long, value_enum, default_value_t = ScaleFilter::Nearest)]
+    filter: ScaleFilter,
+
+    /// Show the current Dingoo button state over the game frame
+    #[arg(long)]
+    show_gamepad: bool,
+
+    /// Frames before a held button starts repeating
+    #[arg(long = "repeat-delay", default_value_t = 24)]
+    repeat_delay: u32,
+
+    /// Frames between repeated button presses
+    #[arg(long = "repeat-period", default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..))]
+    repeat_period: u32,
+
+    /// Freeze a memory address or MIPS register using TARGET=VALUE syntax
+    #[arg(long = "cheat", value_name = "RULE")]
+    cheats: Vec<CheatRule>,
+
+    /// Behavior when an unknown MIPS instruction is encountered
+    #[arg(long, value_enum, default_value_t = UnknownInstructionMode::Skip)]
+    unknown_instruction_policy: UnknownInstructionMode,
 
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
+
+    /// Number of frames to run in headless mode
+    #[arg(long, default_value_t = 300)]
+    frames: u32,
 
     /// Take a screenshot after N frames and exit (saves as PNG)
     #[arg(short = 'S', long = "screenshot", value_name = "PATH")]
@@ -32,15 +166,25 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Initialize logger
-    env_logger::init();
-
     // Parse command line arguments
     let args = Args::parse();
+
+    let default_log_filter = if args.debug_logging { "debug" } else { "info" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_log_filter))
+        .format_timestamp_millis()
+        .init();
 
     // Load the game
     log::info!("Loading game: {}", args.path);
     let mut emu = Emulator::from_path(&args.path)?;
+    emu.cpu
+        .set_unknown_instruction_policy(args.unknown_instruction_policy.into());
+    emu.audio.set_master_volume(args.volume);
+    emu.input
+        .set_repeat_timing(args.repeat_delay, args.repeat_period);
+    for (index, cheat) in args.cheats.iter().cloned().enumerate() {
+        emu.set_parsed_cheat(index as u32, true, cheat)?;
+    }
 
     // Start emulation
     emu.start();
@@ -59,94 +203,256 @@ fn main() -> anyhow::Result<()> {
     }
 
     if args.headless {
-        // Headless mode: run for a fixed number of frames
+        // Headless mode: run for the requested number of frames
         log::info!("Running in headless mode");
-        for frame in 0..300 {
+        for frame in 0..args.frames {
             emu.tick()?;
             if frame % 60 == 0 {
                 log::info!("Frame {}", frame);
             }
         }
-        log::info!("Headless run complete");
+        log::info!("Headless run complete: {} frames", args.frames);
     } else {
         // Windowed mode
-        let width = (SCREEN_WIDTH * args.scale) as usize;
-        let height = (SCREEN_HEIGHT * args.scale) as usize;
+        let (width, height) = if args.fullscreen {
+            screen::size()
+        } else {
+            (
+                (SCREEN_WIDTH * args.scale) as usize,
+                (SCREEN_HEIGHT * args.scale) as usize,
+            )
+        };
 
         let mut window = Window::new(
             "Dingoo A320 Emulator",
             width,
             height,
             WindowOptions {
-                resize: false,
-                scale_mode: minifb::ScaleMode::AspectRatioStretch,
+                resize: !args.fullscreen,
+                borderless: args.fullscreen,
+                scale_mode: minifb::ScaleMode::Stretch,
                 ..WindowOptions::default()
             },
         )?;
 
+        if args.fullscreen {
+            window.topmost(true);
+            window.set_position(0, 0);
+        }
+
         // Limit to ~60fps
         window.set_target_fps(60);
+        let keyboard = KeyboardMapper::new(&args.remappings, args.swap_ab);
+        let mut display_scaler = DisplayScaler::new(args.filter);
 
         // Main loop
         while window.is_open() && !window.is_key_down(Key::Escape) {
             // Poll input
-            let buttons = poll_input(&window);
+            let buttons = keyboard.pressed_buttons(&window);
             emu.set_buttons(buttons);
 
             // Run one frame
             emu.tick()?;
 
             // Get framebuffer and convert to XRGB8888
-            let buffer = emu.video.to_xrgb8888();
+            let mut buffer = emu.video.to_xrgb8888();
+            if args.show_gamepad {
+                gamepad_overlay::draw(
+                    &mut buffer,
+                    SCREEN_WIDTH as usize,
+                    SCREEN_HEIGHT as usize,
+                    buttons,
+                );
+            }
+            let (window_width, window_height) = window.get_size();
+            let output = display_scaler.render(
+                &buffer,
+                SCREEN_WIDTH as usize,
+                SCREEN_HEIGHT as usize,
+                window_width,
+                window_height,
+            );
 
             // Update window
-            window.update_with_buffer(&buffer, SCREEN_WIDTH as usize, SCREEN_HEIGHT as usize)?;
+            window.update_with_buffer(output, window_width.max(1), window_height.max(1))?;
         }
     }
 
     Ok(())
 }
 
-/// Poll keyboard input and convert to Dingoo button mask
-fn poll_input(window: &Window) -> u32 {
-    let mut buttons = 0u32;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    if window.is_key_down(Key::Up) || window.is_key_down(Key::W) {
-        buttons |= dingooemu_core::input::BUTTON_UP;
-    }
-    if window.is_key_down(Key::Down) || window.is_key_down(Key::S) {
-        buttons |= dingooemu_core::input::BUTTON_DOWN;
-    }
-    if window.is_key_down(Key::Left) || window.is_key_down(Key::A) {
-        buttons |= dingooemu_core::input::BUTTON_LEFT;
-    }
-    if window.is_key_down(Key::Right) || window.is_key_down(Key::D) {
-        buttons |= dingooemu_core::input::BUTTON_RIGHT;
-    }
-    if window.is_key_down(Key::L) {
-        buttons |= dingooemu_core::input::BUTTON_A;
-    }
-    if window.is_key_down(Key::K) {
-        buttons |= dingooemu_core::input::BUTTON_B;
-    }
-    if window.is_key_down(Key::I) {
-        buttons |= dingooemu_core::input::BUTTON_X;
-    }
-    if window.is_key_down(Key::J) {
-        buttons |= dingooemu_core::input::BUTTON_Y;
-    }
-    if window.is_key_down(Key::Key1) || window.is_key_down(Key::Q) {
-        buttons |= dingooemu_core::input::BUTTON_SELECT;
-    }
-    if window.is_key_down(Key::Key0) || window.is_key_down(Key::O) {
-        buttons |= dingooemu_core::input::BUTTON_START;
-    }
-    if window.is_key_down(Key::LeftShift) {
-        buttons |= dingooemu_core::input::BUTTON_L;
-    }
-    if window.is_key_down(Key::RightShift) {
-        buttons |= dingooemu_core::input::BUTTON_R;
+    #[test]
+    fn scale_accepts_supported_range() {
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "--scale", "1", "game.app"])
+                .unwrap()
+                .scale,
+            1
+        );
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "--scale", "16", "game.app"])
+                .unwrap()
+                .scale,
+            16
+        );
     }
 
-    buttons
+    #[test]
+    fn scale_rejects_zero_and_excessive_values() {
+        assert!(Args::try_parse_from(["dingoo-emu", "--scale", "0", "game.app"]).is_err());
+        assert!(Args::try_parse_from(["dingoo-emu", "--scale", "17", "game.app"]).is_err());
+    }
+
+    #[test]
+    fn headless_frame_count_defaults_to_300_and_is_configurable() {
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "game.app"])
+                .unwrap()
+                .frames,
+            300
+        );
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "--headless", "--frames", "12", "game.app"])
+                .unwrap()
+                .frames,
+            12
+        );
+    }
+
+    #[test]
+    fn fullscreen_flag_is_parsed() {
+        assert!(
+            Args::try_parse_from(["dingoo-emu", "--fullscreen", "game.app"])
+                .unwrap()
+                .fullscreen
+        );
+    }
+
+    #[test]
+    fn volume_accepts_percent_range() {
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "game.app"])
+                .unwrap()
+                .volume,
+            100
+        );
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "--volume", "0", "game.app"])
+                .unwrap()
+                .volume,
+            0
+        );
+        assert!(Args::try_parse_from(["dingoo-emu", "--volume", "101", "game.app"]).is_err());
+    }
+
+    #[test]
+    fn debug_logging_flag_is_parsed() {
+        assert!(
+            Args::try_parse_from(["dingoo-emu", "--debug-logging", "game.app"])
+                .unwrap()
+                .debug_logging
+        );
+    }
+
+    #[test]
+    fn repeated_remap_options_are_parsed() {
+        let args = Args::try_parse_from([
+            "dingoo-emu",
+            "--remap",
+            "a:space",
+            "--remap",
+            "select:tab",
+            "game.app",
+        ])
+        .unwrap();
+        assert_eq!(args.remappings.len(), 2);
+    }
+
+    #[test]
+    fn swap_ab_flag_is_parsed() {
+        assert!(
+            Args::try_parse_from(["dingoo-emu", "--swap-ab", "game.app"])
+                .unwrap()
+                .swap_ab
+        );
+    }
+
+    #[test]
+    fn every_display_filter_is_parsed() {
+        for (name, expected) in [
+            ("nearest", ScaleFilter::Nearest),
+            ("bilinear", ScaleFilter::Bilinear),
+            ("bicubic", ScaleFilter::Bicubic),
+            ("xbrz", ScaleFilter::Xbrz),
+        ] {
+            assert_eq!(
+                Args::try_parse_from(["dingoo-emu", "--filter", name, "game.app"])
+                    .unwrap()
+                    .filter,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn show_gamepad_flag_is_parsed() {
+        assert!(
+            Args::try_parse_from(["dingoo-emu", "--show-gamepad", "game.app"])
+                .unwrap()
+                .show_gamepad
+        );
+    }
+
+    #[test]
+    fn repeat_timing_is_configurable_and_period_rejects_zero() {
+        let args = Args::try_parse_from([
+            "dingoo-emu",
+            "--repeat-delay",
+            "10",
+            "--repeat-period",
+            "2",
+            "game.app",
+        ])
+        .unwrap();
+        assert_eq!((args.repeat_delay, args.repeat_period), (10, 2));
+        assert!(Args::try_parse_from(["dingoo-emu", "--repeat-period", "0", "game.app"]).is_err());
+    }
+
+    #[test]
+    fn repeated_cheat_rules_are_parsed() {
+        let args = Args::try_parse_from([
+            "dingoo-emu",
+            "--cheat",
+            "mem8:0x100=1",
+            "--cheat",
+            "reg:r4=7",
+            "game.app",
+        ])
+        .unwrap();
+        assert_eq!(args.cheats.len(), 2);
+    }
+
+    #[test]
+    fn unknown_instruction_policy_accepts_stop_and_skip() {
+        for (name, expected) in [
+            ("stop", UnknownInstructionMode::Stop),
+            ("skip", UnknownInstructionMode::Skip),
+        ] {
+            assert_eq!(
+                Args::try_parse_from([
+                    "dingoo-emu",
+                    "--unknown-instruction-policy",
+                    name,
+                    "game.app",
+                ])
+                .unwrap()
+                .unknown_instruction_policy,
+                expected
+            );
+        }
+    }
 }

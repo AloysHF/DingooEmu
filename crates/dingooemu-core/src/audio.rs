@@ -14,7 +14,7 @@ const MAX_QUEUED_AUDIO_FRAMES: usize = OUTPUT_SAMPLE_RATE as usize / 2;
 #[cfg(feature = "standalone")]
 const MAX_QUEUED_AUDIO_BUFFERS: usize = 4;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SampleFormat {
     U8,
     S16Le,
@@ -30,7 +30,7 @@ impl SampleFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioConfig {
     pub sample_rate: u32,
     pub format: SampleFormat,
@@ -52,15 +52,20 @@ impl AudioConfig {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Audio {
     config: Option<AudioConfig>,
     volume: u8,
+    master_volume: u8,
     muted: bool,
     #[cfg(feature = "standalone")]
+    #[serde(skip)]
     mixer_device: Option<rodio::MixerDeviceSink>,
     #[cfg(feature = "standalone")]
+    #[serde(skip)]
     mixer: Option<rodio::mixer::Mixer>,
     #[cfg(feature = "standalone")]
+    #[serde(skip)]
     player: Option<rodio::Player>,
     #[cfg(not(feature = "standalone"))]
     pending_samples: VecDeque<i16>,
@@ -75,6 +80,7 @@ impl Audio {
         Self {
             config: None,
             volume: 100,
+            master_volume: 100,
             muted: false,
             #[cfg(feature = "standalone")]
             mixer_device: None,
@@ -226,6 +232,18 @@ impl Audio {
         true
     }
 
+    pub fn set_master_volume(&mut self, volume: u8) {
+        self.master_volume = volume.min(100);
+        #[cfg(feature = "standalone")]
+        if let Some(player) = self.player.as_ref() {
+            player.set_volume(self.effective_volume());
+        }
+    }
+
+    pub fn master_volume(&self) -> u8 {
+        self.master_volume
+    }
+
     pub fn set_muted(&mut self, muted: bool) -> bool {
         self.muted = muted;
         #[cfg(feature = "standalone")]
@@ -263,14 +281,27 @@ impl Audio {
         self.config
     }
 
+    pub(crate) fn resume_after_state_load(&mut self) {
+        #[cfg(feature = "standalone")]
+        if let Some(config) = self.config.take() {
+            let volume = self.volume;
+            let master_volume = self.master_volume;
+            let muted = self.muted;
+            self.open(config);
+            self.set_volume(volume as u32);
+            self.set_master_volume(master_volume);
+            self.set_muted(muted);
+        }
+    }
+
     fn effective_volume(&self) -> f32 {
         if self.muted {
             return 0.0;
         }
         if self.volume <= 100 {
-            self.volume as f32 / 100.0
+            self.volume as f32 / 100.0 * self.master_volume as f32 / 100.0
         } else {
-            self.volume as f32 / 255.0
+            self.volume as f32 / 255.0 * self.master_volume as f32 / 100.0
         }
     }
 }
@@ -297,7 +328,7 @@ fn decode_pcm(data: &[u8], format: SampleFormat, channels: u8) -> Vec<f32> {
 }
 
 #[cfg(not(feature = "standalone"))]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct StreamingResampler {
     input_rate: u32,
     input_frames_seen: u64,
@@ -364,6 +395,15 @@ mod tests {
         let samples = decode_pcm(&[0, 128, 255], SampleFormat::U8, 2);
 
         assert_eq!(samples.len(), 2);
+    }
+
+    #[test]
+    fn master_volume_is_clamped_to_percent_range() {
+        let mut audio = Audio::new();
+        audio.set_master_volume(35);
+        assert_eq!(audio.master_volume(), 35);
+        audio.set_master_volume(255);
+        assert_eq!(audio.master_volume(), 100);
     }
 
     #[cfg(not(feature = "standalone"))]

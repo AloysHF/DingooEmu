@@ -1,44 +1,121 @@
-use crate::constants::*;
-use crate::CALLBACKS;
+use std::ffi::c_void;
 
-/// Log a message through the libretro log interface
-pub fn retro_log(level: u32, msg: &str) {
-    unsafe {
-        if let Some(callbacks) = CALLBACKS.as_ref() {
-            if let Some(log_fn) = callbacks.log {
-                let c_msg = std::ffi::CString::new(msg).unwrap();
-                log_fn(level, c_msg.as_ptr());
-            }
+use crate::constants::RETRO_ENVIRONMENT_GET_LOG_INTERFACE;
+use crate::types::*;
+
+struct Callbacks {
+    environment: RetroEnvironmentCallback,
+    video_refresh: RetroVideoRefreshCallback,
+    audio_sample: RetroAudioSampleCallback,
+    audio_sample_batch: RetroAudioSampleBatchCallback,
+    input_poll: RetroInputPollCallback,
+    input_state: RetroInputStateCallback,
+    log: RetroLogPrintfCallback,
+}
+
+impl Callbacks {
+    const fn new() -> Self {
+        Self {
+            environment: None,
+            video_refresh: None,
+            audio_sample: None,
+            audio_sample_batch: None,
+            input_poll: None,
+            input_state: None,
+            log: None,
         }
     }
 }
 
-/// Get a libretro environment variable
-pub fn environment_get(id: u32, data: *mut std::ffi::c_void) -> bool {
-    unsafe {
-        if let Some(callbacks) = CALLBACKS.as_ref() {
-            if let Some(env_fn) = callbacks.environment {
-                return env_fn(id, data);
-            }
-        }
-        false
+static mut CALLBACKS: Callbacks = Callbacks::new();
+
+pub fn set_environment(callback: RetroEnvironmentCallback) {
+    unsafe { CALLBACKS.environment = callback };
+}
+
+pub fn set_video_refresh(callback: RetroVideoRefreshCallback) {
+    unsafe { CALLBACKS.video_refresh = callback };
+}
+
+pub fn set_audio_sample(callback: RetroAudioSampleCallback) {
+    unsafe { CALLBACKS.audio_sample = callback };
+}
+
+pub fn set_audio_sample_batch(callback: RetroAudioSampleBatchCallback) {
+    unsafe { CALLBACKS.audio_sample_batch = callback };
+}
+
+pub fn set_input_poll(callback: RetroInputPollCallback) {
+    unsafe { CALLBACKS.input_poll = callback };
+}
+
+pub fn set_input_state(callback: RetroInputStateCallback) {
+    unsafe { CALLBACKS.input_state = callback };
+}
+
+pub fn initialize_log_interface() {
+    unsafe { CALLBACKS.log = None };
+    let mut interface = RetroLogCallback { log: None };
+    if environment(
+        RETRO_ENVIRONMENT_GET_LOG_INTERFACE,
+        &mut interface as *mut RetroLogCallback as *mut c_void,
+    ) {
+        unsafe { CALLBACKS.log = interface.log };
     }
 }
 
-/// Set pixel format
-pub fn environment_set_pixel_format(format: u32) -> bool {
-    environment_get(
-        RETRO_ENVIRONMENT_SET_PIXEL_FORMAT,
-        &format as *const _ as *mut _,
-    )
+pub fn environment(command: u32, data: *mut c_void) -> bool {
+    unsafe {
+        CALLBACKS
+            .environment
+            .is_some_and(|callback| callback(command, data))
+    }
 }
 
-/// Set input descriptors
-pub fn environment_set_input_descriptors(
-    descriptors: *const crate::types::RetroInputDescriptor,
-) -> bool {
-    environment_get(
-        RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS,
-        descriptors as *mut _,
-    )
+pub fn video_refresh(data: *const c_void, width: u32, height: u32, pitch: usize) {
+    unsafe {
+        if let Some(callback) = CALLBACKS.video_refresh {
+            callback(data, width, height, pitch);
+        }
+    }
+}
+
+pub fn audio_sample(left: i16, right: i16) {
+    unsafe {
+        if let Some(callback) = CALLBACKS.audio_sample {
+            callback(left, right);
+        }
+    }
+}
+
+pub fn audio_sample_batch(data: *const i16, frames: usize) -> Option<usize> {
+    unsafe {
+        CALLBACKS
+            .audio_sample_batch
+            .map(|callback| callback(data, frames))
+    }
+}
+
+pub fn input_poll() {
+    unsafe {
+        if let Some(callback) = CALLBACKS.input_poll {
+            callback();
+        }
+    }
+}
+
+pub fn input_state(port: u32, device: u32, index: u32, id: u32) -> i16 {
+    unsafe {
+        CALLBACKS
+            .input_state
+            .map_or(0, |callback| callback(port, device, index, id))
+    }
+}
+
+pub fn log(level: u32, message: *const std::os::raw::c_char) {
+    unsafe {
+        if let Some(callback) = CALLBACKS.log {
+            callback(level, message);
+        }
+    }
 }

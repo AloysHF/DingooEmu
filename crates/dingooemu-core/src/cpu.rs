@@ -1,8 +1,15 @@
-use crate::error::Result;
+use crate::error::{Result, SimulatorError};
 use crate::memory::Memory;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum UnknownInstructionPolicy {
+    Stop,
+    #[default]
+    Skip,
+}
+
 /// MIPS32 register file
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Registers {
     /// General purpose registers (R0-R31)
     /// R0 is hardwired to zero
@@ -47,6 +54,7 @@ impl Registers {
 }
 
 /// MIPS32 CPU for Dingoo A320 (Ingenic JZ4740 XBurst)
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cpu {
     /// Register file
     pub regs: Registers,
@@ -60,6 +68,7 @@ pub struct Cpu {
     pub branch_target: u32,
     /// Whether branch_delay was set in the CURRENT step (not from previous)
     branch_delay_pending: bool,
+    unknown_instruction_policy: UnknownInstructionPolicy,
 }
 
 impl Cpu {
@@ -72,6 +81,7 @@ impl Cpu {
             branch_delay: false,
             branch_target: 0,
             branch_delay_pending: false,
+            unknown_instruction_policy: UnknownInstructionPolicy::default(),
         }
     }
 
@@ -88,6 +98,21 @@ impl Cpu {
     /// Check if CPU is running
     pub fn is_running(&self) -> bool {
         self.running
+    }
+
+    pub fn set_unknown_instruction_policy(&mut self, policy: UnknownInstructionPolicy) {
+        self.unknown_instruction_policy = policy;
+    }
+
+    fn handle_unknown_instruction(&self, instr: u32) -> Result<()> {
+        let pc = self.regs.pc.wrapping_sub(4);
+        match self.unknown_instruction_policy {
+            UnknownInstructionPolicy::Stop => Err(SimulatorError::InvalidInstruction { pc, instr }),
+            UnknownInstructionPolicy::Skip => {
+                log::warn!("Skipping unimplemented instruction {instr:#010x} at PC={pc:#010x}");
+                Ok(())
+            }
+        }
     }
 
     /// Execute one instruction
@@ -171,15 +196,7 @@ impl Cpu {
             0x2B => self.execute_sw(instr, memory),       // SW
             0x2E => self.execute_swr(instr, memory),      // SWR
             0x33 => Ok(()),                               // PREF
-            _ => {
-                // TODO: Implement more instructions
-                log::warn!(
-                    "Unimplemented opcode: {:#04x} at PC={:#010x}",
-                    opcode,
-                    self.regs.pc.wrapping_sub(4)
-                );
-                Ok(())
-            }
+            _ => self.handle_unknown_instruction(instr),
         }
     }
 
@@ -328,13 +345,7 @@ impl Cpu {
                 let b = self.regs.read(rt);
                 self.regs.write(rd, if a < b { 1 } else { 0 });
             }
-            _ => {
-                log::warn!(
-                    "Unimplemented special funct: {:#04x} at PC={:#010x}",
-                    funct,
-                    self.regs.pc.wrapping_sub(4)
-                );
-            }
+            _ => return self.handle_unknown_instruction(instr),
         }
         Ok(())
     }
@@ -581,13 +592,7 @@ impl Cpu {
                     self.branch(offset);
                 }
             }
-            _ => {
-                log::warn!(
-                    "Unimplemented REGIMM rt={:#04x} at PC={:#010x}",
-                    rt,
-                    self.regs.pc.wrapping_sub(4)
-                );
-            }
+            _ => return self.handle_unknown_instruction(instr),
         }
         Ok(())
     }
@@ -773,13 +778,7 @@ impl Cpu {
                 let count = (!val).leading_zeros();
                 self.regs.write(rd, count);
             }
-            _ => {
-                log::warn!(
-                    "Unimplemented SPECIAL2 funct: {:#04x} at PC={:#010x}",
-                    funct,
-                    self.regs.pc.wrapping_sub(4)
-                );
-            }
+            _ => return self.handle_unknown_instruction(instr),
         }
         Ok(())
     }
@@ -788,6 +787,26 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_instruction_policy_can_stop_or_skip() {
+        let instruction = 0xfc00_0000;
+        let mut memory = Memory::new();
+        memory.write_u32(0, instruction).unwrap();
+
+        let mut skip_cpu = Cpu::new(0);
+        skip_cpu.start();
+        assert!(skip_cpu.step(&mut memory).is_ok());
+        assert_eq!(skip_cpu.regs.pc, 4);
+
+        let mut stop_cpu = Cpu::new(0);
+        stop_cpu.set_unknown_instruction_policy(UnknownInstructionPolicy::Stop);
+        stop_cpu.start();
+        assert!(matches!(
+            stop_cpu.step(&mut memory),
+            Err(SimulatorError::InvalidInstruction { pc: 0, instr }) if instr == instruction
+        ));
+    }
 
     #[test]
     fn test_cpu_creation() {

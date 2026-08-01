@@ -27,7 +27,7 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
 - **Screenshot mode** — Headless frame capture for automated testing and preview generation
 - **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`
-- **RetroArch integration** — libretro core for use with RetroArch frontend
+- **RetroArch integration** — libretro core with video, audio, RetroPad input, reset, and persistent game saves
 - **Cross-platform** — Windows, Linux, macOS
 
 ## Usage
@@ -46,16 +46,14 @@ installation, keyboard controls, screenshot mode, and all command-line options.
 
 ### RetroArch Mode
 
-Build the libretro core and load it in RetroArch:
+<!-- TODO: Publish DingooEmu in the official RetroArch Core Downloader index. -->
 
-```bash
-cargo build -p dingooemu-libretro --release
-```
-
-The core file will be produced at `target/release/dingooemu_libretro.dll` (Windows) or `libdingooemu_libretro.so` (Linux).
+Install **Dingoo A320 (DingooEmu)** from RetroArch's Core Downloader, or
+install the release files manually, then load a `.app` game through
+**Load Content**.
 
 See the [RetroArch Core](docs/RetroArch-Core.md) guide for installation,
-supported features, and RetroPad mapping.
+supported platforms and features, RetroPad mapping, core options, and cheats.
 
 ## Building
 
@@ -66,9 +64,11 @@ Requires [Rust](https://www.rust-lang.org/tools/install) (stable).
 ```bash
 cargo build -p dingooemu --release
 cargo run -p dingooemu --release -- path/to/game.app
+cargo run -p dingooemu --release -- --fullscreen path/to/game.app
 ```
 
-The binary is produced at `target/release/dingooemu` (`.exe` on Windows).
+The binary is produced at `target/release/dingoo-emu` (`dingoo-emu.exe` on
+Windows).
 
 ### Libretro Core (for RetroArch)
 
@@ -76,10 +76,16 @@ The binary is produced at `target/release/dingooemu` (`.exe` on Windows).
 cargo build -p dingooemu-libretro --release
 ```
 
-Cargo names the cdylib after its lib target, so this produces `dingooemu.dll`
-on Windows (`libdingooemu.so` on Linux) under `target/release/`. RetroArch
-expects the core file to be named `dingooemu_libretro.<ext>`, so rename it
-accordingly before dropping it into RetroArch's `cores/` directory.
+Cargo names the cdylib after its lib target, so this produces
+`dingooemu_libretro.dll` on Windows, `libdingooemu_libretro.so` on Linux, or
+`libdingooemu_libretro.dylib` on macOS under `target/release/`. RetroArch
+expects the core file to be named `dingooemu_libretro.<ext>`, so remove the
+leading `lib` from the Linux or macOS output before copying it into
+RetroArch's `cores/` directory.
+
+For Android cross-compilation, see
+[Android Libretro Core](docs/Android-Libretro-Core.md). For iOS, see
+[iOS Libretro Core](docs/iOS-Libretro-Core.md).
 
 ## Testing
 
@@ -126,13 +132,15 @@ crates/
 
 ## Game Compatibility
 
-🚧 **Under Active Development**
+The current compatibility suite contains 36 documented `.app` entries. Each
+entry is smoke-tested for startup and initial rendering; this does not imply
+complete gameplay, audio, or save-data compatibility.
 
-This project is in early development. The basic architecture is being established, and simple `.app` titles can now reach the rendering path. Compatibility remains experimental.
-
-| Category | Count | Status |
-|----------|-------|--------|
-| Verified Games | 8 | ⚠️ Partial |
+| Result | Count | Status |
+|--------|-------|--------|
+| Renders a non-black frame | 35 | ✅ Pass |
+| Black screen or crash | 1 | ❌ Fail |
+| **Total** | **36** | **⚠️ Experimental** |
 
 For detailed game list with screenshots and descriptions, see [Game Compatibility](docs/Game-Compatibility.md).
 
@@ -140,16 +148,19 @@ For detailed game list with screenshots and descriptions, see [Game Compatibilit
 
 | Key | Dingoo Button |
 |-----|---------------|
-| Arrow keys / WASD | D-pad |
-| L | A |
-| K | B |
-| I | X |
-| J | Y |
-| 1 / Q | SELECT |
-| 0 / O | START |
-| Left Shift | L shoulder |
-| Right Shift | R shoulder |
+| Arrow keys | D-pad |
+| X | A |
+| Z | B |
+| S | X |
+| A | Y |
+| Enter | START |
+| Right Shift | SELECT |
+| Q | L shoulder |
+| W | R shoulder |
 | Esc | Exit |
+
+The standalone defaults match RetroArch's standard keyboard bindings for the
+equivalent RetroPad buttons.
 
 ## Contribute
 

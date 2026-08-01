@@ -10,6 +10,7 @@ pub const FRAMEBUFFER_MAP_SIZE: usize = 0x0002_6000;
 pub const VM_LCD_FB_ADDRESS: u32 = 0x9400_0000;
 
 /// Video subsystem
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Video {
     /// Framebuffer in RGB565 format (host-side copy)
     framebuffer: Box<[u8]>,
@@ -42,6 +43,10 @@ impl Video {
     /// Get a mutable reference to the framebuffer
     pub fn framebuffer_mut(&mut self) -> &mut [u8] {
         &mut self.framebuffer
+    }
+
+    pub(crate) fn snapshot_layout_is_valid(&self) -> bool {
+        self.framebuffer.len() == FRAMEBUFFER_SIZE
     }
 
     /// Mark framebuffer as dirty (needs sync from guest memory)

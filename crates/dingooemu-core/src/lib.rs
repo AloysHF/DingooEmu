@@ -6,11 +6,13 @@
 
 pub mod app_loader;
 pub mod audio;
+pub mod cheats;
 pub mod cpu;
 pub mod emulator;
 pub mod error;
 pub mod input;
 pub mod memory;
+mod save_state;
 pub mod sdk_hle;
 pub mod video;
 

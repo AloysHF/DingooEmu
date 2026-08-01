@@ -1,5 +1,6 @@
 use crate::app_loader::{AppImage, ResourceKind};
 use crate::audio::{Audio, AudioConfig};
+use crate::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::cpu::Cpu;
 use crate::error::Result;
 use crate::input::Input;
@@ -7,7 +8,7 @@ use crate::memory::Memory;
 use crate::sdk_hle::SdkHle;
 use crate::video::Video;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const CPU_CLOCK_HZ: u64 = 336_000_000;
 const FRAMES_PER_SECOND: u64 = 60;
@@ -29,22 +30,72 @@ fn hook_filter_location(address: u32) -> (usize, u64) {
     )
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct OpenFile {
     data: Vec<u8>,
     position: usize,
     data_ptr: u32,
+    save_path: Option<PathBuf>,
+    writable: bool,
+    dirty: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum TaskWait {
+    AudioWrite,
     Semaphore(u32),
     UntilCycle(u64),
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct GuestTask {
     cpu: Cpu,
     priority: u32,
     wait: Option<TaskWait>,
+}
+
+#[derive(serde::Serialize)]
+struct EmulatorStateRef<'a> {
+    cpu: &'a Cpu,
+    memory: &'a Memory,
+    video: &'a Video,
+    input: &'a Input,
+    audio: &'a Audio,
+    frame_count: u64,
+    cycle_count: u64,
+    tasks: &'a [GuestTask],
+    scheduler_cursor: usize,
+    main_wait: Option<TaskWait>,
+    active_task: Option<usize>,
+    semaphores: &'a HashMap<u32, u32>,
+    next_semaphore_handle: u32,
+    open_files: HashMap<u32, OpenFile>,
+    next_file_handle: u32,
+    app_main_args_initialized: bool,
+    locale_ansi_buffer: Option<u32>,
+    framebuffer_submitted: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct EmulatorState {
+    cpu: Cpu,
+    memory: Memory,
+    video: Video,
+    input: Input,
+    audio: Audio,
+    frame_count: u64,
+    cycle_count: u64,
+    tasks: Vec<GuestTask>,
+    scheduler_cursor: usize,
+    main_wait: Option<TaskWait>,
+    active_task: Option<usize>,
+    semaphores: HashMap<u32, u32>,
+    next_semaphore_handle: u32,
+    open_files: HashMap<u32, OpenFile>,
+    next_file_handle: u32,
+    app_main_args_initialized: bool,
+    locale_ansi_buffer: Option<u32>,
+    framebuffer_submitted: bool,
 }
 
 fn prepare_resource_file_data(name: &str, kind: ResourceKind, data: Vec<u8>) -> Vec<u8> {
@@ -93,6 +144,8 @@ pub struct Emulator {
     pub audio: Audio,
     /// SDK HLE bridge
     pub sdk: SdkHle,
+    /// Frontend-managed memory and register freeze rules
+    cheats: CheatManager,
     /// Frame count
     frame_count: u64,
     /// Emulated CPU cycles elapsed
@@ -120,6 +173,8 @@ pub struct Emulator {
     hook_filter: Box<[u64]>,
     /// Open guest resource files
     open_files: HashMap<u32, OpenFile>,
+    /// Host directory used for persistent guest-created files
+    save_directory: Option<PathBuf>,
     /// Next guest file handle
     next_file_handle: u32,
     /// AppMain export address
@@ -233,6 +288,7 @@ impl Emulator {
             log::trace!("Hooked SDK import: {:#010x} = {}", addr, name);
         }
 
+        let save_directory = Path::new(&app_path).parent().map(Path::to_path_buf);
         Ok(Self {
             cpu,
             memory,
@@ -240,6 +296,7 @@ impl Emulator {
             input,
             audio,
             sdk,
+            cheats: CheatManager::default(),
             frame_count: 0,
             cycle_count: 0,
             tasks: Vec::new(),
@@ -253,6 +310,7 @@ impl Emulator {
             hooked_addrs,
             hook_filter,
             open_files: HashMap::new(),
+            save_directory,
             next_file_handle: 1,
             app_main_entry,
             app_main_init_check_address: app_main_entry.map(|addr| addr.wrapping_add(0x34)),
@@ -301,13 +359,150 @@ impl Emulator {
 
     /// Stop the emulator
     pub fn stop(&mut self) {
+        self.flush_save_files();
         self.cpu.stop();
         log::info!("Emulator stopped");
+    }
+
+    /// Rebuild all mutable runtime state from the loaded app image.
+    pub fn reset(&mut self) -> Result<()> {
+        self.flush_save_files();
+        let app = self
+            .app
+            .clone()
+            .ok_or_else(|| "cannot reset an emulator without a loaded app".to_string())?;
+        let was_running = self.is_running();
+        let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
+        replacement.save_directory = self.save_directory.clone();
+        replacement.cheats = self.cheats.clone();
+        self.memory.copy_state_from(&replacement.memory);
+        std::mem::swap(&mut replacement.memory, &mut self.memory);
+        if was_running {
+            replacement.start();
+        }
+        *self = replacement;
+        log::info!("Emulator reset");
+        Ok(())
+    }
+
+    /// Return the fixed buffer capacity required for a serialized state.
+    pub fn serialized_state_size(&self) -> usize {
+        crate::save_state::SERIALIZED_SIZE
+    }
+
+    /// Serialize the complete mutable runtime state into a fixed-size buffer.
+    pub fn serialize_state(&self, output: &mut [u8]) -> anyhow::Result<()> {
+        let app = self
+            .app
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("cannot save state without loaded content"))?;
+        let mut open_files = self.open_files.clone();
+        for file in open_files.values_mut() {
+            let Some(path) = file.save_path.take() else {
+                continue;
+            };
+            let root = self
+                .save_directory
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("save file has no configured save directory"))?;
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| anyhow::anyhow!("save file is outside the configured directory"))?;
+            if !safe_relative_path(relative) {
+                anyhow::bail!("save file has an unsafe relative path");
+            }
+            file.save_path = Some(relative.to_path_buf());
+        }
+        let state = EmulatorStateRef {
+            cpu: &self.cpu,
+            memory: &self.memory,
+            video: &self.video,
+            input: &self.input,
+            audio: &self.audio,
+            frame_count: self.frame_count,
+            cycle_count: self.cycle_count,
+            tasks: &self.tasks,
+            scheduler_cursor: self.scheduler_cursor,
+            main_wait: self.main_wait,
+            active_task: self.active_task,
+            semaphores: &self.semaphores,
+            next_semaphore_handle: self.next_semaphore_handle,
+            open_files,
+            next_file_handle: self.next_file_handle,
+            app_main_args_initialized: self.app_main_args_initialized,
+            locale_ansi_buffer: self.locale_ansi_buffer,
+            framebuffer_submitted: self.framebuffer_submitted,
+        };
+        crate::save_state::encode(&state, crc32fast::hash(&app.data), output)
+    }
+
+    /// Restore a serialized state without changing the emulator on failure.
+    pub fn unserialize_state(&mut self, input: &[u8]) -> anyhow::Result<()> {
+        let app = self
+            .app
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("cannot load state without loaded content"))?;
+        let mut state: EmulatorState =
+            crate::save_state::decode(input, crc32fast::hash(&app.data))?;
+        if !state.memory.snapshot_layout_is_valid() || !state.video.snapshot_layout_is_valid() {
+            anyhow::bail!("save state has an incompatible memory layout");
+        }
+        if state.tasks.len() > MAX_GUEST_TASKS
+            || state
+                .active_task
+                .is_some_and(|index| index >= state.tasks.len())
+        {
+            anyhow::bail!("save state has an invalid task layout");
+        }
+        for file in state.open_files.values_mut() {
+            let Some(relative) = file.save_path.take() else {
+                continue;
+            };
+            if !safe_relative_path(&relative) {
+                anyhow::bail!("save state contains an unsafe save path");
+            }
+            let root = self
+                .save_directory
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("save state requires a save directory"))?;
+            file.save_path = Some(root.join(relative));
+        }
+
+        let was_running = state.cpu.is_running();
+        let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
+        replacement.save_directory = self.save_directory.clone();
+        replacement.cheats = self.cheats.clone();
+        replacement.cpu = state.cpu;
+        self.memory.copy_state_from(&state.memory);
+        std::mem::swap(&mut replacement.memory, &mut self.memory);
+        replacement.video = state.video;
+        replacement.input = state.input;
+        replacement.audio = state.audio;
+        replacement.audio.resume_after_state_load();
+        replacement.frame_count = state.frame_count;
+        replacement.cycle_count = state.cycle_count;
+        replacement.tasks = state.tasks;
+        replacement.scheduler_cursor = state.scheduler_cursor;
+        replacement.main_wait = state.main_wait;
+        replacement.active_task = state.active_task;
+        replacement.semaphores = state.semaphores;
+        replacement.next_semaphore_handle = state.next_semaphore_handle;
+        replacement.open_files = state.open_files;
+        replacement.next_file_handle = state.next_file_handle;
+        replacement.app_main_args_initialized = state.app_main_args_initialized;
+        replacement.locale_ansi_buffer = state.locale_ansi_buffer;
+        replacement.framebuffer_submitted = state.framebuffer_submitted;
+        if was_running {
+            replacement.cpu.start();
+        }
+        *self = replacement;
+        Ok(())
     }
 
     /// Run one frame of emulation
     pub fn tick(&mut self) -> Result<()> {
         self.framebuffer_submitted = false;
+        self.cheats.apply(&mut self.memory, &mut self.cpu);
 
         let mut remaining_cycles = CYCLES_PER_FRAME;
         let mut idle_contexts = 0usize;
@@ -417,13 +612,17 @@ impl Emulator {
     fn active_context_waiting(&mut self) -> bool {
         let cycle_count = self.cycle_count;
         let wait = if let Some(task_index) = self.active_task {
-            &mut self.tasks[task_index].wait
+            self.tasks[task_index].wait
         } else {
-            &mut self.main_wait
+            self.main_wait
         };
-        match *wait {
+        match wait {
+            Some(TaskWait::AudioWrite) if self.audio.can_write() => {
+                self.clear_active_wait();
+                false
+            }
             Some(TaskWait::UntilCycle(deadline)) if cycle_count >= deadline => {
-                *wait = None;
+                self.clear_active_wait();
                 false
             }
             Some(_) => true,
@@ -818,6 +1017,9 @@ impl Emulator {
                 data,
                 position: 0,
                 data_ptr: 0,
+                save_path: None,
+                writable: false,
+                dirty: false,
             },
         );
         log::trace!("Resource opened: {name} -> {handle} ({size} bytes)");
@@ -840,6 +1042,9 @@ impl Emulator {
                 data,
                 position: 0,
                 data_ptr: 0,
+                save_path: None,
+                writable: false,
+                dirty: false,
             },
         );
         log::trace!("  host file open: {} -> {} ({} bytes)", name, handle, size);
@@ -861,24 +1066,149 @@ impl Emulator {
         Path::new(&app_directory).join(path)
     }
 
-    fn open_memory_file(&mut self) -> u32 {
+    fn open_memory_file(
+        &mut self,
+        data: Vec<u8>,
+        save_path: PathBuf,
+        append: bool,
+        writable: bool,
+        dirty: bool,
+    ) -> u32 {
         let handle = self.next_file_handle;
         self.next_file_handle = self.next_file_handle.wrapping_add(1).max(1);
+        let position = if append { data.len() } else { 0 };
         self.open_files.insert(
             handle,
             OpenFile {
-                data: Vec::new(),
-                position: 0,
+                data,
+                position,
                 data_ptr: 0,
+                save_path: Some(save_path),
+                writable,
+                dirty,
             },
         );
         handle
+    }
+
+    fn save_file_path(&self, name: &str) -> Option<PathBuf> {
+        let root = self.save_directory.as_ref()?;
+        let normalized = name.replace('\\', "/");
+        let mut relative = PathBuf::new();
+        for (index, component) in normalized.split('/').enumerate() {
+            if component.is_empty() || component == "." {
+                continue;
+            }
+            if component == ".." || component.contains('\0') {
+                return None;
+            }
+            let component = if index == 0
+                && component.len() == 2
+                && component.as_bytes()[0].is_ascii_alphabetic()
+                && component.ends_with(':')
+            {
+                &component[..1]
+            } else {
+                component
+            };
+            if component.contains(':') {
+                return None;
+            }
+            relative.push(component);
+        }
+        (!relative.as_os_str().is_empty()).then(|| root.join(relative))
+    }
+
+    fn open_save_file(&mut self, name: &str, operation: u8, writable: bool) -> u32 {
+        let Some(path) = self.save_file_path(name) else {
+            log::warn!("Rejected guest save path: {name}");
+            return 0;
+        };
+        let data = match operation {
+            b'w' => Vec::new(),
+            b'a' | b'r' => match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(error) if operation == b'a' && error.kind() == std::io::ErrorKind::NotFound => {
+                    Vec::new()
+                }
+                Err(_) => return 0,
+            },
+            _ => return 0,
+        };
+        self.open_memory_file(
+            data,
+            path,
+            operation == b'a',
+            writable,
+            writable && operation != b'r',
+        )
+    }
+
+    fn open_guest_file(&mut self, name: &str, mode: &str) -> u32 {
+        let operation = mode.as_bytes().first().copied().unwrap_or(b'r');
+        let writable = operation == b'w' || operation == b'a' || mode.contains('+');
+        if writable {
+            let handle = self.open_save_file(name, operation, true);
+            if handle != 0 {
+                return handle;
+            }
+            if operation != b'r' {
+                return 0;
+            }
+        } else {
+            let handle = self.open_save_file(name, b'r', false);
+            if handle != 0 {
+                return handle;
+            }
+        }
+
+        match self.open_resource_file(name) {
+            0 => self.open_host_file(name),
+            handle => handle,
+        }
+    }
+
+    fn flush_save_file(&mut self, handle: u32) -> std::io::Result<()> {
+        let Some(file) = self.open_files.get_mut(&handle) else {
+            return Ok(());
+        };
+        if !file.dirty {
+            return Ok(());
+        }
+        let Some(path) = file.save_path.as_ref() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, &file.data)?;
+        file.dirty = false;
+        Ok(())
+    }
+
+    /// Flush all modified guest save files to the configured save directory.
+    pub fn flush_save_files(&mut self) {
+        let handles: Vec<u32> = self.open_files.keys().copied().collect();
+        for handle in handles {
+            if let Err(error) = self.flush_save_file(handle) {
+                log::error!("Failed to flush guest save file {handle}: {error}");
+            }
+        }
+    }
+
+    /// Set the directory used for persistent guest-created files.
+    pub fn set_save_directory<P: Into<PathBuf>>(&mut self, directory: P) {
+        self.flush_save_files();
+        self.save_directory = Some(directory.into());
     }
 
     fn read_file(&mut self, dest: u32, size: u32, count: u32, handle: u32) -> Result<u32> {
         let Some(file) = self.open_files.get_mut(&handle) else {
             return Ok(0);
         };
+        if !file.writable {
+            return Ok(0);
+        }
         let requested = (size as usize).saturating_mul(count as usize);
         if requested == 0 {
             return Ok(0);
@@ -919,6 +1249,7 @@ impl Emulator {
         }
         file.data[file.position..end].copy_from_slice(&data);
         file.position = end;
+        file.dirty = true;
 
         Ok(count)
     }
@@ -1210,6 +1541,12 @@ impl Emulator {
                 let count = self.cpu.regs.read(6);
                 let written = if count == 0 || count > MAX_AUDIO_WRITE_BYTES {
                     false
+                } else if !self.audio.can_write() {
+                    self.set_active_wait(TaskWait::AudioWrite);
+                    log::trace!(
+                        "  waveout_write({buffer_ptr:#010x}, {count}) deferred until queue space is available"
+                    );
+                    return Ok(());
                 } else {
                     let mut data = Vec::with_capacity(count as usize);
                     for offset in 0..count {
@@ -1340,29 +1677,7 @@ impl Emulator {
             "fopen" | "fsys_fopen" => {
                 let name = self.read_guest_c_string(self.cpu.regs.read(4));
                 let mode = self.read_guest_c_string(self.cpu.regs.read(5));
-                let operation = mode.as_bytes().first().copied().unwrap_or(b'r');
-                let handle = match operation {
-                    b'w' => self.open_memory_file(),
-                    b'a' => {
-                        let handle = match self.open_resource_file(&name) {
-                            0 => self.open_host_file(&name),
-                            handle => handle,
-                        };
-                        let handle = if handle == 0 {
-                            self.open_memory_file()
-                        } else {
-                            handle
-                        };
-                        if let Some(file) = self.open_files.get_mut(&handle) {
-                            file.position = file.data.len();
-                        }
-                        handle
-                    }
-                    _ => match self.open_resource_file(&name) {
-                        0 => self.open_host_file(&name),
-                        handle => handle,
-                    },
-                };
+                let handle = self.open_guest_file(&name, &mode);
                 self.cpu.regs.write(2, handle);
                 log::trace!("  {}({}, {}) = {}", func_name, name, mode, handle);
             }
@@ -1370,16 +1685,16 @@ impl Emulator {
                 let name = self.read_guest_w_string(self.cpu.regs.read(4));
                 let mode = self.read_guest_w_string(self.cpu.regs.read(5));
                 log::trace!("  fsys_fopenW({}, {})", name, mode);
-                let handle = match self.open_resource_file(&name) {
-                    0 => self.open_host_file(&name),
-                    handle => handle,
-                };
+                let handle = self.open_guest_file(&name, &mode);
                 self.cpu.regs.write(2, handle);
             }
             "fclose" | "fsys_fclose" | "fsys_fcloseW" => {
                 let handle = self.cpu.regs.read(4);
+                let result = self.flush_save_file(handle);
                 self.open_files.remove(&handle);
-                self.cpu.regs.write(2, 0);
+                self.cpu
+                    .regs
+                    .write(2, if result.is_ok() { 0 } else { u32::MAX });
             }
             "fread" | "fsys_fread" => {
                 let dest = self.cpu.regs.read(4);
@@ -1467,25 +1782,56 @@ impl Emulator {
     fn sync_framebuffer(&mut self) {
         let fb_data = &self.memory.framebuffer()[..crate::video::FRAMEBUFFER_SIZE];
 
-        if fb_data.iter().any(|&byte| byte != 0) {
-            self.framebuffer_submitted = true;
-            // Copy to video subsystem
-            let dst = self.video.framebuffer_mut();
-            dst.copy_from_slice(fb_data);
-            if log::log_enabled!(log::Level::Trace) {
-                let non_zero_count = fb_data.iter().filter(|&&byte| byte != 0).count();
-                log::trace!(
-                    "  sync_framebuffer: {}/{} non-zero bytes",
-                    non_zero_count,
-                    fb_data.len()
-                );
-            }
+        self.framebuffer_submitted = true;
+        let dst = self.video.framebuffer_mut();
+        dst.copy_from_slice(fb_data);
+        if log::log_enabled!(log::Level::Trace) {
+            let non_zero_count = fb_data.iter().filter(|&&byte| byte != 0).count();
+            log::trace!(
+                "  sync_framebuffer: {}/{} non-zero bytes",
+                non_zero_count,
+                fb_data.len()
+            );
+        }
+    }
+
+    fn clear_active_wait(&mut self) {
+        if let Some(task_index) = self.active_task {
+            self.tasks[task_index].wait = None;
+        } else {
+            self.main_wait = None;
         }
     }
 
     /// Set the button state
     pub fn set_buttons(&mut self, buttons: u32) {
         self.input.set_buttons(buttons);
+    }
+
+    /// Install or update a frontend cheat slot.
+    pub fn set_cheat(
+        &mut self,
+        index: u32,
+        enabled: bool,
+        code: &str,
+    ) -> std::result::Result<(), CheatParseError> {
+        self.cheats.set_slot(index, enabled, code, &self.memory)
+    }
+
+    /// Install an already parsed cheat rule.
+    pub fn set_parsed_cheat(
+        &mut self,
+        index: u32,
+        enabled: bool,
+        rule: CheatRule,
+    ) -> std::result::Result<(), CheatParseError> {
+        self.cheats
+            .set_parsed_rule(index, enabled, rule, &self.memory)
+    }
+
+    /// Remove every configured cheat slot.
+    pub fn clear_cheats(&mut self) {
+        self.cheats.clear();
     }
 
     /// Get one video frame of interleaved stereo audio.
@@ -1514,6 +1860,13 @@ impl Emulator {
     }
 }
 
+fn safe_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
 impl Default for Emulator {
     fn default() -> Self {
         Self {
@@ -1523,6 +1876,7 @@ impl Default for Emulator {
             input: Input::new(),
             audio: Audio::new(),
             sdk: SdkHle::new(),
+            cheats: CheatManager::default(),
             frame_count: 0,
             cycle_count: 0,
             tasks: Vec::new(),
@@ -1536,6 +1890,7 @@ impl Default for Emulator {
             hooked_addrs: HashMap::new(),
             hook_filter: vec![0; HOOK_FILTER_WORDS].into_boxed_slice(),
             open_files: HashMap::new(),
+            save_directory: None,
             next_file_handle: 1,
             app_main_entry: None,
             app_main_init_check_address: None,
@@ -1551,11 +1906,44 @@ impl Default for Emulator {
 mod tests {
     use super::*;
 
+    fn minimal_app() -> AppImage {
+        let mut data = vec![0u8; 132];
+        data[0..4].copy_from_slice(b"CCDL");
+        data[0x20..0x24].copy_from_slice(b"IMPT");
+        data[0x40..0x44].copy_from_slice(b"EXPT");
+        data[0x60..0x64].copy_from_slice(b"RAWD");
+        data[0x68..0x6c].copy_from_slice(&128u32.to_le_bytes());
+        data[0x6c..0x70].copy_from_slice(&4u32.to_le_bytes());
+        data[0x74..0x78].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        data[0x78..0x7c].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        data[0x7c..0x80].copy_from_slice(&4u32.to_le_bytes());
+        AppImage::parse(&data).unwrap()
+    }
+
     #[test]
     fn test_emulator_creation() {
         let emu = Emulator::default();
         assert_eq!(emu.frame_count(), 0);
         assert!(!emu.is_running());
+    }
+
+    #[test]
+    fn test_reset_rebuilds_loaded_runtime_state() {
+        let mut emu = Emulator::from_app(minimal_app()).unwrap();
+        emu.start();
+        emu.memory.write_u32(0x1000, 0x1234_5678).unwrap();
+        emu.set_buttons(crate::input::BUTTON_A);
+        emu.frame_count = 42;
+        emu.cycle_count = 123;
+
+        emu.reset().unwrap();
+
+        assert!(emu.is_running());
+        assert_eq!(emu.cpu.regs.pc, 0x8000_0000);
+        assert_eq!(emu.memory.read_u32(0x1000).unwrap(), 0);
+        assert_eq!(emu.input.buttons(), 0);
+        assert_eq!(emu.frame_count, 0);
+        assert_eq!(emu.cycle_count, 0);
     }
 
     #[test]
@@ -1599,9 +1987,7 @@ mod tests {
             .insert(hook_address, "lcd_set_frame".to_string());
         let (word, mask) = hook_filter_location(hook_address);
         emu.hook_filter[word] |= mask;
-        emu.memory
-            .write_u8(crate::video::VM_LCD_FB_ADDRESS, 1)
-            .unwrap();
+        emu.video.framebuffer_mut().fill(0xff);
         emu.cpu.regs.pc = hook_address;
         emu.cpu.regs.write(31, hook_address + 4);
         emu.start();
@@ -1611,6 +1997,7 @@ mod tests {
         assert_eq!(emu.cpu.regs.pc, hook_address + 4);
         assert_eq!(emu.cpu.instruction_count, 0);
         assert_eq!(emu.cycle_count, CYCLES_PER_FRAME);
+        assert!(emu.video.framebuffer().iter().all(|&byte| byte == 0));
     }
 
     #[test]
@@ -1848,9 +2235,61 @@ mod tests {
         assert!(emu.take_audio_samples().iter().any(|&sample| sample != 0));
     }
 
+    #[cfg(not(feature = "standalone"))]
     #[test]
-    fn test_writable_file_is_buffered_in_memory() {
+    fn test_waveout_write_retries_after_queue_space_is_available() {
         let mut emu = Emulator::default();
+        let config = AudioConfig::new(16_000, 16, 1, 100).unwrap();
+        assert!(emu.audio.open(config));
+        assert!(emu.audio.write(&vec![0; 32_000]));
+        assert!(!emu.audio.can_write());
+
+        let hook_address = 0x4000;
+        let return_address = 0x1234;
+        let buffer_ptr = 0x2000;
+        emu.memory
+            .load_data(buffer_ptr, &1_000i16.to_le_bytes())
+            .unwrap();
+        emu.cpu.regs.pc = hook_address;
+        emu.cpu.regs.write(2, 0xdead_beef);
+        emu.cpu.regs.write(5, buffer_ptr);
+        emu.cpu.regs.write(6, 2);
+        emu.cpu.regs.write(31, return_address);
+
+        emu.handle_sdk_call(hook_address, "waveout_write").unwrap();
+
+        assert_eq!(emu.main_wait, Some(TaskWait::AudioWrite));
+        assert_eq!(emu.cpu.regs.pc, hook_address);
+        assert_eq!(emu.cpu.regs.read(2), 0xdead_beef);
+
+        for _ in 0..60 {
+            if emu.audio.can_write() {
+                break;
+            }
+            emu.take_audio_samples();
+        }
+        assert!(emu.audio.can_write());
+        assert!(!emu.active_context_waiting());
+
+        emu.handle_sdk_call(hook_address, "waveout_write").unwrap();
+
+        assert_eq!(emu.main_wait, None);
+        assert_eq!(emu.cpu.regs.pc, return_address);
+        assert_eq!(emu.cpu.regs.read(2), 1);
+    }
+
+    #[test]
+    fn test_writable_file_persists_and_reopens() {
+        let mut emu = Emulator::default();
+        let save_directory = std::env::temp_dir().join(format!(
+            "dingooemu-save-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        emu.set_save_directory(&save_directory);
         emu.memory.load_data(0x100, b"test.log\0").unwrap();
         emu.memory.load_data(0x120, b"w\0").unwrap();
         emu.memory.load_data(0x140, b"abcdef").unwrap();
@@ -1869,5 +2308,93 @@ mod tests {
 
         assert_eq!(emu.cpu.regs.read(2), 3);
         assert_eq!(emu.open_files[&handle].data, b"abcdef");
+
+        emu.cpu.regs.write(4, handle);
+        emu.handle_sdk_call(0, "fsys_fclose").unwrap();
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(
+            std::fs::read(save_directory.join("test.log")).unwrap(),
+            b"abcdef"
+        );
+
+        emu.memory.load_data(0x120, b"r\0").unwrap();
+        emu.cpu.regs.write(4, 0x100);
+        emu.cpu.regs.write(5, 0x120);
+        emu.handle_sdk_call(0, "fsys_fopen").unwrap();
+        let reopened = emu.cpu.regs.read(2);
+        assert_eq!(emu.open_files[&reopened].data, b"abcdef");
+
+        std::fs::remove_dir_all(save_directory).unwrap();
+    }
+
+    #[test]
+    fn test_guest_save_path_cannot_escape_save_directory() {
+        let mut emu = Emulator::default();
+        emu.set_save_directory(std::env::temp_dir().join("dingooemu-save-root"));
+
+        assert!(emu.save_file_path("save/profile.dat").is_some());
+        assert!(emu.save_file_path("A:\\save\\profile.dat").is_some());
+        assert!(emu.save_file_path("../outside.dat").is_none());
+        assert!(emu.save_file_path("save/../../outside.dat").is_none());
+    }
+
+    #[test]
+    fn test_save_state_round_trip_and_transactional_rejection() {
+        let mut emu = Emulator::from_app(minimal_app()).unwrap();
+        let save_directory = std::env::temp_dir().join("dingooemu-state-save-root");
+        emu.set_save_directory(&save_directory);
+        emu.start();
+        emu.cpu.regs.write(8, 0x1234_5678);
+        emu.memory.write_u32(0x2000, 0xaabb_ccdd).unwrap();
+        emu.input.set_buttons(crate::input::BUTTON_A);
+        emu.frame_count = 42;
+        emu.cycle_count = 987_654;
+        emu.open_files.insert(
+            7,
+            OpenFile {
+                data: b"open save data".to_vec(),
+                position: 4,
+                data_ptr: 0,
+                save_path: Some(save_directory.join("profile.dat")),
+                writable: true,
+                dirty: true,
+            },
+        );
+
+        let mut state = vec![0; emu.serialized_state_size()];
+        emu.serialize_state(&mut state).unwrap();
+        emu.cpu.regs.write(8, 0);
+        emu.memory.write_u32(0x2000, 0).unwrap();
+        emu.input.set_buttons(0);
+        emu.frame_count = 0;
+        emu.open_files.clear();
+
+        emu.unserialize_state(&state).unwrap();
+        assert_eq!(emu.cpu.regs.read(8), 0x1234_5678);
+        assert_eq!(emu.memory.read_u32(0x2000).unwrap(), 0xaabb_ccdd);
+        assert_eq!(emu.input.buttons(), crate::input::BUTTON_A);
+        assert_eq!(emu.frame_count, 42);
+        assert_eq!(emu.cycle_count, 987_654);
+        assert!(emu.is_running());
+        assert_eq!(emu.open_files[&7].data, b"open save data");
+        assert_eq!(
+            emu.open_files[&7].save_path.as_deref(),
+            Some(save_directory.join("profile.dat").as_path())
+        );
+
+        let unchanged_pc = emu.cpu.regs.pc;
+        let unchanged_memory = emu.memory.read_u32(0x2000).unwrap();
+        state[32] ^= 1;
+        assert!(emu.unserialize_state(&state).is_err());
+        assert_eq!(emu.cpu.regs.pc, unchanged_pc);
+        assert_eq!(emu.memory.read_u32(0x2000).unwrap(), unchanged_memory);
+
+        state[32] ^= 1;
+        let mut other_app = minimal_app();
+        other_app.data.push(1);
+        let mut other = Emulator::from_app(other_app).unwrap();
+        other.cpu.regs.pc = 0x8765_4321;
+        assert!(other.unserialize_state(&state).is_err());
+        assert_eq!(other.cpu.regs.pc, 0x8765_4321);
     }
 }

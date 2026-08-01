@@ -33,6 +33,7 @@ const IPU_CTRL_RUN: u32 = 1 << 1;
 const IPU_STATUS_OUT_END: u8 = 1;
 
 /// Memory manager for the Dingoo A320
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Memory {
     /// Main RAM (32 MB)
     ram: Box<[u8]>,
@@ -347,9 +348,53 @@ impl Memory {
         &mut self.ram
     }
 
+    /// Get the complete frontend-visible system RAM region.
+    pub fn system_ram(&self) -> &[u8] {
+        &self.ram
+    }
+
+    /// Get mutable frontend-visible system RAM.
+    pub fn system_ram_mut(&mut self) -> &mut [u8] {
+        &mut self.ram
+    }
+
+    pub(crate) fn is_cheat_writable_range(&self, addr: u32, len: usize) -> bool {
+        let physical = self.translate_address(addr) as usize;
+        if physical
+            .checked_add(len)
+            .is_some_and(|end| end <= self.ram.len())
+        {
+            return true;
+        }
+        self.framebuffer_offset(addr)
+            .and_then(|offset| offset.checked_add(len))
+            .is_some_and(|end| end <= self.framebuffer.len())
+    }
+
     /// Get the shared LCD framebuffer mapping.
     pub fn framebuffer(&self) -> &[u8] {
         &self.framebuffer
+    }
+
+    /// Get the complete frontend-visible LCD framebuffer mapping.
+    pub fn framebuffer_mut(&mut self) -> &mut [u8] {
+        &mut self.framebuffer
+    }
+
+    pub(crate) fn copy_state_from(&mut self, source: &Self) {
+        self.ram.copy_from_slice(&source.ram);
+        self.framebuffer.copy_from_slice(&source.framebuffer);
+        self.ipu_registers.copy_from_slice(&source.ipu_registers);
+        self.heap_ptr = source.heap_ptr;
+        self.allocations.clone_from(&source.allocations);
+        self.free_blocks.clone_from(&source.free_blocks);
+        self.write_log.clone_from(&source.write_log);
+    }
+
+    pub(crate) fn snapshot_layout_is_valid(&self) -> bool {
+        self.ram.len() == RAM_SIZE as usize
+            && self.framebuffer.len() == FRAMEBUFFER_MAP_SIZE
+            && self.ipu_registers.len() == IPU_REGISTER_SIZE
     }
 
     fn track_writes(&mut self, addr: u32, count: usize) {
