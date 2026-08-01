@@ -8,23 +8,17 @@ use minifb::{Key, Window};
 
 const DEFAULT_MAPPINGS: &[(u32, Key)] = &[
     (BUTTON_UP, Key::Up),
-    (BUTTON_UP, Key::W),
     (BUTTON_DOWN, Key::Down),
-    (BUTTON_DOWN, Key::S),
     (BUTTON_LEFT, Key::Left),
-    (BUTTON_LEFT, Key::A),
     (BUTTON_RIGHT, Key::Right),
-    (BUTTON_RIGHT, Key::D),
-    (BUTTON_A, Key::L),
-    (BUTTON_B, Key::K),
-    (BUTTON_X, Key::I),
-    (BUTTON_Y, Key::J),
-    (BUTTON_SELECT, Key::Key1),
-    (BUTTON_SELECT, Key::Q),
-    (BUTTON_START, Key::Key0),
-    (BUTTON_START, Key::O),
-    (BUTTON_L, Key::LeftShift),
-    (BUTTON_R, Key::RightShift),
+    (BUTTON_A, Key::X),
+    (BUTTON_B, Key::Z),
+    (BUTTON_X, Key::S),
+    (BUTTON_Y, Key::A),
+    (BUTTON_SELECT, Key::RightShift),
+    (BUTTON_START, Key::Enter),
+    (BUTTON_L, Key::Q),
+    (BUTTON_R, Key::W),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,20 +175,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_mapping_matches_retroarch_keyboard_defaults() {
+        let mapper = KeyboardMapper::new(&[], false);
+        for (key, button) in [
+            (Key::Up, BUTTON_UP),
+            (Key::Down, BUTTON_DOWN),
+            (Key::Left, BUTTON_LEFT),
+            (Key::Right, BUTTON_RIGHT),
+            (Key::X, BUTTON_A),
+            (Key::Z, BUTTON_B),
+            (Key::S, BUTTON_X),
+            (Key::A, BUTTON_Y),
+            (Key::Enter, BUTTON_START),
+            (Key::RightShift, BUTTON_SELECT),
+            (Key::Q, BUTTON_L),
+            (Key::W, BUTTON_R),
+        ] {
+            assert_eq!(
+                mapper.buttons_from_key_state(|pressed| pressed == key),
+                button
+            );
+        }
+    }
+
+    #[test]
     fn remapping_replaces_all_default_keys_for_a_button() {
         let mapper = KeyboardMapper::new(&["a:space".parse().unwrap()], false);
         assert_eq!(
             mapper.buttons_from_key_state(|key| key == Key::Space),
             BUTTON_A
         );
-        assert_eq!(mapper.buttons_from_key_state(|key| key == Key::L), 0);
+        assert_eq!(mapper.buttons_from_key_state(|key| key == Key::X), 0);
     }
 
     #[test]
     fn swap_ab_exchanges_logical_button_masks() {
         let mapper = KeyboardMapper::new(&[], true);
-        assert_eq!(mapper.buttons_from_key_state(|key| key == Key::L), BUTTON_B);
-        assert_eq!(mapper.buttons_from_key_state(|key| key == Key::K), BUTTON_A);
+        assert_eq!(mapper.buttons_from_key_state(|key| key == Key::X), BUTTON_B);
+        assert_eq!(mapper.buttons_from_key_state(|key| key == Key::Z), BUTTON_A);
     }
 
     #[test]

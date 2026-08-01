@@ -148,16 +148,19 @@ For detailed game list with screenshots and descriptions, see [Game Compatibilit
 
 | Key | Dingoo Button |
 |-----|---------------|
-| Arrow keys / WASD | D-pad |
-| L | A |
-| K | B |
-| I | X |
-| J | Y |
-| 1 / Q | SELECT |
-| 0 / O | START |
-| Left Shift | L shoulder |
-| Right Shift | R shoulder |
+| Arrow keys | D-pad |
+| X | A |
+| Z | B |
+| S | X |
+| A | Y |
+| Enter | START |
+| Right Shift | SELECT |
+| Q | L shoulder |
+| W | R shoulder |
 | Esc | Exit |
+
+The standalone defaults match RetroArch's standard keyboard bindings for the
+equivalent RetroPad buttons.
 
 ## Contribute
 
