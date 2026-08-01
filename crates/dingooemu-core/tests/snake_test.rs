@@ -10,13 +10,10 @@ fn snake_app_path() -> Option<PathBuf> {
         return path.exists().then_some(path);
     }
 
-    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    [
-        repository.join("tmp/GameCollection/Snake.app"),
-        repository.join("tmp/dingoo_game/Snake.app"),
-    ]
-    .into_iter()
-    .find(|path| path.exists())
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tmp/dingoo_game/Snake.app");
+    path.exists().then_some(path)
 }
 
 /// Test loading and rendering the bundled local Snake.app sample.
