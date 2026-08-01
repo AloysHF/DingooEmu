@@ -265,10 +265,26 @@ pub extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn retro_cheat_reset() {}
+pub extern "C" fn retro_cheat_reset() {
+    if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
+        emulator.clear_cheats();
+    }
+}
 
 #[no_mangle]
-pub extern "C" fn retro_cheat_set(_index: c_uint, _enabled: bool, _code: *const c_char) {}
+pub extern "C" fn retro_cheat_set(index: c_uint, enabled: bool, code: *const c_char) {
+    let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
+        return;
+    };
+    if code.is_null() {
+        log::warn!("Ignored null cheat code for slot {index}");
+        return;
+    }
+    let code = unsafe { CStr::from_ptr(code) }.to_string_lossy();
+    if let Err(error) = emulator.set_cheat(index, enabled, &code) {
+        log::warn!("Rejected cheat slot {index}: {error}");
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn retro_get_memory_data(_id: c_uint) -> *mut c_void {
@@ -763,10 +779,14 @@ mod tests {
         assert!(INPUT_POLLED.load(Ordering::SeqCst));
         assert_eq!(VIDEO_WIDTH.load(Ordering::SeqCst), SCREEN_WIDTH);
         assert!(AUDIO_BATCH_CALLED.load(Ordering::SeqCst));
+        let cheat = CString::new("mem32:0x1000=0xfeedbeef").unwrap();
+        retro_cheat_set(0, true, cheat.as_ptr());
+        retro_run();
         unsafe {
             let emulator = EMULATOR.as_mut().unwrap();
             assert!(emulator.is_running());
             assert_eq!(emulator.input.buttons(), BUTTON_A | BUTTON_START);
+            assert_eq!(emulator.memory.read_u32(0x1000).unwrap(), 0xfeed_beef);
             emulator.memory.write_u32(0x1000, 0x1234_5678).unwrap();
         }
 
@@ -785,6 +805,22 @@ mod tests {
             assert_eq!(
                 EMULATOR.as_ref().unwrap().memory.read_u32(0x1000).unwrap(),
                 0x1234_5678
+            );
+        }
+        retro_cheat_reset();
+        unsafe {
+            EMULATOR
+                .as_mut()
+                .unwrap()
+                .memory
+                .write_u32(0x1000, 0)
+                .unwrap();
+        }
+        retro_run();
+        unsafe {
+            assert_eq!(
+                EMULATOR.as_ref().unwrap().memory.read_u32(0x1000).unwrap(),
+                0
             );
         }
 

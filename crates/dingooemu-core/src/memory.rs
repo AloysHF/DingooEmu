@@ -348,6 +348,19 @@ impl Memory {
         &mut self.ram
     }
 
+    pub(crate) fn is_cheat_writable_range(&self, addr: u32, len: usize) -> bool {
+        let physical = self.translate_address(addr) as usize;
+        if physical
+            .checked_add(len)
+            .is_some_and(|end| end <= self.ram.len())
+        {
+            return true;
+        }
+        self.framebuffer_offset(addr)
+            .and_then(|offset| offset.checked_add(len))
+            .is_some_and(|end| end <= self.framebuffer.len())
+    }
+
     /// Get the shared LCD framebuffer mapping.
     pub fn framebuffer(&self) -> &[u8] {
         &self.framebuffer

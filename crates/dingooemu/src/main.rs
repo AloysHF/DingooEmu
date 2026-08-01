@@ -1,15 +1,14 @@
-mod cheat;
 mod gamepad_overlay;
 mod keyboard;
 mod scaler;
 
 use clap::{Parser, ValueEnum};
+use dingooemu_core::cheats::CheatRule;
 use dingooemu_core::cpu::UnknownInstructionPolicy;
 use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator};
 use minifb::{Key, Window, WindowOptions};
 use std::path::PathBuf;
 
-use cheat::CheatRule;
 use keyboard::{KeyboardMapper, RemapSpec};
 use scaler::{DisplayScaler, ScaleFilter};
 
@@ -183,6 +182,9 @@ fn main() -> anyhow::Result<()> {
     emu.audio.set_master_volume(args.volume);
     emu.input
         .set_repeat_timing(args.repeat_delay, args.repeat_period);
+    for (index, cheat) in args.cheats.iter().cloned().enumerate() {
+        emu.set_parsed_cheat(index as u32, true, cheat)?;
+    }
 
     // Start emulation
     emu.start();
@@ -190,7 +192,6 @@ fn main() -> anyhow::Result<()> {
     // Screenshot mode: run headless for N frames, save PNG, and exit
     if let Some(ref screenshot_path) = args.screenshot {
         for frame in 0..args.screenshot_frames {
-            apply_cheats(&args.cheats, &mut emu)?;
             emu.tick()?;
             if frame % 60 == 0 {
                 log::info!("Frame {}", frame);
@@ -205,7 +206,6 @@ fn main() -> anyhow::Result<()> {
         // Headless mode: run for the requested number of frames
         log::info!("Running in headless mode");
         for frame in 0..args.frames {
-            apply_cheats(&args.cheats, &mut emu)?;
             emu.tick()?;
             if frame % 60 == 0 {
                 log::info!("Frame {}", frame);
@@ -252,7 +252,6 @@ fn main() -> anyhow::Result<()> {
             emu.set_buttons(buttons);
 
             // Run one frame
-            apply_cheats(&args.cheats, &mut emu)?;
             emu.tick()?;
 
             // Get framebuffer and convert to XRGB8888
@@ -279,13 +278,6 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    Ok(())
-}
-
-fn apply_cheats(cheats: &[CheatRule], emulator: &mut Emulator) -> anyhow::Result<()> {
-    for cheat in cheats {
-        cheat.apply(emulator)?;
-    }
     Ok(())
 }
 

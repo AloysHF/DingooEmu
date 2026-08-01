@@ -6,6 +6,7 @@
 
 pub mod app_loader;
 pub mod audio;
+pub mod cheats;
 pub mod cpu;
 pub mod emulator;
 pub mod error;

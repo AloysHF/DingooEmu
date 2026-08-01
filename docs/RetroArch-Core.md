@@ -47,10 +47,11 @@ platform-specific installation requirements:
 - Cold reset through RetroArch's **Reset** command
 - Persistent guest save files in RetroArch's configured save directory
 - Save states with content identity and corruption checks
+- Frontend cheat slots for 8/16/32-bit memory and MIPS registers
 - Live core options, including host master volume
 
-The current basic core does not yet provide cheats, frontend memory exposure
-or subsystem loading. The metadata marks these
+The current basic core does not yet provide frontend memory exposure or
+subsystem loading. The metadata marks these
 features unavailable so RetroArch does not present unsupported capabilities.
 
 ## Game Save Files
@@ -68,6 +69,14 @@ memory, video, input, audio, scheduler, semaphore, and open-file state. Each
 state contains a format version, content checksum, payload length, and payload
 checksum. States for different content and damaged or incompatible states are
 rejected without changing the running emulator.
+
+## Cheats
+
+RetroArch cheat slots accept `TARGET=VALUE` rules. Supported targets are
+`mem8:ADDRESS`, `mem16:ADDRESS`, `mem32:ADDRESS`, and `reg:rN` for MIPS
+registers `r0` through `r31`. Numbers may be decimal or use a `0x` hexadecimal
+prefix. Enabled slots are applied at the start of every emulated frame;
+disabled slots remain configured but do not modify state.
 
 ## Core Options
 

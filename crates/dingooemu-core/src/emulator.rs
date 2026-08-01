@@ -1,5 +1,6 @@
 use crate::app_loader::{AppImage, ResourceKind};
 use crate::audio::{Audio, AudioConfig};
+use crate::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::cpu::Cpu;
 use crate::error::Result;
 use crate::input::Input;
@@ -143,6 +144,8 @@ pub struct Emulator {
     pub audio: Audio,
     /// SDK HLE bridge
     pub sdk: SdkHle,
+    /// Frontend-managed memory and register freeze rules
+    cheats: CheatManager,
     /// Frame count
     frame_count: u64,
     /// Emulated CPU cycles elapsed
@@ -293,6 +296,7 @@ impl Emulator {
             input,
             audio,
             sdk,
+            cheats: CheatManager::default(),
             frame_count: 0,
             cycle_count: 0,
             tasks: Vec::new(),
@@ -370,6 +374,7 @@ impl Emulator {
         let was_running = self.is_running();
         let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
         replacement.save_directory = self.save_directory.clone();
+        replacement.cheats = self.cheats.clone();
         if was_running {
             replacement.start();
         }
@@ -464,6 +469,7 @@ impl Emulator {
         let was_running = state.cpu.is_running();
         let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
         replacement.save_directory = self.save_directory.clone();
+        replacement.cheats = self.cheats.clone();
         replacement.cpu = state.cpu;
         replacement.memory = state.memory;
         replacement.video = state.video;
@@ -493,6 +499,7 @@ impl Emulator {
     /// Run one frame of emulation
     pub fn tick(&mut self) -> Result<()> {
         self.framebuffer_submitted = false;
+        self.cheats.apply(&mut self.memory, &mut self.cpu);
 
         let mut remaining_cycles = CYCLES_PER_FRAME;
         let mut idle_contexts = 0usize;
@@ -1798,6 +1805,32 @@ impl Emulator {
         self.input.set_buttons(buttons);
     }
 
+    /// Install or update a frontend cheat slot.
+    pub fn set_cheat(
+        &mut self,
+        index: u32,
+        enabled: bool,
+        code: &str,
+    ) -> std::result::Result<(), CheatParseError> {
+        self.cheats.set_slot(index, enabled, code, &self.memory)
+    }
+
+    /// Install an already parsed cheat rule.
+    pub fn set_parsed_cheat(
+        &mut self,
+        index: u32,
+        enabled: bool,
+        rule: CheatRule,
+    ) -> std::result::Result<(), CheatParseError> {
+        self.cheats
+            .set_parsed_rule(index, enabled, rule, &self.memory)
+    }
+
+    /// Remove every configured cheat slot.
+    pub fn clear_cheats(&mut self) {
+        self.cheats.clear();
+    }
+
     /// Get one video frame of interleaved stereo audio.
     pub fn take_audio_samples(&mut self) -> Vec<i16> {
         self.audio.take_frame_samples()
@@ -1840,6 +1873,7 @@ impl Default for Emulator {
             input: Input::new(),
             audio: Audio::new(),
             sdk: SdkHle::new(),
+            cheats: CheatManager::default(),
             frame_count: 0,
             cycle_count: 0,
             tasks: Vec::new(),
