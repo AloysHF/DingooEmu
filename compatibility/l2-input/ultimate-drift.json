@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "content": "Tetris.app",
-  "relative_path": "Tetris.app",
-  "content_sha256": "78d190e4abfcdc2c4134dbd185b980bb6f71f137481951503f1533912c9f05eb",
+  "content": "Ultimate Drift.app",
+  "relative_path": "Ultimate Drift.app",
+  "content_sha256": "e4e23b19515716445eee4a79bf6f081b77f5c0911d43456205902475653373f9",
   "frames": 600,
   "events": [
     { "frame": 60, "buttons": ["start"] },
@@ -11,14 +11,14 @@
     { "frame": 124, "buttons": [] },
     { "frame": 180, "buttons": ["a"] },
     { "frame": 184, "buttons": [] },
-    { "frame": 240, "buttons": ["left"] },
+    { "frame": 240, "buttons": ["right"] },
     { "frame": 244, "buttons": [] },
     { "frame": 300, "buttons": ["a"] },
     { "frame": 304, "buttons": [] },
-    { "frame": 420, "buttons": ["up"] },
+    { "frame": 420, "buttons": ["x"] },
     { "frame": 424, "buttons": [] }
   ],
   "checkpoints": [
-    { "name": "gameplay-audio-active", "frame": 600, "expected_framebuffer_crc32": "32da1dfb", "control_framebuffer_crc32": "2a567fe6" }
+    { "name": "car-selection-audio-active", "frame": 600, "expected_framebuffer_crc32": "67892780", "control_framebuffer_crc32": "d9efd6cc" }
   ]
 }

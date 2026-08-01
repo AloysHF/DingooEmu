@@ -10,6 +10,8 @@
     report; L1 additionally requires a successful non-solid framebuffer
     capture. Games with a matching input scenario are additionally graded at
     L2 using deterministic per-frame button events and framebuffer checkpoints.
+    Games with matching audio scenarios are graded at L3 using exact guest PCM
+    evidence, format checks, and bounded virtual queue behavior.
     When no binary is supplied, the latest release binary is built before
     capture.
 
@@ -37,6 +39,10 @@
 .PARAMETER InputScenarioDirectory
     Directory containing versioned L2 input scenario JSON files. Default:
     compatibility/l2-input.
+
+.PARAMETER AudioScenarioDirectory
+    Directory containing versioned L3 audio scenario JSON files. Default:
+    compatibility/l3-audio.
 #>
 
 param(
@@ -55,7 +61,9 @@ param(
 
     [string[]]$AllowUnknownHle = @(),
 
-    [string]$InputScenarioDirectory = ""
+    [string]$InputScenarioDirectory = "",
+
+    [string]$AudioScenarioDirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,6 +80,11 @@ if (-not $InputScenarioDirectory) {
     $InputScenarioDirectory = Join-Path $repoRoot "compatibility\l2-input"
 } elseif (-not [System.IO.Path]::IsPathRooted($InputScenarioDirectory)) {
     $InputScenarioDirectory = Join-Path $repoRoot $InputScenarioDirectory
+}
+if (-not $AudioScenarioDirectory) {
+    $AudioScenarioDirectory = Join-Path $repoRoot "compatibility\l3-audio"
+} elseif (-not [System.IO.Path]::IsPathRooted($AudioScenarioDirectory)) {
+    $AudioScenarioDirectory = Join-Path $repoRoot $AudioScenarioDirectory
 }
 
 if (-not (Test-Path -LiteralPath $gameDir -PathType Container)) {
@@ -262,6 +275,7 @@ $summaryJsonPath = Join-Path $ReportDirectory "summary.json"
 $summaryCsvPath = Join-Path $ReportDirectory "summary.csv"
 $runStartedAt = [DateTimeOffset]::UtcNow
 $inputScenarios = @{}
+$audioScenarios = @{}
 
 if (Test-Path -LiteralPath $InputScenarioDirectory -PathType Container) {
     foreach ($scenarioFile in Get-ChildItem -LiteralPath $InputScenarioDirectory -Filter "*.json" -File) {
@@ -297,6 +311,73 @@ if (Test-Path -LiteralPath $InputScenarioDirectory -PathType Container) {
     }
 }
 
+if (Test-Path -LiteralPath $AudioScenarioDirectory -PathType Container) {
+    foreach ($scenarioFile in Get-ChildItem -LiteralPath $AudioScenarioDirectory -Filter "*.json" -File) {
+        try {
+            $scenario = Get-Content -Raw -LiteralPath $scenarioFile.FullName | ConvertFrom-Json
+            foreach ($property in @(
+                "schema_version", "content", "relative_path", "content_sha256",
+                "input_script", "input_script_sha256", "expected"
+            )) {
+                if ($null -eq $scenario.PSObject.Properties[$property]) {
+                    throw "Missing audio scenario property: $property"
+                }
+            }
+            if ([int]$scenario.schema_version -ne 1) {
+                throw "Unsupported audio scenario schema version: $($scenario.schema_version)"
+            }
+            foreach ($property in @(
+                "sample_rate", "format", "channels", "volume", "pcm_crc32",
+                "submitted_bytes", "decoded_frames", "nonzero_samples",
+                "min_rms_amplitude", "max_clipped_samples",
+                "max_rejected_write_calls", "max_silenced_write_calls",
+                "max_underflow_frames", "max_consecutive_underflow_frames",
+                "max_buffered_frames"
+            )) {
+                if ($null -eq $scenario.expected.PSObject.Properties[$property]) {
+                    throw "Missing audio expectation property: $property"
+                }
+            }
+            if ([int]$scenario.expected.sample_rate -le 0 -or
+                [int]$scenario.expected.channels -notin @(1, 2) -or
+                [string]$scenario.expected.format -notin @("U8", "S16Le") -or
+                [string]$scenario.expected.pcm_crc32 -notmatch '^[0-9a-fA-F]{8}$' -or
+                [double]$scenario.expected.min_rms_amplitude -le 0) {
+                throw "Audio expectations contain an invalid format or threshold."
+            }
+            $scenarioKey = (ConvertTo-ForwardSlashPath ([string]$scenario.relative_path)).TrimStart('/')
+            if ($audioScenarios.ContainsKey($scenarioKey)) {
+                throw "Duplicate audio scenario relative_path: $scenarioKey"
+            }
+            $inputPath = [System.IO.Path]::GetFullPath(
+                (Join-Path $repoRoot ([string]$scenario.input_script))
+            )
+            $inputRelativePath = [System.IO.Path]::GetRelativePath($repoRoot, $inputPath)
+            if ([System.IO.Path]::IsPathRooted($inputRelativePath) -or
+                $inputRelativePath -eq ".." -or $inputRelativePath.StartsWith("..$([System.IO.Path]::DirectorySeparatorChar)")) {
+                throw "Audio scenario input_script escapes the repository."
+            }
+            if (-not (Test-Path -LiteralPath $inputPath -PathType Leaf)) {
+                throw "Audio scenario input_script does not exist: $inputPath"
+            }
+            if (-not ([string]$scenario.input_script_sha256).Equals(
+                (Get-Sha256 $inputPath),
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw "Audio scenario input_script_sha256 does not match the file."
+            }
+            $audioScenarios[$scenarioKey] = [pscustomobject]@{
+                Path = $scenarioFile.FullName
+                Sha256 = Get-Sha256 $scenarioFile.FullName
+                Data = $scenario
+                InputPath = $inputPath
+            }
+        } catch {
+            throw "Invalid audio scenario '$($scenarioFile.FullName)': $($_.Exception.Message)"
+        }
+    }
+}
+
 foreach ($summaryPath in @($summaryJsonPath, $summaryCsvPath)) {
     if (Test-Path -LiteralPath $summaryPath) {
         Remove-Item -LiteralPath $summaryPath -Force
@@ -310,13 +391,14 @@ Write-Host "Report dir:   $ReportDirectory"
 Write-Host "Git commit:   $gitCommit$(if ($gitDirty) { ' (dirty)' })"
 Write-Host "HLE policy:   $UnknownHlePolicy"
 Write-Host "L2 scenarios: $($inputScenarios.Count) from $InputScenarioDirectory"
+Write-Host "L3 scenarios: $($audioScenarios.Count) from $AudioScenarioDirectory"
 if ($framesSpecified) {
     Write-Host "Frames:       $Frames"
 } else {
     Write-Host "Frames:       $Frames (with performance overrides)"
 }
 Write-Host "Timeout:      $TimeoutSeconds seconds per game"
-Write-Host "Levels:       L0=load report, L1=completed non-solid frame, L2=scripted checkpoints"
+Write-Host "Levels:       L0=load report, L1=completed non-solid frame, L2=scripted checkpoints, L3=verified PCM"
 Write-Host ""
 
 $games = @(
@@ -338,6 +420,9 @@ $usedNames = [System.Collections.Generic.HashSet[string]]::new(
 $matchedInputScenarios = [System.Collections.Generic.HashSet[string]]::new(
     [System.StringComparer]::OrdinalIgnoreCase
 )
+$matchedAudioScenarios = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
 
 foreach ($game in $games) {
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($game.Name)
@@ -354,6 +439,12 @@ foreach ($game in $games) {
     } else {
         $null
     }
+    $audioScenario = if ($audioScenarios.ContainsKey($relativePathKey)) {
+        [void]$matchedAudioScenarios.Add($relativePathKey)
+        $audioScenarios[$relativePathKey]
+    } else {
+        $null
+    }
     $inputScenarioError = $null
     $inputScriptPath = $null
     if ($null -ne $inputScenario) {
@@ -367,6 +458,31 @@ foreach ($game in $games) {
         } else {
             $captureFrames = [int]$inputScenario.Data.frames
             $inputScriptPath = $inputScenario.Path
+        }
+    }
+    $audioScenarioError = $null
+    if ($null -ne $audioScenario) {
+        $expectedInputPath = if ($null -ne $inputScenario) {
+            ConvertTo-ForwardSlashPath (
+                [System.IO.Path]::GetRelativePath($repoRoot, $inputScenario.Path)
+            )
+        } else {
+            $null
+        }
+        if ($audioScenario.Data.content -ne $game.Name) {
+            $audioScenarioError = "audio_scenario_content_mismatch"
+        } elseif (-not ([string]$audioScenario.Data.content_sha256).Equals(
+            $contentSha256,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            $audioScenarioError = "audio_scenario_content_hash_mismatch"
+        } elseif ($null -eq $inputScenario -or
+            [string]$audioScenario.Data.input_script -ne $expectedInputPath -or
+            -not ([string]$audioScenario.Data.input_script_sha256).Equals(
+                $inputScenario.Sha256,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+            $audioScenarioError = "audio_scenario_input_mismatch"
         }
     }
 
@@ -421,7 +537,7 @@ foreach ($game in $games) {
         try {
             $diagnostics = Get-Content -Raw -LiteralPath $reportPath | ConvertFrom-Json
             foreach ($property in @(
-                "schema_version", "content", "run", "framebuffer", "input", "unknown_hle"
+                "schema_version", "content", "run", "framebuffer", "input", "audio", "unknown_hle"
             )) {
                 if ($null -eq $diagnostics.PSObject.Properties[$property]) {
                     throw "Missing diagnostics property: $property"
@@ -568,7 +684,67 @@ foreach ($game in $games) {
         $l2Passed = $true
         "scripted_checkpoints_matched"
     }
-    if ($l1Passed -and (-not $l2Tested -or $l2Passed)) {
+    $audioDiagnostics = if ($null -ne $diagnostics) { $diagnostics.audio } else { $null }
+    $l3Tested = $null -ne $audioScenario
+    $l3Passed = $false
+    $audioExpected = if ($l3Tested) { $audioScenario.Data.expected } else { $null }
+    $audioConfigurations = if ($null -ne $audioDiagnostics) {
+        @($audioDiagnostics.configurations)
+    } else {
+        @()
+    }
+    $l3Reason = if (-not $l3Tested) {
+        "no_audio_scenario"
+    } elseif ($null -ne $audioScenarioError) {
+        $audioScenarioError
+    } elseif (-not $l2Passed) {
+        "l2_failed"
+    } elseif ($null -eq $audioDiagnostics) {
+        "missing_audio_diagnostics"
+    } elseif ([int]$audioDiagnostics.schema_version -ne 1) {
+        "unsupported_audio_diagnostics"
+    } elseif ([uint64]$audioDiagnostics.open_count -le 0 -or
+        [uint64]$audioDiagnostics.successful_write_calls -le 0) {
+        "no_audio_stream"
+    } elseif ($audioConfigurations.Count -ne 1 -or
+        [uint64]$audioConfigurations[0].sample_rate -ne [uint64]$audioExpected.sample_rate -or
+        [string]$audioConfigurations[0].format -ne [string]$audioExpected.format -or
+        [uint64]$audioConfigurations[0].channels -ne [uint64]$audioExpected.channels -or
+        [uint64]$audioConfigurations[0].volume -ne [uint64]$audioExpected.volume) {
+        "audio_format_mismatch"
+    } elseif ([uint64]$audioDiagnostics.nonzero_samples -eq 0 -or
+        [double]$audioDiagnostics.rms_amplitude -lt [double]$audioExpected.min_rms_amplitude) {
+        "silent_audio"
+    } elseif (-not ([string]$audioDiagnostics.pcm_crc32).Equals(
+            [string]$audioExpected.pcm_crc32,
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [uint64]$audioDiagnostics.submitted_bytes -ne [uint64]$audioExpected.submitted_bytes -or
+        [uint64]$audioDiagnostics.decoded_frames -ne [uint64]$audioExpected.decoded_frames -or
+        [uint64]$audioDiagnostics.nonzero_samples -ne [uint64]$audioExpected.nonzero_samples) {
+        "pcm_checkpoint_mismatch"
+    } elseif ([uint64]$audioDiagnostics.rejected_write_calls -gt
+            [uint64]$audioExpected.max_rejected_write_calls -or
+        [uint64]$audioDiagnostics.silenced_write_calls -gt
+            [uint64]$audioExpected.max_silenced_write_calls) {
+        "audio_write_rejected"
+    } elseif ([uint64]$audioDiagnostics.underflow_frames -gt
+            [uint64]$audioExpected.max_underflow_frames -or
+        [uint64]$audioDiagnostics.max_consecutive_underflow_frames -gt
+            [uint64]$audioExpected.max_consecutive_underflow_frames) {
+        "audio_queue_underflow"
+    } elseif ([uint64]$audioDiagnostics.max_buffered_frames -gt
+            [uint64]$audioExpected.max_buffered_frames) {
+        "audio_queue_unbounded"
+    } elseif ([uint64]$audioDiagnostics.clipped_samples -gt
+            [uint64]$audioExpected.max_clipped_samples) {
+        "audio_clipping_exceeded"
+    } else {
+        $l3Passed = $true
+        "pcm_checkpoint_matched"
+    }
+    if ($l1Passed -and (-not $l2Tested -or $l2Passed) -and
+        (-not $l3Tested -or $l3Passed)) {
         try {
             Copy-Item -LiteralPath $capturePath -Destination $outPath -Force
             Remove-Item -LiteralPath $capturePath -Force
@@ -580,9 +756,15 @@ foreach ($game in $games) {
                 $l2Passed = $false
                 $l2Reason = "screenshot_publish_failed"
             }
+            if ($l3Tested) {
+                $l3Passed = $false
+                $l3Reason = "screenshot_publish_failed"
+            }
         }
     }
-    $highestLevel = if ($l2Passed) {
+    $highestLevel = if ($l3Passed) {
+        "L3"
+    } elseif ($l2Passed) {
         "L2"
     } elseif ($l1Passed) {
         "L1"
@@ -625,10 +807,21 @@ foreach ($game in $games) {
                 }
                 reason = $l2Reason
             }
+            l3 = [pscustomobject][ordered]@{
+                status = if (-not $l3Tested) {
+                    "not_tested"
+                } elseif ($l3Passed) {
+                    "pass"
+                } else {
+                    "fail"
+                }
+                reason = $l3Reason
+            }
         }
         run = if ($null -ne $diagnostics) { $diagnostics.run } else { $null }
         framebuffer = $framebuffer
         input = $inputDiagnostics
+        audio = $audioDiagnostics
         unknown_hle = @($unknownHle)
         artifacts = [pscustomobject][ordered]@{
             screenshot_path = $screenshotArtifactPath
@@ -655,6 +848,18 @@ foreach ($game in $games) {
             } else {
                 $null
             }
+            audio_scenario_path = if ($null -ne $audioScenario) {
+                ConvertTo-ForwardSlashPath (
+                    [System.IO.Path]::GetRelativePath($repoRoot, $audioScenario.Path)
+                )
+            } else {
+                $null
+            }
+            audio_scenario_sha256 = if ($null -ne $audioScenario) {
+                $audioScenario.Sha256
+            } else {
+                $null
+            }
         }
         log_summary = [pscustomobject][ordered]@{
             line_count = if ([string]::IsNullOrWhiteSpace($result.Output)) {
@@ -668,7 +873,11 @@ foreach ($game in $games) {
     }
     $records.Add($record)
 
-    if ($l2Passed) {
+    if ($l3Passed) {
+        Write-Host "L3 PASS ($($audioDiagnostics.nonzero_samples) nonzero samples, PCM $($audioDiagnostics.pcm_crc32))" -ForegroundColor Green
+    } elseif ($l3Tested) {
+        Write-Host "$(if ($l2Passed) { 'L2 PASS' } else { 'L2 FAIL' }) / L3 FAIL ($l3Reason)" -ForegroundColor Yellow
+    } elseif ($l2Passed) {
         Write-Host "L2 PASS ($(@($inputDiagnostics.checkpoints).Count) checkpoints)" -ForegroundColor Green
     } elseif ($l2Tested) {
         Write-Host "$(if ($l1Passed) { 'L1 PASS' } else { 'L1 FAIL' }) / L2 FAIL ($l2Reason)" -ForegroundColor Yellow
@@ -679,7 +888,8 @@ foreach ($game in $games) {
     } else {
         Write-Host "L0 FAIL ($l0Reason)" -ForegroundColor Red
     }
-    if (-not $l1Passed -or ($l2Tested -and -not $l2Passed)) {
+    if (-not $l1Passed -or ($l2Tested -and -not $l2Passed) -or
+        ($l3Tested -and -not $l3Passed)) {
         foreach ($line in @($logTail | Select-Object -Last 2)) {
             Write-Host "    $line" -ForegroundColor DarkGray
         }
@@ -690,6 +900,8 @@ $l0PassCount = @($records | Where-Object { $_.levels.l0.status -eq "pass" }).Cou
 $l1PassCount = @($records | Where-Object { $_.levels.l1.status -eq "pass" }).Count
 $l2TestedCount = @($records | Where-Object { $_.levels.l2.status -ne "not_tested" }).Count
 $l2PassCount = @($records | Where-Object { $_.levels.l2.status -eq "pass" }).Count
+$l3TestedCount = @($records | Where-Object { $_.levels.l3.status -ne "not_tested" }).Count
+$l3PassCount = @($records | Where-Object { $_.levels.l3.status -eq "pass" }).Count
 $processFailureCount = @($records | Where-Object { $_.process.status -ne "completed" }).Count
 $unknownGameCount = @($records | Where-Object { $_.unknown_hle.Count -gt 0 }).Count
 $unknownNames = @(
@@ -700,9 +912,12 @@ $unknownNames = @(
 $unusedInputScenarios = @(
     $inputScenarios.Keys | Where-Object { -not $matchedInputScenarios.Contains($_) }
 )
+$unusedAudioScenarios = @(
+    $audioScenarios.Keys | Where-Object { -not $matchedAudioScenarios.Contains($_) }
+)
 
 $summary = [ordered]@{
-    schema_version = 2
+    schema_version = 3
     generated_at_utc = [DateTimeOffset]::UtcNow.ToString("o")
     source = [ordered]@{
         git_commit = $gitCommit
@@ -731,11 +946,15 @@ $summary = [ordered]@{
         input_scenario_directory = ConvertTo-ForwardSlashPath (
             [System.IO.Path]::GetRelativePath($repoRoot, $InputScenarioDirectory)
         )
+        audio_scenario_directory = ConvertTo-ForwardSlashPath (
+            [System.IO.Path]::GetRelativePath($repoRoot, $AudioScenarioDirectory)
+        )
     }
     level_definitions = [ordered]@{
         l0 = "The content loaded and produced a valid diagnostics report."
         l1 = "L0 passed, the requested frames completed, and the captured framebuffer contains non-black pixels and more than one RGB565 color."
         l2 = "L1 passed and versioned per-frame input produced every expected RGB565 framebuffer checkpoint for matching content."
+        l3 = "L2 passed and the matching audio scenario produced the expected non-silent PCM stream, format, and bounded queue evidence."
     }
     totals = [ordered]@{
         games = $records.Count
@@ -748,7 +967,11 @@ $summary = [ordered]@{
         l2_tested = $l2TestedCount
         l2_pass = $l2PassCount
         l2_fail = $l2TestedCount - $l2PassCount
+        l3_tested = $l3TestedCount
+        l3_pass = $l3PassCount
+        l3_fail = $l3TestedCount - $l3PassCount
         input_scenarios_unused = $unusedInputScenarios.Count
+        audio_scenarios_unused = $unusedAudioScenarios.Count
         games_with_unknown_hle = $unknownGameCount
         distinct_unknown_hle = $unknownNames.Count
         duration_ms = [long][math]::Round(
@@ -778,6 +1001,8 @@ $csvRows = @(
             l1_reason = $_.levels.l1.reason
             l2_status = $_.levels.l2.status
             l2_reason = $_.levels.l2.reason
+            l3_status = $_.levels.l3.status
+            l3_reason = $_.levels.l3.reason
             executed_frames = $_.run.executed_frames
             executed_instructions = $_.run.executed_instructions
             unique_colors = $_.framebuffer.unique_colors
@@ -792,6 +1017,28 @@ $csvRows = @(
             input_event_count = if ($null -ne $_.input) { $_.input.event_count } else { $null }
             input_nonzero_frames = if ($null -ne $_.input) { $_.input.nonzero_input_frames } else { $null }
             input_checkpoint_count = if ($null -ne $_.input) { @($_.input.checkpoints).Count } else { $null }
+            audio_scenario_sha256 = $_.artifacts.audio_scenario_sha256
+            audio_configurations = if ($null -ne $_.audio) {
+                @($_.audio.configurations | ForEach-Object {
+                    "$($_.sample_rate)/$($_.format)/$($_.channels)/$($_.volume)"
+                }) -join ";"
+            } else {
+                $null
+            }
+            audio_pcm_crc32 = if ($null -ne $_.audio) { $_.audio.pcm_crc32 } else { $null }
+            audio_open_count = if ($null -ne $_.audio) { $_.audio.open_count } else { $null }
+            audio_write_count = if ($null -ne $_.audio) { $_.audio.successful_write_calls } else { $null }
+            audio_submitted_bytes = if ($null -ne $_.audio) { $_.audio.submitted_bytes } else { $null }
+            audio_decoded_frames = if ($null -ne $_.audio) { $_.audio.decoded_frames } else { $null }
+            audio_nonzero_samples = if ($null -ne $_.audio) { $_.audio.nonzero_samples } else { $null }
+            audio_peak_amplitude = if ($null -ne $_.audio) { $_.audio.peak_amplitude } else { $null }
+            audio_rms_amplitude = if ($null -ne $_.audio) { $_.audio.rms_amplitude } else { $null }
+            audio_clipped_samples = if ($null -ne $_.audio) { $_.audio.clipped_samples } else { $null }
+            audio_rejected_writes = if ($null -ne $_.audio) { $_.audio.rejected_write_calls } else { $null }
+            audio_queue_full_events = if ($null -ne $_.audio) { $_.audio.queue_full_events } else { $null }
+            audio_underflow_frames = if ($null -ne $_.audio) { $_.audio.underflow_frames } else { $null }
+            audio_max_consecutive_underflow_frames = if ($null -ne $_.audio) { $_.audio.max_consecutive_underflow_frames } else { $null }
+            audio_max_buffered_frames = if ($null -ne $_.audio) { $_.audio.max_buffered_frames } else { $null }
             diagnostics_path = $_.artifacts.diagnostics_path
             log_tail = ($_.log_summary.tail -join " | ")
         }
@@ -803,12 +1050,15 @@ Write-Host ""
 Write-Host "L0: $l0PassCount passed, $($records.Count - $l0PassCount) failed"
 Write-Host "L1: $l1PassCount passed, $($records.Count - $l1PassCount) failed"
 Write-Host "L2: $l2PassCount passed, $($l2TestedCount - $l2PassCount) failed, $($records.Count - $l2TestedCount) not tested"
+Write-Host "L3: $l3PassCount passed, $($l3TestedCount - $l3PassCount) failed, $($records.Count - $l3TestedCount) not tested"
 Write-Host "Unused L2 scenarios: $($unusedInputScenarios.Count)"
+Write-Host "Unused L3 scenarios: $($unusedAudioScenarios.Count)"
 Write-Host "Unknown HLE: $unknownGameCount game(s), $($unknownNames.Count) distinct name(s)"
 Write-Host "JSON summary: $summaryJsonPath"
 Write-Host "CSV summary:  $summaryCsvPath"
 
 if ($l1PassCount -ne $records.Count -or $l2PassCount -ne $l2TestedCount -or
-    $unusedInputScenarios.Count -ne 0) {
+    $l3PassCount -ne $l3TestedCount -or $unusedInputScenarios.Count -ne 0 -or
+    $unusedAudioScenarios.Count -ne 0) {
     exit 1
 }

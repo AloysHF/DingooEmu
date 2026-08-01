@@ -586,6 +586,8 @@ impl Emulator {
         }
 
         let was_running = state.cpu.is_running();
+        #[cfg(feature = "standalone")]
+        let host_audio_output_enabled = self.audio.host_output_enabled();
         let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
         replacement.save_directory = self.save_directory.clone();
         replacement.cheats = self.cheats.clone();
@@ -598,6 +600,10 @@ impl Emulator {
         replacement.video = state.video;
         replacement.input = state.input;
         replacement.audio = state.audio;
+        #[cfg(feature = "standalone")]
+        replacement
+            .audio
+            .set_host_output_enabled(host_audio_output_enabled);
         replacement.audio.resume_after_state_load();
         replacement.frame_count = state.frame_count;
         replacement.cycle_count = state.cycle_count;
@@ -666,6 +672,7 @@ impl Emulator {
         }
 
         self.video.advance_frame();
+        self.audio.advance_frame();
         self.frame_count += 1;
 
         Ok(())

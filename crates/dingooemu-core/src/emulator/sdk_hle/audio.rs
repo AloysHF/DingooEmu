@@ -22,6 +22,7 @@ pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResul
             let written = if count == 0 || count > MAX_AUDIO_WRITE_BYTES {
                 false
             } else if !emu.audio.can_write() {
+                emu.audio.record_queue_full();
                 emu.set_active_wait(TaskWait::AudioWrite);
                 log::trace!(
                     "  waveout_write({buffer_ptr:#010x}, {count}) deferred until queue space is available"

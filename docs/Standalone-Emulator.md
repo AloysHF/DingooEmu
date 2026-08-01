@@ -56,7 +56,7 @@ dingooemu [OPTIONS] <PATH>
 | `--unknown-instruction-policy <MODE>` | `stop`, `skip` | `skip` | Stop on or log and skip an unimplemented MIPS instruction. |
 | `--unknown-hle-policy <MODE>` | `report`, `stop` | `report` | Aggregate unknown SDK calls and continue with zero, or stop at the first non-allowlisted call. |
 | `--allow-unknown-hle <NAME>` | exact function name | — | Preserve compatibility-stub behavior for one function in strict HLE mode; may be repeated. |
-| `--hle-report <PATH>` | path | — | Write stable JSON diagnostics with run, framebuffer, and aggregated unknown-HLE evidence. |
+| `--hle-report <PATH>` | path | — | Write stable JSON diagnostics with run, framebuffer, guest PCM, and aggregated unknown-HLE evidence. |
 | `--input-script <PATH>` | path | — | Replay a versioned per-frame input script and record exact framebuffer checkpoints; requires headless or screenshot mode. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
@@ -199,9 +199,10 @@ Screenshots are written to `docs/images`, while per-game JSON diagnostics and
 unified `summary.json` / `summary.csv` files are written to
 `tmp/hle-reports`. The summaries record content and screenshot SHA-256 hashes,
 the Git revision and dirty state, binary hash, runtime configuration, elapsed
-time, log tail, framebuffer metrics, input evidence, and unknown HLE calls.
+time, log tail, framebuffer metrics, input evidence, guest PCM and queue
+metrics, and unknown HLE calls.
 
-The batch runner grades three levels automatically:
+The batch runner grades four levels automatically:
 
 - **L0** passes when the content loads and produces a valid diagnostics report
   matching the requested capture.
@@ -212,10 +213,14 @@ The batch runner grades three levels automatically:
   `compatibility/l2-input`. It requires L1, matching content and script
   metadata, at least one nonzero-input frame, and every exact RGB565 checkpoint
   to match while differing from its recorded no-input control.
+- **L3** applies to games with a matching manifest under
+  `compatibility/l3-audio`. It requires L2 plus the expected PCM CRC32, sample
+  rate, format, channel count, volume, nonzero sample evidence, and bounded
+  virtual queue behavior without rejected writes or sustained underflow.
 
 Failed captures are kept inside the report directory when available. A
 verified screenshot is copied to `docs/images` only after the configured L1 or
-L2 level passes, so a strict, checkpoint, or runtime failure cannot delete the
+L2/L3 level passes, so a strict, checkpoint, audio, or runtime failure cannot delete the
 previous known-good artifact. The default capture point is 60 frames, with
 per-game and input-script overrides for deterministic checkpoints. Explicit
 parameters apply to games without an input scenario:

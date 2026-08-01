@@ -8,22 +8,25 @@ release batch produced unified JSON and CSV results with 32/32 L0 passes and
 32/32 L1 passes. L0 means the content loaded and emitted valid diagnostics for
 the requested capture. L1 additionally means every requested frame completed,
 a screenshot was produced, and the RGB565 framebuffer was neither black nor a
-single solid color. Ten representative games also pass L2: versioned per-frame
+single solid color. Twelve representative games also pass L2: versioned per-frame
 button scripts reach exact RGB565 framebuffer CRC32 checkpoints that differ
-from same-frame no-input controls. Sword and Fairy uses a 1200-frame capture
+from same-frame no-input controls. Five of those games pass L3 by matching an
+exact non-silent guest PCM stream, its declared format, and bounded virtual
+queue behavior without rejected writes or underflow. Sword and Fairy uses a 1200-frame capture
 override because its startup sequence contains several timed splash screens.
 
 The unified results retain the Git revision and dirty state, binary and content
 hashes, per-game parameters and duration, screenshot and input-script hashes,
-log tails, framebuffer metrics, input events and checkpoints, and unknown HLE
-summaries. L2 proves only the named interaction shown in the table; audio, save
-data, extended gameplay, and full completion still require separate
-verification.
+log tails, framebuffer metrics, input events and checkpoints, audio format and
+PCM metrics, queue evidence, and unknown HLE summaries. L2 proves only the
+named interaction shown in the table. L3 proves only the configured guest PCM
+stream; host-device playback, save data, extended gameplay, and full completion
+still require separate verification.
 
-GooPlayer has an additional content-discovery check: its startup scan finds the
+GooPlayer's content-discovery check confirms that its startup scan finds the
 three companion tracker files in the game directory and opens the playlist
-instead of remaining on the title screen. Playback correctness is not yet part
-of this check.
+instead of remaining on the title screen. Its L3 scenario then starts tracker
+playback and verifies 44.1 kHz stereo PCM evidence.
 
 ## Verified Games
 
@@ -36,7 +39,7 @@ of this check.
 | Candy | 糖果 | `tmp/dingoo_game/Candy.app` | ![Candy](images/Candy.png) | ✅ Pass |
 | Decollation Warrior | 斩首战士 | `tmp/dingoo_game/Decollation-Warrior.app` | ![Decollation-Warrior](images/Decollation-Warrior.png) | ✅ Pass |
 | Formula One | F1赛车 | `tmp/dingoo_game/Fomula-One.app` | ![Fomula-One](images/Fomula-One.png) | ✅ Pass |
-| GooPlayer | Goo播放器 | `tmp/dingoo_game/GooPlayer/GooPlayer.app` | ![GooPlayer](images/GooPlayer__GooPlayer.png) | ✅ Pass |
+| GooPlayer | Goo播放器 | `tmp/dingoo_game/GooPlayer/GooPlayer.app` | ![GooPlayer](images/GooPlayer__GooPlayer.png) | ✅ L3 |
 | Hell Striker II | 地狱打击者II | `tmp/dingoo_game/Hell Striker II.app` | ![Hell-Striker-II](images/Hell_Striker_II.png) | ✅ Pass |
 | Hexa-Virus | 六角病毒 | `tmp/dingoo_game/Hexa-Virus.app` | ![Hexa-Virus](images/Hexa-Virus.png) | ✅ Pass |
 | Landlord | 地主 | `tmp/dingoo_game/Landlord.app` | ![Landlord](images/Landlord.png) | ✅ Pass |
@@ -50,13 +53,13 @@ of this check.
 | Puzzle Bobble | 泡泡龙 | `tmp/dingoo_game/Puzzle Bobble.app` | ![Puzzle-Bobble](images/Puzzle_Bobble.png) | ✅ L2 |
 | Rick Dangerous | 里克危险 | `tmp/dingoo_game/Rick-Dangerous.app` | ![Rick-Dangerous](images/Rick-Dangerous.png) | ✅ Pass |
 | Rubido | 鲁比多 | `tmp/dingoo_game/Rubido.app` | ![Rubido](images/Rubido.png) | ✅ L2 |
-| SameGoo | 消消乐 | `tmp/dingoo_game/SameGoo/samegoo.app` | ![SameGoo](images/SameGoo__samegoo.png) | ✅ L2 |
-| Snake | 贪吃蛇 | `tmp/dingoo_game/Snake.app` | ![Snake](images/Snake.png) | ✅ L2 |
+| SameGoo | 消消乐 | `tmp/dingoo_game/SameGoo/samegoo.app` | ![SameGoo](images/SameGoo__samegoo.png) | ✅ L3 |
+| Snake | 贪吃蛇 | `tmp/dingoo_game/Snake.app` | ![Snake](images/Snake.png) | ✅ L3 |
 | Sokuban | 推箱子 | `tmp/dingoo_game/Sokuban/Sokuban.app` | ![Sokuban](images/Sokuban__Sokuban.png) | ✅ L2 |
 | Spoout | — | `tmp/dingoo_game/Spoout.app` | ![Spoout](images/Spoout.png) | ✅ Pass |
 | StopWatch | 秒表 | `tmp/dingoo_game/StopWatch.app` | ![StopWatch](images/StopWatch.png) | ✅ L2 |
-| Tetris | 俄罗斯方块 | `tmp/dingoo_game/Tetris.app` | ![Tetris](images/Tetris.png) | ✅ L2 |
-| Ultimate Drift | 极限漂移 | `tmp/dingoo_game/Ultimate Drift.app` | ![Ultimate-Drift](images/Ultimate_Drift.png) | ✅ Pass |
+| Tetris | 俄罗斯方块 | `tmp/dingoo_game/Tetris.app` | ![Tetris](images/Tetris.png) | ✅ L3 |
+| Ultimate Drift | 极限漂移 | `tmp/dingoo_game/Ultimate Drift.app` | ![Ultimate-Drift](images/Ultimate_Drift.png) | ✅ L3 |
 | Zero Gravity | 零重力 | `tmp/dingoo_game/Zero-Gravity.app` | ![Zero-Gravity](images/Zero-Gravity.png) | ✅ Pass |
 | Zhao-Chuan RPG | 赵传RPG | `tmp/dingoo_game/Zhao-Chuan RPG.app` | ![Zhao-Chuan-RPG](images/Zhao-Chuan_RPG.png) | ✅ Pass |
 | Seven Nights | 七夜 | `tmp/dingoo_game/七夜.app` | ![七夜](images/七夜.png) | ✅ Pass |
@@ -66,6 +69,7 @@ of this check.
 
 | Symbol | Meaning |
 |--------|---------|
+| ✅ L3 | Matches the configured non-silent PCM stream, format, and queue limits after passing L2. |
 | ✅ L2 | Replays the configured input and matches its expected checkpoint. |
-| ✅ Pass | Reaches L1; no L2 scenario is configured yet. |
+| ✅ Pass | Reaches L1; no higher-level scenario is configured yet. |
 | ❌ Fail | Does not reach its configured level; inspect the recorded reason. |

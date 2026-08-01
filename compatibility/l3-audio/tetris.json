@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "content": "Tetris.app",
+  "relative_path": "Tetris.app",
+  "content_sha256": "78d190e4abfcdc2c4134dbd185b980bb6f71f137481951503f1533912c9f05eb",
+  "input_script": "compatibility/l2-input/tetris.json",
+  "input_script_sha256": "fa4d412e647aed7320dc51a5b60f04bbba69729ac52476d4258a61cfa20205b0",
+  "expected": {
+    "sample_rate": 8000,
+    "format": "S16Le",
+    "channels": 1,
+    "volume": 50,
+    "pcm_crc32": "78155514",
+    "submitted_bytes": 168000,
+    "decoded_frames": 84000,
+    "nonzero_samples": 62786,
+    "min_rms_amplitude": 0.04,
+    "max_clipped_samples": 0,
+    "max_rejected_write_calls": 0,
+    "max_silenced_write_calls": 0,
+    "max_underflow_frames": 0,
+    "max_consecutive_underflow_frames": 0,
+    "max_buffered_frames": 4400
+  }
+}

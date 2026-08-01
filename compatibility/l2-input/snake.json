@@ -3,14 +3,18 @@
   "content": "Snake.app",
   "relative_path": "Snake.app",
   "content_sha256": "22531cced426f19232613c8235b44a3dd4cdecda18cd6a517044dc05160c5d39",
-  "frames": 180,
+  "frames": 300,
   "events": [
-    { "frame": 45, "buttons": ["a"] },
-    { "frame": 48, "buttons": [] },
-    { "frame": 120, "buttons": ["right"] },
-    { "frame": 130, "buttons": [] }
+    { "frame": 30, "buttons": ["down"] },
+    { "frame": 36, "buttons": [] },
+    { "frame": 90, "buttons": ["down"] },
+    { "frame": 96, "buttons": [] },
+    { "frame": 150, "buttons": ["down"] },
+    { "frame": 156, "buttons": [] },
+    { "frame": 210, "buttons": ["a"] },
+    { "frame": 216, "buttons": [] }
   ],
   "checkpoints": [
-    { "name": "map-selection-reached", "frame": 180, "expected_framebuffer_crc32": "95897460", "control_framebuffer_crc32": "d0a7c4e4" }
+    { "name": "audio-enabled", "frame": 300, "expected_framebuffer_crc32": "d779ab77", "control_framebuffer_crc32": "6fca4b1f" }
   ]
 }

@@ -238,6 +238,8 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    emu.audio
+        .set_host_output_enabled(requested_frames.is_none());
     let content_name = Path::new(&args.path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -423,7 +425,7 @@ fn unknown_hle_report(
         ("windowed", None)
     };
     serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "content": content,
         "policy": args.unknown_hle_policy.as_str(),
         "allowlist": args.allowed_unknown_hle,
@@ -435,6 +437,7 @@ fn unknown_hle_report(
         },
         "framebuffer": emu.video.framebuffer_stats(),
         "input": input_playback.map(InputPlayback::diagnostics),
+        "audio": emu.audio.diagnostics(),
         "unknown_hle": unknown_hle,
     })
 }
@@ -671,7 +674,7 @@ mod tests {
         assert_eq!(
             unknown_hle_report(&args, &Emulator::default(), None),
             serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "content": "game.app",
                 "policy": "report",
                 "allowlist": [],
@@ -692,6 +695,31 @@ mod tests {
                     "crc32_rgb565": 107898017,
                 },
                 "input": null,
+                "audio": {
+                    "schema_version": 1,
+                    "configurations": [],
+                    "open_count": 0,
+                    "close_count": 0,
+                    "write_calls": 0,
+                    "successful_write_calls": 0,
+                    "rejected_write_calls": 0,
+                    "silenced_write_calls": 0,
+                    "queue_full_events": 0,
+                    "submitted_bytes": 0,
+                    "decoded_frames": 0,
+                    "decoded_samples": 0,
+                    "nonzero_samples": 0,
+                    "clipped_samples": 0,
+                    "peak_amplitude": 0,
+                    "rms_amplitude": 0.0,
+                    "pcm_crc32": null,
+                    "observed_video_frames": 0,
+                    "active_audio_frames": 0,
+                    "underflow_frames": 0,
+                    "max_consecutive_underflow_frames": 0,
+                    "max_buffered_frames": 0,
+                    "buffered_frames_at_end": 0,
+                },
                 "unknown_hle": [],
             })
         );

@@ -1,8 +1,8 @@
 # Compatibility Testing
 
-This guide explains the reproducible L0/L1/L2 compatibility system, why each
+This guide explains the reproducible L0/L1/L2/L3 compatibility system, why each
 level exists, how external game fixtures are handled, how to run the batch
-suite, and how to create or review deterministic input scenarios.
+suite, and how to create or review deterministic input and audio scenarios.
 
 ## Scope
 
@@ -15,9 +15,10 @@ completable.
 | L0 Load | Load the requested content and emit matching diagnostics. | The container was parsed and execution was initialized. | Rendering, input, audio, saves, or gameplay. |
 | L1 Boot | Complete every requested frame and produce a non-black, non-solid RGB565 framebuffer. | The configured startup run produced meaningful video output. | That input works or that the program progressed beyond the observed screen. |
 | L2 Input | Replay versioned input and match every expected framebuffer checkpoint while differing from no-input controls. | The configured input caused the named, reviewed interaction. | Extended gameplay, audio correctness, save correctness, or completion. |
+| L3 Audio | Match deterministic non-silent guest PCM, its declared format, and bounded virtual queue behavior after passing L2. | The configured interaction submitted the reviewed PCM stream without rejected writes, clipping beyond its limit, or sustained underflow. | Host-device playback, subjective sound quality, extended gameplay, saves, or completion. |
 
-Later levels are planned for audio, save data, extended playability, and full
-completion. They must not be inferred from an L2 result.
+Later levels are planned for save data, extended playability, and full
+completion. They must not be inferred from an L3 result.
 
 ## Why L2 Needs a No-Input Control
 
@@ -42,13 +43,15 @@ Game files are not distributed in this repository. The entire `tmp` directory
 is ignored, and users must provide their own legally obtained `.app` files
 under `tmp/dingoo_game`.
 
-Files under `compatibility/l2-input` are external-fixture manifests, not game
-resources. They intentionally contain only:
+Files under `compatibility/l2-input` and `compatibility/l3-audio` are
+external-fixture manifests, not game resources. They intentionally contain
+only:
 
 - the expected relative path and file name;
 - the SHA-256 of the exact tested content version;
 - the deterministic frame count and button events;
 - reviewed framebuffer checkpoints and no-input controls.
+- audio scenario bindings and reviewed PCM, format, and queue expectations.
 
 Keeping these manifests in version control makes compatibility claims
 reviewable and prevents them from depending on hidden machine-local settings.
@@ -64,10 +67,11 @@ public CI.
 
 ```text
 compatibility/l2-input/       Versioned L2 external-fixture manifests
+compatibility/l3-audio/       Versioned L3 PCM expectation manifests
 tmp/dingoo_game/              User-provided game files; ignored by Git
 tmp/hle-reports/              Default generated reports; ignored by Git
 docs/images/                  Published screenshots from verified runs
-scripts/batch-screenshots.ps1 Batch runner and L0/L1/L2 grader
+scripts/batch-screenshots.ps1 Batch runner and L0/L1/L2/L3 grader
 ```
 
 ## Running the Batch Suite
@@ -89,18 +93,20 @@ pwsh -NoProfile -File scripts/batch-screenshots.ps1 `
   -TimeoutSeconds 120
 ```
 
-The default `compatibility/l2-input` directory is loaded automatically. A
-different scenario set can be selected explicitly:
+The default `compatibility/l2-input` and `compatibility/l3-audio` directories
+are loaded automatically. Different scenario sets can be selected explicitly:
 
 ```powershell
 pwsh -NoProfile -File scripts/batch-screenshots.ps1 `
   -InputScenarioDirectory tmp/experimental-scenarios `
+  -AudioScenarioDirectory tmp/experimental-audio-scenarios `
   -ReportDirectory tmp/experimental-run
 ```
 
-Games without a matching scenario are graded at L0/L1 and reported as
-`not_tested` at L2. Every configured scenario must match a discovered game;
-unused scenarios make the batch command fail.
+Games without matching manifests are graded at their highest configured level
+and reported as `not_tested` above it. Every configured input and audio
+scenario must match a discovered game; unused scenarios make the batch command
+fail. Every L3 manifest must bind the exact tracked L2 script used by the run.
 
 For stricter SDK coverage, run with the unknown-HLE stop policy:
 
@@ -116,9 +122,9 @@ An exception must name the exact reviewed function:
 -AllowUnknownHle legacy_function
 ```
 
-Strict HLE validation and L2 validate different properties. A game can pass
-its scripted input scenario in report mode while still recording unsupported
-SDK calls. Review both the level result and `unknown_hle` evidence.
+Strict HLE validation and L2/L3 validate different properties. A game can pass
+its scripted input and PCM scenarios in report mode while still recording
+unsupported SDK calls. Review both the level result and `unknown_hle` evidence.
 
 ## Generated Evidence
 
@@ -131,8 +137,8 @@ The report directory contains:
 
 Each summary records the Git commit and dirty state, binary/content/screenshot
 hashes, platform and configuration, duration, process result, frame and
-instruction counts, RGB565 metrics, log tail, unknown HLE calls, and optional
-input evidence.
+instruction counts, RGB565 metrics, log tail, unknown HLE calls, input
+evidence, guest PCM statistics, and virtual queue evidence.
 
 The important L2 fields are:
 
@@ -163,9 +169,45 @@ The important L2 fields are:
 }
 ```
 
+The important L3 fields are:
+
+```json
+{
+  "levels": {
+    "highest": "L3",
+    "l3": {
+      "status": "pass",
+      "reason": "pcm_checkpoint_matched"
+    }
+  },
+  "audio": {
+    "configurations": [
+      { "sample_rate": 8000, "format": "S16Le", "channels": 1, "volume": 50 }
+    ],
+    "successful_write_calls": 37,
+    "submitted_bytes": 29600,
+    "decoded_frames": 14800,
+    "nonzero_samples": 14740,
+    "rms_amplitude": 0.0435,
+    "pcm_crc32": "d58a5da6",
+    "rejected_write_calls": 0,
+    "underflow_frames": 0,
+    "max_buffered_frames": 4267
+  }
+}
+```
+
+PCM CRC32 is calculated over accepted guest bytes. Sample counts, peak/RMS,
+clipping, and format fields are calculated from decoded PCM. Headless and
+screenshot runs disable host-device playback and consume a bounded virtual
+queue at 60 Hz, so results do not depend on the host audio device or wall-clock
+playback rate. `queue_full_events` records successful backpressure deferrals;
+it is not dropped audio. Rejected writes, an unbounded queue, or underflow over
+the scenario limit fail L3.
+
 Screenshots are first written into the report directory. A screenshot is copied
-to `docs/images` only after the game's configured L1 or L2 requirement passes.
-A runtime or checkpoint failure therefore cannot overwrite the previous
+to `docs/images` only after the game's configured L1, L2, or L3 requirement
+passes. A runtime, framebuffer, or PCM checkpoint failure therefore cannot overwrite the previous
 verified documentation image.
 
 ## Input Scenario Format
@@ -326,6 +368,90 @@ The batch runner requires all of the following:
 
 Only then is `levels.highest` set to `L2`.
 
+## Audio Scenario Format
+
+An L3 scenario is a separate schema-versioned manifest that binds the exact
+content and tracked L2 input script to reviewed audio expectations:
+
+```json
+{
+  "schema_version": 1,
+  "content": "game.app",
+  "relative_path": "game.app",
+  "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "input_script": "compatibility/l2-input/game.json",
+  "input_script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "expected": {
+    "sample_rate": 16000,
+    "format": "S16Le",
+    "channels": 1,
+    "volume": 100,
+    "pcm_crc32": "12345678",
+    "submitted_bytes": 320000,
+    "decoded_frames": 160000,
+    "nonzero_samples": 120000,
+    "min_rms_amplitude": 0.01,
+    "max_clipped_samples": 0,
+    "max_rejected_write_calls": 0,
+    "max_silenced_write_calls": 0,
+    "max_underflow_frames": 0,
+    "max_consecutive_underflow_frames": 0,
+    "max_buffered_frames": 8800
+  }
+}
+```
+
+The input script path must remain inside the repository, exist, and match its
+SHA-256. The L3 content identity must match both the discovered game and its L2
+script. This prevents an audio baseline from silently running against a
+different interaction.
+
+## Creating a New L3 Scenario
+
+1. Start from a reviewed, passing L2 script that reaches a state expected to
+   produce sound. An opened stream or all-zero PCM is not sufficient.
+2. Run the standalone binary directly with that input script and `--hle-report`.
+   Inspect `audio.configurations`, `successful_write_calls`,
+   `nonzero_samples`, `rms_amplitude`, `pcm_crc32`, rejected writes, underflow,
+   and maximum buffering.
+3. Open the scripted screenshot and confirm that it represents the named state.
+   For example, a player should show the selected track or a game should show
+   the intended active screen.
+4. Repeat the identical run at least three times. Do not create a baseline if
+   framebuffer CRC, PCM CRC, counts, or queue metrics change without an
+   understood reason.
+5. Record the exact content and input-script SHA-256 values. Use exact PCM CRC,
+   byte/frame/nonzero counts, and format values. Set RMS and queue bounds from
+   measured evidence, with only enough margin to express the intended semantic
+   limit.
+6. Run the complete batch and require L3 to pass. Then copy the L3 directory to
+   an ignored temporary location, deliberately change one `pcm_crc32`, and run
+   with `-AudioScenarioDirectory` pointing to that directory. The affected game
+   must fail with `pcm_checkpoint_mismatch`, the command must exit nonzero, and
+   every published screenshot hash must remain unchanged.
+
+Do not add fixed PCM data, relax silence checks, or suppress queue failures just
+to increase the L3 count. Diagnose the game or audio implementation first.
+
+## L3 Pass Conditions
+
+The batch runner requires all of the following:
+
+1. The L3 path, content name, and content SHA-256 match a discovered game.
+2. The bound L2 script path and SHA-256 match the script actually executed.
+3. L0, L1, and L2 pass.
+4. Audio diagnostics schema version 1 is present.
+5. The guest opens a stream and completes at least one accepted PCM write.
+6. Exactly one observed configuration matches sample rate, format, channels,
+   and volume.
+7. PCM CRC32, submitted bytes, decoded frames, and nonzero sample count match
+   the reviewed checkpoint, and RMS exceeds the configured non-silence floor.
+8. Rejected/silenced writes, clipping, underflow, consecutive underflow, and
+   maximum buffering remain within the configured limits.
+9. No L3 scenario is left unmatched.
+
+Only then is `levels.highest` set to `L3`.
+
 ## Common Failure Reasons
 
 | Reason | Meaning |
@@ -339,17 +465,33 @@ Only then is `levels.highest` set to `L2`.
 | `no_nonzero_input_frames` | The scenario never held a guest button. |
 | `incomplete_input_checkpoints` | The run ended before every checkpoint was recorded. |
 | `framebuffer_checkpoint_mismatch` | The actual CRC32 missed the expected value or matched the no-input control. |
+| `no_audio_scenario` | No L3 manifest applies; this is `not_tested`, not a failure. |
+| `audio_scenario_content_mismatch` | The L3 content name does not match the discovered game. |
+| `audio_scenario_content_hash_mismatch` | The L3 manifest targets a different content build. |
+| `audio_scenario_input_mismatch` | The bound L2 script path or SHA-256 does not match the executed script. |
+| `l2_failed` | The required scripted interaction failed before audio grading. |
+| `missing_audio_diagnostics` | The frontend did not emit guest PCM evidence. |
+| `unsupported_audio_diagnostics` | The report uses an unsupported audio evidence schema. |
+| `no_audio_stream` | No stream was opened or no PCM write completed. |
+| `audio_format_mismatch` | Sample rate, sample format, channel count, or volume differs from the manifest. |
+| `silent_audio` | PCM is all zero or RMS is below the reviewed floor. |
+| `pcm_checkpoint_mismatch` | PCM CRC32 or exact byte/frame/nonzero counts differ from the reviewed baseline. |
+| `audio_write_rejected` | Rejected or deliberately silenced writes exceed the scenario limit. |
+| `audio_queue_underflow` | Total or consecutive virtual underflow exceeds the scenario limit. |
+| `audio_queue_unbounded` | Buffered audio exceeds the reviewed bound. |
+| `audio_clipping_exceeded` | Full-scale decoded samples exceed the scenario limit. |
 | `screenshot_publish_failed` | The verified screenshot could not be copied to `docs/images`. |
 
 Inspect the process result, log tail, input checkpoints, framebuffer metrics,
-and unknown HLE list together when diagnosing a failure.
+audio metrics, and unknown HLE list together when diagnosing a failure.
 
 ## Determinism and Maintenance
 
 Exact full-frame CRC32 is intentionally strict. It catches rendering and timing
 regressions, but it is unsuitable when a checkpoint includes uncontrolled
-randomness, a real-time clock, nondeterministic audio visualization, or
-save-dependent content.
+randomness, a real-time clock, nondeterministic audio visualization, live audio
+input, or save-dependent content. Exact PCM CRC32 has the same constraint: it
+must be derived from deterministic guest PCM, not host-device capture.
 
 When repeated identical runs produce different CRC32 values:
 
@@ -359,11 +501,16 @@ When repeated identical runs produce different CRC32 values:
 - choose a more stable semantic checkpoint or add a better diagnostic method;
 - keep the game at L1 if trustworthy L2 evidence is not yet available.
 
+When repeated audio probes differ, keep the game below L3 until the source is
+understood. Check guest randomness, timing, input state, save data, incomplete
+HLE, and accidental host-device coupling before changing the expected PCM.
+
 When an emulator change causes an existing checkpoint to fail, compare the old
 and new screenshots and controls before updating any expected value. Update a
 manifest only when the new state is understood and correct. An unexplained CRC
 change is a regression signal, not baseline maintenance.
 
-There is no fixed limit on the number of L2 scenarios. Additional games should
-be added incrementally after the same positive, control, visual, and negative
-validation. Coverage count must never take priority over evidence quality.
+There is no fixed limit on the number of L2 or L3 scenarios. Additional games
+should be added incrementally after the same positive, control, visual,
+repeatability, and negative validation. Coverage count must never take priority
+over evidence quality.

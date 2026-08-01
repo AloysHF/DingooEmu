@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "content": "Ultimate Drift.app",
+  "relative_path": "Ultimate Drift.app",
+  "content_sha256": "e4e23b19515716445eee4a79bf6f081b77f5c0911d43456205902475653373f9",
+  "input_script": "compatibility/l2-input/ultimate-drift.json",
+  "input_script_sha256": "02019bf0ba8c9c4a764abe6eb357634a24867434c425558b5b7e544cbe4dcf4b",
+  "expected": {
+    "sample_rate": 16000,
+    "format": "S16Le",
+    "channels": 1,
+    "volume": 50,
+    "pcm_crc32": "22cdcf90",
+    "submitted_bytes": 336000,
+    "decoded_frames": 168000,
+    "nonzero_samples": 125561,
+    "min_rms_amplitude": 0.12,
+    "max_clipped_samples": 0,
+    "max_rejected_write_calls": 0,
+    "max_silenced_write_calls": 0,
+    "max_underflow_frames": 0,
+    "max_consecutive_underflow_frames": 0,
+    "max_buffered_frames": 8800
+  }
+}
