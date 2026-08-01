@@ -22,7 +22,7 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 - **MIPS32 CPU interpreter** — Ingenic JZ4740 XBurst compatible instruction set
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
 - **HLE (High-Level Emulation)** — Dingoo SDK functions for graphics, input, audio, timing, files, and companion-content discovery implemented in Rust
-- **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and produce machine-graded L0/L1 JSON and CSV reports
+- **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and produce machine-graded L0/L1/L2 JSON and CSV reports with deterministic input checkpoints
 - **`.app` file support** — Parse and load Dingoo A320 game container format
 - **Frame rendering** — 320×240 RGB565 framebuffer with XRGB8888 output
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
@@ -98,9 +98,9 @@ cargo test --workspace
 
 Compatibility runs generate per-game diagnostics plus unified `summary.json`
 and `summary.csv` files with content/screenshot hashes, the Git revision,
-runtime configuration, timing, log tails, unknown HLE calls, and automatic
-L0/L1 results. Use `-UnknownHlePolicy stop` to make any non-allowlisted SDK gap
-fail immediately.
+runtime configuration, timing, log tails, unknown HLE calls, scripted input
+evidence, and automatic L0/L1/L2 results. Use `-UnknownHlePolicy stop` to make
+any non-allowlisted SDK gap fail immediately.
 
 ## Architecture
 
@@ -128,6 +128,7 @@ crates/
 │       └── error.rs             # Error types
 ├── dingooemu/                   # Standalone binary (-> dingooemu)
 │   └── src/
+│       ├── input_script.rs      # Deterministic input replay and checkpoints
 │       └── main.rs              # Window loop and CLI front-end
 └── dingooemu-libretro/          # libretro cdylib (-> dingooemu_libretro.{dll,so,dylib})
     ├── dingooemu_libretro.info  # RetroArch core metadata
@@ -141,15 +142,19 @@ crates/
 
 ## Game Compatibility
 
-The current compatibility suite contains 32 documented `.app` entries. Each
-entry is automatically graded for loading (L0) and initial rendering (L1);
-this does not imply complete gameplay, input, audio, or save-data
-compatibility.
+The current compatibility suite contains 32 documented `.app` entries. Every
+entry is automatically graded for loading (L0) and initial rendering (L1).
+Ten representative games also replay versioned per-frame button scripts and
+match exact RGB565 framebuffer checkpoints against distinct no-input controls
+(L2). L2 proves the configured interaction only; it does not imply complete
+gameplay, audio, or save-data compatibility.
 
 | Result | Count | Status |
 |--------|-------|--------|
 | L0: loads and emits valid diagnostics | 32 | ✅ Pass |
 | L1: completes capture with a non-black, non-solid frame | 32 | ✅ Pass |
+| L2: scripted input reaches exact checkpoints | 10 | ✅ Pass |
+| L2: not yet tested | 22 | ⚪ Pending |
 | **Total** | **32** | **⚠️ Experimental** |
 
 For detailed game list with screenshots and descriptions, see [Game Compatibility](docs/Game-Compatibility.md).

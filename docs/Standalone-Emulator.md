@@ -57,6 +57,7 @@ dingooemu [OPTIONS] <PATH>
 | `--unknown-hle-policy <MODE>` | `report`, `stop` | `report` | Aggregate unknown SDK calls and continue with zero, or stop at the first non-allowlisted call. |
 | `--allow-unknown-hle <NAME>` | exact function name | — | Preserve compatibility-stub behavior for one function in strict HLE mode; may be repeated. |
 | `--hle-report <PATH>` | path | — | Write stable JSON diagnostics with run, framebuffer, and aggregated unknown-HLE evidence. |
+| `--input-script <PATH>` | path | — | Replay a versioned per-frame input script and record exact framebuffer checkpoints; requires headless or screenshot mode. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -121,6 +122,8 @@ dingooemu --cheat mem8:0x80100000=99 --cheat reg:r4=0x1234 game.app
 Writes still pass through the emulator's normal memory validation. Invalid or
 out-of-range rules stop startup with a clear error instead of being ignored.
 
+## Compatibility Diagnostics and Scripted Input
+
 For compatibility testing, `--unknown-instruction-policy stop` turns the first
 unimplemented MIPS instruction into an execution error. The default `skip`
 behavior logs the instruction and continues, matching previous releases.
@@ -134,13 +137,18 @@ execution error after recording it. Use `--allow-unknown-hle NAME` only for a
 reviewed compatibility exception; matching is case-sensitive and exact.
 
 The JSON report also includes requested/executed frame counts, executed
-instructions, and deterministic RGB565 framebuffer statistics. It is written
-even when strict mode stops emulation:
+instructions, deterministic RGB565 framebuffer statistics, and optional input
+checkpoint evidence. It is written even when strict mode stops emulation:
 
 ```bash
 dingooemu game.app --headless --frames 300 --unknown-hle-policy stop \
   --hle-report hle-report.json
 ```
+
+Input scripts use zero-based event frames and one-based completed-frame
+checkpoints. Each event replaces the complete held-button state until the next
+event. The script's content name and frame count must match the run. Batch
+testing additionally verifies its content SHA-256.
 
 ## Audio Output
 
@@ -191,22 +199,26 @@ Screenshots are written to `docs/images`, while per-game JSON diagnostics and
 unified `summary.json` / `summary.csv` files are written to
 `tmp/hle-reports`. The summaries record content and screenshot SHA-256 hashes,
 the Git revision and dirty state, binary hash, runtime configuration, elapsed
-time, log tail, framebuffer metrics, and unknown HLE calls.
+time, log tail, framebuffer metrics, input evidence, and unknown HLE calls.
 
-The batch runner grades two levels automatically:
+The batch runner grades three levels automatically:
 
 - **L0** passes when the content loads and produces a valid diagnostics report
   matching the requested capture.
 - **L1** passes when L0 passes, the process completes every requested frame, a
   screenshot is produced, and the framebuffer contains non-black pixels and
   more than one RGB565 color.
+- **L2** applies to games with a matching script under
+  `compatibility/l2-input`. It requires L1, matching content and script
+  metadata, at least one nonzero-input frame, and every exact RGB565 checkpoint
+  to match while differing from its recorded no-input control.
 
 Failed captures are kept inside the report directory when available. A
-verified screenshot is copied to `docs/images` only after L1 passes, so a
-strict or failed run cannot delete the previous known-good artifact. The
-default capture point is 60 frames, with per-game overrides for slow-starting
-or performance-sensitive titles. Explicit parameters apply the requested
-values to every game:
+verified screenshot is copied to `docs/images` only after the configured L1 or
+L2 level passes, so a strict, checkpoint, or runtime failure cannot delete the
+previous known-good artifact. The default capture point is 60 frames, with
+per-game and input-script overrides for deterministic checkpoints. Explicit
+parameters apply to games without an input scenario:
 
 ```powershell
 pwsh -NoProfile -File scripts/batch-screenshots.ps1 -Frames 60 -TimeoutSeconds 30
@@ -220,6 +232,10 @@ pwsh -NoProfile -File scripts/batch-screenshots.ps1 `
   -AllowUnknownHle legacy_function `
   -ReportDirectory tmp/hle-reports-strict
 ```
+
+For the design rationale, external-fixture policy, complete scenario schema,
+step-by-step authoring workflow, report interpretation, negative validation,
+and determinism rules, see [Compatibility Testing](Compatibility-Testing.md).
 
 ## Examples
 
@@ -253,4 +269,8 @@ dingooemu --headless --frames 120 path/to/game.app
 
 # Save aggregated SDK compatibility diagnostics
 dingooemu --headless --hle-report hle-report.json path/to/game.app
+
+# Replay deterministic input and record checkpoints
+dingooemu --headless --frames 180 --input-script scenario.json \
+  --hle-report input-report.json path/to/game.app
 ```

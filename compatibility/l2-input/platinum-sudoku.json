@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "content": "Platinum Sudoku.app",
+  "relative_path": "Platinum Sudoku.app",
+  "content_sha256": "c7a879ecb34a2379cd3a138f84f6f140fb426417dedce9b89d04015c4f5a7b9f",
+  "frames": 240,
+  "events": [
+    { "frame": 60, "buttons": ["a"] },
+    { "frame": 63, "buttons": [] },
+    { "frame": 150, "buttons": ["right"] },
+    { "frame": 154, "buttons": [] }
+  ],
+  "checkpoints": [
+    { "name": "main-menu-reached", "frame": 240, "expected_framebuffer_crc32": "faed8134", "control_framebuffer_crc32": "9647d1d2" }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "content": "Tetris.app",
+  "relative_path": "Tetris.app",
+  "content_sha256": "78d190e4abfcdc2c4134dbd185b980bb6f71f137481951503f1533912c9f05eb",
+  "frames": 240,
+  "events": [
+    { "frame": 60, "buttons": ["start"] },
+    { "frame": 63, "buttons": [] },
+    { "frame": 150, "buttons": ["left"] },
+    { "frame": 154, "buttons": [] }
+  ],
+  "checkpoints": [
+    { "name": "menu-selection-changed", "frame": 240, "expected_framebuffer_crc32": "49970480", "control_framebuffer_crc32": "2a567fe6" }
+  ]
+}

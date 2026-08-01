@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "content": "Block Breaker.app",
+  "relative_path": "Block Breaker.app",
+  "content_sha256": "c5adc7ded226705fcb3a1aa80ac41d9ab96b6b6916d99a59a7068fea722b9f93",
+  "frames": 180,
+  "events": [
+    { "frame": 60, "buttons": ["a"] },
+    { "frame": 63, "buttons": [] },
+    { "frame": 100, "buttons": ["right"] },
+    { "frame": 112, "buttons": [] }
+  ],
+  "checkpoints": [
+    { "name": "menu-selection-changed", "frame": 180, "expected_framebuffer_crc32": "8b0feaa8", "control_framebuffer_crc32": "fe86b0dd" }
+  ]
+}

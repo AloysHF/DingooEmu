@@ -19,6 +19,7 @@ pub struct FramebufferStats {
     pub unique_colors: u32,
     pub dominant_color_rgb565: u16,
     pub dominant_color_pixels: u32,
+    pub crc32_rgb565: u32,
 }
 
 /// Video subsystem
@@ -135,7 +136,13 @@ impl Video {
             unique_colors,
             dominant_color_rgb565,
             dominant_color_pixels,
+            crc32_rgb565: self.framebuffer_crc32(),
         }
+    }
+
+    /// Calculate a deterministic CRC32 over the raw RGB565 framebuffer.
+    pub fn framebuffer_crc32(&self) -> u32 {
+        crc32fast::hash(&self.framebuffer)
     }
 
     /// Save the current framebuffer as a PNG screenshot.
@@ -215,7 +222,21 @@ mod tests {
                 unique_colors: 3,
                 dominant_color_rgb565: 0,
                 dominant_color_pixels: 76_798,
+                crc32_rgb565: video.framebuffer_crc32(),
             }
+        );
+    }
+
+    #[test]
+    fn framebuffer_crc32_tracks_raw_rgb565_pixels() {
+        let mut video = Video::new();
+        let initial = video.framebuffer_crc32();
+        video.framebuffer_mut()[0..2].copy_from_slice(&0xffff_u16.to_le_bytes());
+
+        assert_ne!(video.framebuffer_crc32(), initial);
+        assert_eq!(
+            video.framebuffer_crc32(),
+            crc32fast::hash(video.framebuffer())
         );
     }
 }

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "content": "samegoo.app",
+  "relative_path": "SameGoo/samegoo.app",
+  "content_sha256": "c1b418a5345972ead3eab18a22e91587543dc0ae8b939920123c2e7aaf483cc9",
+  "frames": 360,
+  "events": [
+    { "frame": 300, "buttons": ["right"] },
+    { "frame": 304, "buttons": [] },
+    { "frame": 320, "buttons": ["down"] },
+    { "frame": 324, "buttons": [] }
+  ],
+  "checkpoints": [
+    { "name": "menu-selection-changed", "frame": 360, "expected_framebuffer_crc32": "92d0a5b0", "control_framebuffer_crc32": "6b75e597" }
+  ]
+}
