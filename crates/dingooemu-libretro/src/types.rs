@@ -70,3 +70,22 @@ pub struct RetroVariable {
     pub key: *const c_char,
     pub value: *const c_char,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RetroMemoryDescriptor {
+    pub flags: u64,
+    pub ptr: *mut c_void,
+    pub offset: usize,
+    pub start: usize,
+    pub select: usize,
+    pub disconnect: usize,
+    pub len: usize,
+    pub addrspace: *const c_char,
+}
+
+#[repr(C)]
+pub struct RetroMemoryMap {
+    pub descriptors: *const RetroMemoryDescriptor,
+    pub num_descriptors: c_uint,
+}

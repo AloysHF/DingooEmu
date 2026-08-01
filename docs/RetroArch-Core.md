@@ -48,11 +48,11 @@ platform-specific installation requirements:
 - Persistent guest save files in RetroArch's configured save directory
 - Save states with content identity and corruption checks
 - Frontend cheat slots for 8/16/32-bit memory and MIPS registers
+- Frontend memory access for 32 MiB system RAM and LCD video RAM
 - Live core options, including host master volume
 
-The current basic core does not yet provide frontend memory exposure or
-subsystem loading. The metadata marks these
-features unavailable so RetroArch does not present unsupported capabilities.
+The current basic core does not yet provide subsystem loading. The metadata
+marks it unavailable so RetroArch does not present unsupported capabilities.
 
 ## Game Save Files
 
@@ -77,6 +77,14 @@ RetroArch cheat slots accept `TARGET=VALUE` rules. Supported targets are
 registers `r0` through `r31`. Numbers may be decimal or use a `0x` hexadecimal
 prefix. Enabled slots are applied at the start of every emulated frame;
 disabled slots remain configured but do not modify state.
+
+## Memory Access
+
+Compatible frontend tools can access the complete 32 MiB system RAM and the
+LCD framebuffer mapping through the standard libretro memory API. The core
+also registers both regions as memory-map descriptors, including the guest
+framebuffer address. Region pointers remain stable across Reset and save-state
+loads while content remains loaded.
 
 ## Core Options
 

@@ -57,7 +57,7 @@ The core file will be produced at `target/release/dingooemu_libretro.dll`
 available, including live volume, input-repeat, A/B layout, logging, and
 unknown-instruction core options, save states, and frontend cheat slots.
 Guest-created save files persist in RetroArch's configured save directory.
-Frontend memory exposure is not yet implemented.
+System RAM and video RAM are exposed to compatible frontend tools.
 
 See the [RetroArch Core](docs/RetroArch-Core.md) guide for installation,
 supported features, and RetroPad mapping.

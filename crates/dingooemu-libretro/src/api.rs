@@ -145,6 +145,9 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
             apply_core_options(&mut emulator);
             emulator.start();
             unsafe { EMULATOR = Some(emulator) };
+            if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
+                register_memory_maps(emulator);
+            }
             log::info!("Loaded content: {path}");
             true
         }
@@ -287,13 +290,27 @@ pub extern "C" fn retro_cheat_set(index: c_uint, enabled: bool, code: *const c_c
 }
 
 #[no_mangle]
-pub extern "C" fn retro_get_memory_data(_id: c_uint) -> *mut c_void {
-    ptr::null_mut()
+pub extern "C" fn retro_get_memory_data(id: c_uint) -> *mut c_void {
+    let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
+        return ptr::null_mut();
+    };
+    match id & RETRO_MEMORY_MASK {
+        RETRO_MEMORY_SYSTEM_RAM => emulator.memory.system_ram_mut().as_mut_ptr().cast(),
+        RETRO_MEMORY_VIDEO_RAM => emulator.memory.framebuffer_mut().as_mut_ptr().cast(),
+        _ => ptr::null_mut(),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn retro_get_memory_size(_id: c_uint) -> usize {
-    0
+pub extern "C" fn retro_get_memory_size(id: c_uint) -> usize {
+    let Some(emulator) = (unsafe { EMULATOR.as_ref() }) else {
+        return 0;
+    };
+    match id & RETRO_MEMORY_MASK {
+        RETRO_MEMORY_SYSTEM_RAM => emulator.memory.system_ram().len(),
+        RETRO_MEMORY_VIDEO_RAM => emulator.memory.framebuffer().len(),
+        _ => 0,
+    }
 }
 
 fn set_pixel_format() -> bool {
@@ -313,6 +330,41 @@ fn frontend_directory(command: u32) -> Option<std::path::PathBuf> {
     }
     let path = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     (!path.is_empty()).then(|| std::path::PathBuf::from(path.as_ref()))
+}
+
+fn register_memory_maps(emulator: &mut Emulator) {
+    let descriptors = [
+        RetroMemoryDescriptor {
+            flags: RETRO_MEMDESC_SYSTEM_RAM,
+            ptr: emulator.memory.system_ram_mut().as_mut_ptr().cast(),
+            offset: 0,
+            start: 0,
+            select: 0,
+            disconnect: 0,
+            len: emulator.memory.system_ram().len(),
+            addrspace: c"Dingoo".as_ptr(),
+        },
+        RetroMemoryDescriptor {
+            flags: RETRO_MEMDESC_VIDEO_RAM,
+            ptr: emulator.memory.framebuffer_mut().as_mut_ptr().cast(),
+            offset: 0,
+            start: dingooemu_core::video::VM_LCD_FB_ADDRESS as usize,
+            select: 0,
+            disconnect: 0,
+            len: emulator.memory.framebuffer().len(),
+            addrspace: c"Dingoo".as_ptr(),
+        },
+    ];
+    let memory_map = RetroMemoryMap {
+        descriptors: descriptors.as_ptr(),
+        num_descriptors: descriptors.len() as u32,
+    };
+    if !callbacks::environment(
+        RETRO_ENVIRONMENT_SET_MEMORY_MAPS,
+        (&memory_map as *const RetroMemoryMap).cast_mut().cast(),
+    ) {
+        log::warn!("Frontend did not accept memory descriptors");
+    }
 }
 
 fn set_performance_level() {
@@ -547,6 +599,7 @@ mod tests {
     static INPUT_POLLED: AtomicBool = AtomicBool::new(false);
     static VIDEO_WIDTH: AtomicU32 = AtomicU32::new(0);
     static AUDIO_BATCH_CALLED: AtomicBool = AtomicBool::new(false);
+    static MEMORY_MAPS_SET: AtomicBool = AtomicBool::new(false);
     static SAVE_DIRECTORY: Mutex<Option<CString>> = Mutex::new(None);
 
     unsafe extern "C" fn test_environment(command: u32, data: *mut c_void) -> bool {
@@ -562,6 +615,14 @@ mod tests {
                 true
             }
             RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL => true,
+            RETRO_ENVIRONMENT_SET_MEMORY_MAPS => {
+                let memory_map = &*data.cast::<RetroMemoryMap>();
+                MEMORY_MAPS_SET.store(
+                    memory_map.num_descriptors == 2 && !memory_map.descriptors.is_null(),
+                    Ordering::SeqCst,
+                );
+                true
+            }
             RETRO_ENVIRONMENT_SET_VARIABLES => true,
             RETRO_ENVIRONMENT_GET_VARIABLE | RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE => false,
             RETRO_ENVIRONMENT_GET_LOG_INTERFACE => false,
@@ -746,6 +807,7 @@ mod tests {
         INPUT_POLLED.store(false, Ordering::SeqCst);
         VIDEO_WIDTH.store(0, Ordering::SeqCst);
         AUDIO_BATCH_CALLED.store(false, Ordering::SeqCst);
+        MEMORY_MAPS_SET.store(false, Ordering::SeqCst);
 
         let path = std::env::temp_dir().join(format!(
             "dingooemu-libretro-test-{}.app",
@@ -774,6 +836,16 @@ mod tests {
             RETRO_PIXEL_FORMAT_XRGB8888
         );
         assert!(INPUT_DESCRIPTORS_SET.load(Ordering::SeqCst));
+        assert!(MEMORY_MAPS_SET.load(Ordering::SeqCst));
+        assert_eq!(
+            retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM),
+            32 * 1024 * 1024
+        );
+        assert!(retro_get_memory_size(RETRO_MEMORY_VIDEO_RAM) >= (320 * 240 * 2) as usize);
+        let system_ram = retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+        let video_ram = retro_get_memory_data(RETRO_MEMORY_VIDEO_RAM);
+        assert!(!system_ram.is_null());
+        assert!(!video_ram.is_null());
 
         retro_run();
         assert!(INPUT_POLLED.load(Ordering::SeqCst));
@@ -801,6 +873,8 @@ mod tests {
                 .unwrap();
         }
         assert!(retro_unserialize(state.as_ptr().cast(), state.len()));
+        assert_eq!(retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM), system_ram);
+        assert_eq!(retro_get_memory_data(RETRO_MEMORY_VIDEO_RAM), video_ram);
         unsafe {
             assert_eq!(
                 EMULATOR.as_ref().unwrap().memory.read_u32(0x1000).unwrap(),
@@ -825,6 +899,8 @@ mod tests {
         }
 
         retro_reset();
+        assert_eq!(retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM), system_ram);
+        assert_eq!(retro_get_memory_data(RETRO_MEMORY_VIDEO_RAM), video_ram);
         unsafe {
             let emulator = EMULATOR.as_ref().unwrap();
             assert!(emulator.is_running());
@@ -832,6 +908,8 @@ mod tests {
         }
 
         retro_unload_game();
+        assert!(retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM).is_null());
+        assert_eq!(retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM), 0);
         unsafe { assert!(EMULATOR.is_none()) };
         retro_deinit();
         *SAVE_DIRECTORY.lock().unwrap() = None;

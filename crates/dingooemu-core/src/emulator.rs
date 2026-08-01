@@ -375,6 +375,8 @@ impl Emulator {
         let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
         replacement.save_directory = self.save_directory.clone();
         replacement.cheats = self.cheats.clone();
+        self.memory.copy_state_from(&replacement.memory);
+        std::mem::swap(&mut replacement.memory, &mut self.memory);
         if was_running {
             replacement.start();
         }
@@ -471,7 +473,8 @@ impl Emulator {
         replacement.save_directory = self.save_directory.clone();
         replacement.cheats = self.cheats.clone();
         replacement.cpu = state.cpu;
-        replacement.memory = state.memory;
+        self.memory.copy_state_from(&state.memory);
+        std::mem::swap(&mut replacement.memory, &mut self.memory);
         replacement.video = state.video;
         replacement.input = state.input;
         replacement.audio = state.audio;
