@@ -22,7 +22,7 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 - **MIPS32 CPU interpreter** — Ingenic JZ4740 XBurst compatible instruction set
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
 - **HLE (High-Level Emulation)** — Dingoo SDK functions for graphics, input, audio, timing, files, and companion-content discovery implemented in Rust
-- **Auditable compatibility diagnostics** — Aggregate unknown SDK calls with strict validation and machine-readable JSON reports
+- **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and produce machine-graded L0/L1 JSON and CSV reports
 - **`.app` file support** — Parse and load Dingoo A320 game container format
 - **Frame rendering** — 320×240 RGB565 framebuffer with XRGB8888 output
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
@@ -96,9 +96,11 @@ Run the unit tests:
 cargo test --workspace
 ```
 
-Compatibility runs can generate one unknown-HLE report per game with
-`scripts/batch-screenshots.ps1`. Use `-UnknownHlePolicy stop` to make any
-non-allowlisted SDK gap fail immediately.
+Compatibility runs generate per-game diagnostics plus unified `summary.json`
+and `summary.csv` files with content/screenshot hashes, the Git revision,
+runtime configuration, timing, log tails, unknown HLE calls, and automatic
+L0/L1 results. Use `-UnknownHlePolicy stop` to make any non-allowlisted SDK gap
+fail immediately.
 
 ## Architecture
 
@@ -140,13 +142,14 @@ crates/
 ## Game Compatibility
 
 The current compatibility suite contains 32 documented `.app` entries. Each
-entry is smoke-tested for startup and initial rendering; this does not imply
-complete gameplay, audio, or save-data compatibility.
+entry is automatically graded for loading (L0) and initial rendering (L1);
+this does not imply complete gameplay, input, audio, or save-data
+compatibility.
 
 | Result | Count | Status |
 |--------|-------|--------|
-| Renders a non-black frame | 32 | ✅ Pass |
-| Black screen or crash | 0 | ❌ Fail |
+| L0: loads and emits valid diagnostics | 32 | ✅ Pass |
+| L1: completes capture with a non-black, non-solid frame | 32 | ✅ Pass |
 | **Total** | **32** | **⚠️ Experimental** |
 
 For detailed game list with screenshots and descriptions, see [Game Compatibility](docs/Game-Compatibility.md).

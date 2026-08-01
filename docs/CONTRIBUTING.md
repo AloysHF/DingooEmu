@@ -37,11 +37,13 @@ unknown-HLE diagnostics:
 pwsh -NoProfile -File scripts/batch-screenshots.ps1
 ```
 
-The command writes screenshots to `docs/images` and one JSON report per game to
-`tmp/hle-reports`. Review each report's `unknown_hle` list instead of treating a
-non-empty screenshot as sufficient proof. Before declaring a representative
-sample clean, rerun it with `-UnknownHlePolicy stop`; any exception must use an
-explicit, reviewed `-AllowUnknownHle` name.
+The command writes L1-verified screenshots to `docs/images`, per-game JSON to
+`tmp/hle-reports`, and unified `summary.json` / `summary.csv` results. Review
+the automatic L0/L1 reasons, hashes, run configuration, framebuffer metrics,
+and `unknown_hle` list instead of treating a non-empty screenshot as sufficient
+proof. Before declaring a representative sample clean, rerun it with
+`-UnknownHlePolicy stop`; any exception must use an explicit, reviewed
+`-AllowUnknownHle` name.
 
 ## Areas Where Help Is Needed
 

@@ -56,7 +56,7 @@ dingooemu [OPTIONS] <PATH>
 | `--unknown-instruction-policy <MODE>` | `stop`, `skip` | `skip` | Stop on or log and skip an unimplemented MIPS instruction. |
 | `--unknown-hle-policy <MODE>` | `report`, `stop` | `report` | Aggregate unknown SDK calls and continue with zero, or stop at the first non-allowlisted call. |
 | `--allow-unknown-hle <NAME>` | exact function name | — | Preserve compatibility-stub behavior for one function in strict HLE mode; may be repeated. |
-| `--hle-report <PATH>` | path | — | Write stable JSON diagnostics with an `unknown_hle` list, including counts and first-call context. |
+| `--hle-report <PATH>` | path | — | Write stable JSON diagnostics with run, framebuffer, and aggregated unknown-HLE evidence. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -133,7 +133,9 @@ arguments. `--unknown-hle-policy stop` turns the first unknown call into an
 execution error after recording it. Use `--allow-unknown-hle NAME` only for a
 reviewed compatibility exception; matching is case-sensitive and exact.
 
-The JSON report is written even when strict mode stops emulation:
+The JSON report also includes requested/executed frame counts, executed
+instructions, and deterministic RGB565 framebuffer statistics. It is written
+even when strict mode stops emulation:
 
 ```bash
 dingooemu game.app --headless --frames 300 --unknown-hle-policy stop \
@@ -185,12 +187,26 @@ Build the standalone emulator and capture every `.app` file under
 pwsh -NoProfile -File scripts/batch-screenshots.ps1
 ```
 
-Screenshots are written to `docs/images`, and per-game JSON diagnostics are
-written to `tmp/hle-reports`. Every report contains an `unknown_hle` array,
-including an empty array when no gaps were observed. The default capture point
-is 60 frames, with per-game overrides for slow-starting or
-performance-sensitive titles. Explicit parameters apply the requested values
-to every game:
+Screenshots are written to `docs/images`, while per-game JSON diagnostics and
+unified `summary.json` / `summary.csv` files are written to
+`tmp/hle-reports`. The summaries record content and screenshot SHA-256 hashes,
+the Git revision and dirty state, binary hash, runtime configuration, elapsed
+time, log tail, framebuffer metrics, and unknown HLE calls.
+
+The batch runner grades two levels automatically:
+
+- **L0** passes when the content loads and produces a valid diagnostics report
+  matching the requested capture.
+- **L1** passes when L0 passes, the process completes every requested frame, a
+  screenshot is produced, and the framebuffer contains non-black pixels and
+  more than one RGB565 color.
+
+Failed captures are kept inside the report directory when available. A
+verified screenshot is copied to `docs/images` only after L1 passes, so a
+strict or failed run cannot delete the previous known-good artifact. The
+default capture point is 60 frames, with per-game overrides for slow-starting
+or performance-sensitive titles. Explicit parameters apply the requested
+values to every game:
 
 ```powershell
 pwsh -NoProfile -File scripts/batch-screenshots.ps1 -Frames 60 -TimeoutSeconds 30

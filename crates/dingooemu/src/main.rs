@@ -360,11 +360,25 @@ fn unknown_hle_report(args: &Args, emu: &Emulator) -> serde_json::Value {
         .and_then(|name| name.to_str())
         .unwrap_or(&args.path);
     let unknown_hle: Vec<_> = emu.unknown_hle_calls().collect();
+    let (mode, requested_frames) = if args.screenshot.is_some() {
+        ("screenshot", Some(args.screenshot_frames))
+    } else if args.headless {
+        ("headless", Some(args.frames))
+    } else {
+        ("windowed", None)
+    };
     serde_json::json!({
         "schema_version": 1,
         "content": content,
         "policy": args.unknown_hle_policy.as_str(),
         "allowlist": args.allowed_unknown_hle,
+        "run": {
+            "mode": mode,
+            "requested_frames": requested_frames,
+            "executed_frames": emu.frame_count(),
+            "executed_instructions": emu.cpu.instruction_count,
+        },
+        "framebuffer": emu.video.framebuffer_stats(),
         "unknown_hle": unknown_hle,
     })
 }
@@ -601,6 +615,21 @@ mod tests {
                 "content": "game.app",
                 "policy": "report",
                 "allowlist": [],
+                "run": {
+                    "mode": "windowed",
+                    "requested_frames": null,
+                    "executed_frames": 0,
+                    "executed_instructions": 0,
+                },
+                "framebuffer": {
+                    "width": 320,
+                    "height": 240,
+                    "total_pixels": 76800,
+                    "non_black_pixels": 0,
+                    "unique_colors": 1,
+                    "dominant_color_rgb565": 0,
+                    "dominant_color_pixels": 76800,
+                },
                 "unknown_hle": [],
             })
         );

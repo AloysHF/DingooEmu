@@ -3,12 +3,19 @@
 Compatibility is still experimental. The results below describe the exact
 scenario that has been verified and do not imply complete gameplay support.
 
-The current deduplicated sample set contains 32 games. On August 1, 2026, all
-32 games completed the batch screenshot process using a release build and
-rendered a non-black frame. Sword and Fairy uses a 1200-frame capture override
-because its startup sequence contains several timed splash screens. These
-results cover startup and initial rendering only; input, audio, save data, and
-full gameplay still require separate verification.
+The current deduplicated sample set contains 32 games. On August 1, 2026, a
+release batch produced unified JSON and CSV results with 32/32 L0 passes and
+32/32 L1 passes. L0 means the content loaded and emitted valid diagnostics for
+the requested capture. L1 additionally means every requested frame completed,
+a screenshot was produced, and the RGB565 framebuffer was neither black nor a
+single solid color. Sword and Fairy uses a 1200-frame capture override because
+its startup sequence contains several timed splash screens.
+
+The unified results retain the Git revision and dirty state, binary and content
+hashes, per-game parameters and duration, screenshot hashes, log tails,
+framebuffer metrics, and unknown HLE summaries. These levels cover loading and
+initial rendering only; input, audio, save data, and full gameplay still
+require separate verification.
 
 GooPlayer has an additional content-discovery check: its startup scan finds the
 three companion tracker files in the game directory and opens the playlist
@@ -56,5 +63,5 @@ of this check.
 
 | Symbol | Meaning |
 |--------|---------|
-| ✅ Pass | Renders correctly (not black screen) |
-| ❌ Fail | Black screen or crashes |
+| ✅ Pass | Reaches L1 for the configured capture. |
+| ❌ Fail | Does not reach L1; inspect the recorded L0/L1 reason. |
