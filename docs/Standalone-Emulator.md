@@ -54,6 +54,10 @@ dingooemu [OPTIONS] <PATH>
 | `--repeat-period <N>` | frames, at least `1` | `6` | Frames between repeat presses after the delay. |
 | `--cheat <RULE>` | rule | — | Freeze a memory location or MIPS register once per frame; may be repeated. |
 | `--unknown-instruction-policy <MODE>` | `stop`, `skip` | `skip` | Stop on or log and skip an unimplemented MIPS instruction. |
+| `--unknown-hle-policy <MODE>` | `report`, `stop` | `report` | Aggregate unknown SDK calls and continue with zero, or stop at the first non-allowlisted call. |
+| `--allow-unknown-hle <NAME>` | exact function name | — | Preserve compatibility-stub behavior for one function in strict HLE mode; may be repeated. |
+| `--hle-report <PATH>` | path | — | Write stable JSON diagnostics with run, framebuffer, guest PCM, and aggregated unknown-HLE evidence. |
+| `--input-script <PATH>` | path | — | Replay a versioned per-frame input script and record exact framebuffer checkpoints; requires headless or screenshot mode. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -158,22 +162,19 @@ dingooemu path/to/game.app --screenshot preview.png
 dingooemu path/to/game.app --screenshot preview.png --screenshot-frames 60
 ```
 
-## Batch Screenshot Mode
+## Compatibility Testing
 
-Build the standalone emulator and capture every `.app` file under
-`tmp/dingoo_game` recursively:
+The diagnostic and input options above support strict instruction/HLE checks,
+machine-readable reports, and deterministic input replay. To run the
+repository's complete compatibility suite against locally supplied games:
 
 ```powershell
 pwsh -NoProfile -File scripts/batch-screenshots.ps1
 ```
 
-Screenshots are written to `docs/images`. The default capture point is 300
-frames, with shorter per-game overrides for titles that exceed the default
-timeout. Explicit parameters apply the requested values to every game:
-
-```powershell
-pwsh -NoProfile -File scripts/batch-screenshots.ps1 -Frames 60 -TimeoutSeconds 30
-```
+For level definitions, report artifacts, strict-mode usage, scenario formats,
+authoring workflows, negative validation, and determinism rules, see
+[Compatibility Testing](Compatibility-Testing.md).
 
 ## Examples
 

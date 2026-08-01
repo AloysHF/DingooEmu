@@ -2,13 +2,14 @@ use crate::app_loader::{AppImage, ResourceKind};
 use crate::audio::{Audio, AudioConfig};
 use crate::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::cpu::Cpu;
-use crate::error::Result;
+use crate::error::{Result, SimulatorError};
 use crate::input::Input;
 use crate::memory::Memory;
-use crate::sdk_hle::SdkHle;
 use crate::video::Video;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
+
+mod sdk_hle;
 
 const CPU_CLOCK_HZ: u64 = 336_000_000;
 const FRAMES_PER_SECOND: u64 = 60;
@@ -16,11 +17,34 @@ const OS_TICKS_PER_SECOND: u64 = 100;
 const CYCLES_PER_FRAME: u64 = CPU_CLOCK_HZ / FRAMES_PER_SECOND;
 // Model the pipeline and memory stalls with a conservative average CPI.
 const CPU_CYCLES_PER_INSTRUCTION: u64 = 2;
+const STANDARD_APP_LOAD_BASE: u32 = 0x80A0_0000;
 const MAX_AUDIO_WRITE_BYTES: u32 = 4 * 1024 * 1024;
 const TASK_QUANTUM_CYCLES: u64 = 4_096;
 const TASK_RETURN_ADDRESS: u32 = u32::MAX;
 const MAX_GUEST_TASKS: usize = 16;
 const HOOK_FILTER_WORDS: usize = 1_024;
+const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
+const FILE_SEARCH_NAME_CAPACITY: usize = 256;
+
+/// Behavior when the guest calls an SDK function without an HLE implementation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnknownHlePolicy {
+    /// Record the call and return zero to preserve compatibility.
+    #[default]
+    Report,
+    /// Record the call and stop unless the function name is allowlisted.
+    Stop,
+}
+
+/// Aggregated diagnostics for one unknown SDK HLE function.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct UnknownHleCall {
+    pub name: String,
+    pub count: u64,
+    pub import_address: u32,
+    pub first_pc: u32,
+    pub first_arguments: [u32; 4],
+}
 
 fn hook_filter_location(address: u32) -> (usize, u64) {
     let bit_index = (address as usize >> 2) & (HOOK_FILTER_WORDS * u64::BITS as usize - 1);
@@ -38,6 +62,37 @@ struct OpenFile {
     save_path: Option<PathBuf>,
     writable: bool,
     dirty: bool,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct FileSearch {
+    entries: Vec<String>,
+    next_index: usize,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct GuiState {
+    key_messages_enabled: bool,
+    windows: BTreeMap<u32, u32>,
+    focused_window: Option<u32>,
+    next_window_handle: u32,
+    reported_key: u32,
+    message_buffer: Option<u32>,
+    key_info_buffer: Option<u32>,
+}
+
+impl Default for GuiState {
+    fn default() -> Self {
+        Self {
+            key_messages_enabled: false,
+            windows: BTreeMap::new(),
+            focused_window: None,
+            next_window_handle: 1,
+            reported_key: 0,
+            message_buffer: None,
+            key_info_buffer: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -71,6 +126,8 @@ struct EmulatorStateRef<'a> {
     next_semaphore_handle: u32,
     open_files: HashMap<u32, OpenFile>,
     next_file_handle: u32,
+    file_searches: &'a HashMap<u32, FileSearch>,
+    gui: &'a GuiState,
     app_main_args_initialized: bool,
     locale_ansi_buffer: Option<u32>,
     framebuffer_submitted: bool,
@@ -93,6 +150,8 @@ struct EmulatorState {
     next_semaphore_handle: u32,
     open_files: HashMap<u32, OpenFile>,
     next_file_handle: u32,
+    file_searches: HashMap<u32, FileSearch>,
+    gui: GuiState,
     app_main_args_initialized: bool,
     locale_ansi_buffer: Option<u32>,
     framebuffer_submitted: bool,
@@ -142,8 +201,6 @@ pub struct Emulator {
     pub input: Input,
     /// PCM audio subsystem
     pub audio: Audio,
-    /// SDK HLE bridge
-    pub sdk: SdkHle,
     /// Frontend-managed memory and register freeze rules
     cheats: CheatManager,
     /// Frame count
@@ -169,6 +226,12 @@ pub struct Emulator {
     import_addrs: HashMap<u32, String>,
     /// Hooked addresses (for SDK function interception)
     hooked_addrs: HashMap<u32, String>,
+    /// Behavior for SDK imports without an HLE implementation
+    unknown_hle_policy: UnknownHlePolicy,
+    /// Function names allowed to retain compatibility-stub behavior in strict mode
+    unknown_hle_allowlist: BTreeSet<String>,
+    /// Unknown SDK calls aggregated by function name for diagnostics
+    unknown_hle_calls: BTreeMap<String, UnknownHleCall>,
     /// Fast rejection filter for non-hook instruction addresses
     hook_filter: Box<[u64]>,
     /// Open guest resource files
@@ -177,6 +240,10 @@ pub struct Emulator {
     save_directory: Option<PathBuf>,
     /// Next guest file handle
     next_file_handle: u32,
+    /// Active file searches keyed by the guest find-data address
+    file_searches: HashMap<u32, FileSearch>,
+    /// Minimal window-manager state used to deliver guest key messages
+    gui: GuiState,
     /// AppMain export address
     app_main_entry: Option<u32>,
     /// AppMain startup check hook address
@@ -238,7 +305,9 @@ impl Emulator {
             cpu.regs.write(31, app_main_entry);
             cpu.regs.write(25, app.entry_point());
         }
-        cpu.regs.write(5, 0);
+        // Older app layouts require the loader to request LCD initialization.
+        cpu.regs
+            .write(5, u32::from(load_base != STANDARD_APP_LOAD_BASE));
 
         // Initialize stack pointer to a reasonable value in RAM
         // Stack grows downward from top of RAM (32MB)
@@ -250,8 +319,6 @@ impl Emulator {
 
         let input = Input::new();
         let audio = Audio::new();
-        let sdk = SdkHle::new();
-
         // Build import address map for SDK hooking
         // The game uses physical addressing, not KSEG0
         // So we need to hook physical addresses
@@ -295,7 +362,6 @@ impl Emulator {
             video,
             input,
             audio,
-            sdk,
             cheats: CheatManager::default(),
             frame_count: 0,
             cycle_count: 0,
@@ -308,10 +374,15 @@ impl Emulator {
             app: Some(app),
             import_addrs,
             hooked_addrs,
+            unknown_hle_policy: UnknownHlePolicy::default(),
+            unknown_hle_allowlist: BTreeSet::new(),
+            unknown_hle_calls: BTreeMap::new(),
             hook_filter,
             open_files: HashMap::new(),
             save_directory,
             next_file_handle: 1,
+            file_searches: HashMap::new(),
+            gui: GuiState::default(),
             app_main_entry,
             app_main_init_check_address: app_main_entry.map(|addr| addr.wrapping_add(0x34)),
             app_main_args_initialized: false,
@@ -357,6 +428,79 @@ impl Emulator {
         log::info!("Emulator started");
     }
 
+    /// Configure how unknown SDK HLE calls affect execution.
+    pub fn set_unknown_hle_policy(&mut self, policy: UnknownHlePolicy) {
+        self.unknown_hle_policy = policy;
+    }
+
+    /// Replace the exact function-name allowlist used by strict HLE mode.
+    pub fn set_unknown_hle_allowlist<I, S>(&mut self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.unknown_hle_allowlist = names.into_iter().map(Into::into).collect();
+    }
+
+    /// Return unknown HLE diagnostics in stable function-name order.
+    pub fn unknown_hle_calls(&self) -> impl ExactSizeIterator<Item = &UnknownHleCall> {
+        self.unknown_hle_calls.values()
+    }
+
+    /// Clear all unknown HLE observations collected during this run.
+    pub fn clear_unknown_hle_calls(&mut self) {
+        self.unknown_hle_calls.clear();
+    }
+
+    fn record_unknown_hle(
+        &mut self,
+        name: &str,
+        import_address: u32,
+        return_address: u32,
+    ) -> Result<()> {
+        let first_pc = return_address.wrapping_sub(8);
+        let first_arguments = [
+            self.cpu.regs.read(4),
+            self.cpu.regs.read(5),
+            self.cpu.regs.read(6),
+            self.cpu.regs.read(7),
+        ];
+        let is_first = if let Some(call) = self.unknown_hle_calls.get_mut(name) {
+            call.count = call.count.saturating_add(1);
+            false
+        } else {
+            self.unknown_hle_calls.insert(
+                name.to_string(),
+                UnknownHleCall {
+                    name: name.to_string(),
+                    count: 1,
+                    import_address,
+                    first_pc,
+                    first_arguments,
+                },
+            );
+            true
+        };
+
+        if is_first {
+            log::warn!(
+                "Unknown SDK HLE {name} first called at {first_pc:#010x} (import {import_address:#010x}); calls are aggregated"
+            );
+        }
+
+        if self.unknown_hle_policy == UnknownHlePolicy::Stop
+            && !self.unknown_hle_allowlist.contains(name)
+        {
+            return Err(SimulatorError::UnknownHle {
+                name: name.to_string(),
+                pc: first_pc,
+                import_address,
+                arguments: first_arguments,
+            });
+        }
+        Ok(())
+    }
+
     /// Stop the emulator
     pub fn stop(&mut self) {
         self.flush_save_files();
@@ -375,6 +519,8 @@ impl Emulator {
         let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
         replacement.save_directory = self.save_directory.clone();
         replacement.cheats = self.cheats.clone();
+        replacement.unknown_hle_policy = self.unknown_hle_policy;
+        replacement.unknown_hle_allowlist = self.unknown_hle_allowlist.clone();
         self.memory.copy_state_from(&replacement.memory);
         std::mem::swap(&mut replacement.memory, &mut self.memory);
         if was_running {
@@ -429,6 +575,8 @@ impl Emulator {
             next_semaphore_handle: self.next_semaphore_handle,
             open_files,
             next_file_handle: self.next_file_handle,
+            file_searches: &self.file_searches,
+            gui: &self.gui,
             app_main_args_initialized: self.app_main_args_initialized,
             locale_ansi_buffer: self.locale_ansi_buffer,
             framebuffer_submitted: self.framebuffer_submitted,
@@ -469,15 +617,24 @@ impl Emulator {
         }
 
         let was_running = state.cpu.is_running();
+        #[cfg(feature = "standalone")]
+        let host_audio_output_enabled = self.audio.host_output_enabled();
         let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
         replacement.save_directory = self.save_directory.clone();
         replacement.cheats = self.cheats.clone();
+        replacement.unknown_hle_policy = self.unknown_hle_policy;
+        replacement.unknown_hle_allowlist = self.unknown_hle_allowlist.clone();
+        replacement.unknown_hle_calls = self.unknown_hle_calls.clone();
         replacement.cpu = state.cpu;
         self.memory.copy_state_from(&state.memory);
         std::mem::swap(&mut replacement.memory, &mut self.memory);
         replacement.video = state.video;
         replacement.input = state.input;
         replacement.audio = state.audio;
+        #[cfg(feature = "standalone")]
+        replacement
+            .audio
+            .set_host_output_enabled(host_audio_output_enabled);
         replacement.audio.resume_after_state_load();
         replacement.frame_count = state.frame_count;
         replacement.cycle_count = state.cycle_count;
@@ -489,6 +646,8 @@ impl Emulator {
         replacement.next_semaphore_handle = state.next_semaphore_handle;
         replacement.open_files = state.open_files;
         replacement.next_file_handle = state.next_file_handle;
+        replacement.file_searches = state.file_searches;
+        replacement.gui = state.gui;
         replacement.app_main_args_initialized = state.app_main_args_initialized;
         replacement.locale_ansi_buffer = state.locale_ansi_buffer;
         replacement.framebuffer_submitted = state.framebuffer_submitted;
@@ -545,6 +704,7 @@ impl Emulator {
         }
 
         self.video.advance_frame();
+        self.audio.advance_frame();
         self.frame_count += 1;
 
         Ok(())
@@ -591,7 +751,7 @@ impl Emulator {
                 .cloned();
             if let Some(func_name) = func_name {
                 log::trace!("SDK hook: PC={:#010x} = {}", pc, func_name);
-                self.handle_sdk_call(pc, &func_name)?;
+                sdk_hle::dispatch(self, pc, &func_name)?;
                 self.cycle_count = self.cycle_count.wrapping_add(CPU_CYCLES_PER_INSTRUCTION);
                 executed += CPU_CYCLES_PER_INSTRUCTION;
                 if self.framebuffer_submitted
@@ -1066,6 +1226,109 @@ impl Emulator {
         Path::new(&app_directory).join(path)
     }
 
+    fn begin_file_search(&mut self, pattern: &str, attributes: u32, data_ptr: u32) -> Result<u32> {
+        self.file_searches.remove(&data_ptr);
+        if data_ptr == 0 {
+            return Ok(u32::MAX);
+        }
+
+        let Some(entries) = self.collect_file_search_entries(pattern, attributes) else {
+            return Ok(u32::MAX);
+        };
+        let Some(first) = entries.first().cloned() else {
+            return Ok(u32::MAX);
+        };
+
+        self.write_file_search_name(data_ptr, &first)?;
+        self.file_searches.insert(
+            data_ptr,
+            FileSearch {
+                entries,
+                next_index: 1,
+            },
+        );
+        Ok(0)
+    }
+
+    fn next_file_search(&mut self, data_ptr: u32) -> Result<u32> {
+        let Some(name) = self.file_searches.get_mut(&data_ptr).and_then(|search| {
+            let name = search.entries.get(search.next_index)?.clone();
+            search.next_index += 1;
+            Some(name)
+        }) else {
+            return Ok(u32::MAX);
+        };
+
+        self.write_file_search_name(data_ptr, &name)?;
+        Ok(0)
+    }
+
+    fn close_file_search(&mut self, data_ptr: u32) -> u32 {
+        self.file_searches.remove(&data_ptr);
+        0
+    }
+
+    fn collect_file_search_entries(&self, pattern: &str, attributes: u32) -> Option<Vec<String>> {
+        let normalized = normalize_guest_search_pattern(pattern)?;
+        let (directory, file_pattern) = normalized
+            .rsplit_once('/')
+            .map_or(("", normalized.as_str()), |(directory, pattern)| {
+                (directory, pattern)
+            });
+        let file_pattern = if file_pattern.is_empty() {
+            "*"
+        } else {
+            file_pattern
+        };
+
+        let app_directory = Path::new(&self.app_path).parent().unwrap_or(Path::new("."));
+        let search_directory = if directory.is_empty() {
+            app_directory.to_path_buf()
+        } else {
+            app_directory.join(directory.replace('/', std::path::MAIN_SEPARATOR_STR))
+        };
+        let root = app_directory.canonicalize().ok()?;
+        let search_directory = search_directory.canonicalize().ok()?;
+        if !search_directory.starts_with(&root) {
+            return None;
+        }
+
+        let find_directories = attributes & 0x10 != 0;
+        let mut entries = std::fs::read_dir(search_directory)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let file_type = entry.file_type().ok()?;
+                if (find_directories && !file_type.is_dir())
+                    || (!find_directories && !file_type.is_file())
+                {
+                    return None;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                wildcard_matches(file_pattern, &name).then_some(name)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.to_ascii_lowercase()
+                .cmp(&right.to_ascii_lowercase())
+                .then_with(|| left.cmp(right))
+        });
+        Some(entries)
+    }
+
+    fn write_file_search_name(&mut self, data_ptr: u32, name: &str) -> Result<()> {
+        let name = name.as_bytes();
+        let length = name.len().min(FILE_SEARCH_NAME_CAPACITY - 1);
+        let destination = data_ptr.wrapping_add(FILE_SEARCH_NAME_OFFSET);
+        for (offset, byte) in name.iter().copied().take(length).enumerate() {
+            self.memory
+                .write_u8(destination.wrapping_add(offset as u32), byte)?;
+        }
+        self.memory
+            .write_u8(destination.wrapping_add(length as u32), 0)?;
+        Ok(())
+    }
+
     fn open_memory_file(
         &mut self,
         data: Vec<u8>,
@@ -1206,9 +1469,6 @@ impl Emulator {
         let Some(file) = self.open_files.get_mut(&handle) else {
             return Ok(0);
         };
-        if !file.writable {
-            return Ok(0);
-        }
         let requested = (size as usize).saturating_mul(count as usize);
         if requested == 0 {
             return Ok(0);
@@ -1243,6 +1503,9 @@ impl Emulator {
         let Some(file) = self.open_files.get_mut(&handle) else {
             return Ok(0);
         };
+        if !file.writable {
+            return Ok(0);
+        }
         let end = file.position.saturating_add(requested);
         if file.data.len() < end {
             file.data.resize(end, 0);
@@ -1320,461 +1583,6 @@ impl Emulator {
         }
         file.position = (next as usize).min(file.data.len());
         0
-    }
-    /// Handle SDK function call at import address
-    fn handle_sdk_call(&mut self, addr: u32, func_name: &str) -> Result<()> {
-        log::trace!("SDK call: {:#010x} = {}", addr, func_name);
-
-        // Save return address from $ra
-        let ra = self.cpu.regs.read(31);
-
-        match func_name {
-            // Memory management
-            "malloc" => {
-                let size = self.cpu.regs.read(4); // $a0
-                let ptr = self.memory.malloc(size);
-                self.cpu.regs.write(2, ptr); // $v0
-                log::info!(
-                    "  malloc({}) = {:#010x} (heap_ptr={:#010x})",
-                    size,
-                    ptr,
-                    self.memory.heap_ptr()
-                );
-            }
-            "free" => {
-                let ptr = self.cpu.regs.read(4); // $a0
-                self.memory.free(ptr);
-                log::trace!("  free({:#010x})", ptr);
-            }
-            "realloc" => {
-                let ptr = self.cpu.regs.read(4); // $a0
-                let size = self.cpu.regs.read(5); // $a1
-                let new_ptr = self.memory.realloc(ptr, size);
-                self.cpu.regs.write(2, new_ptr); // $v0
-                log::trace!("  realloc({:#010x}, {}) = {:#010x}", ptr, size, new_ptr);
-            }
-            "memset" => {
-                let ptr = self.cpu.regs.read(4); // $a0
-                let value = self.cpu.regs.read(5) as u8; // $a1
-                let size = self.cpu.regs.read(6); // $a2
-                self.memory.memset(ptr, value, size);
-                self.cpu.regs.write(2, ptr); // $v0
-                log::trace!("  memset({:#010x}, {:#04x}, {})", ptr, value, size);
-            }
-            "memcpy" => {
-                let dest = self.cpu.regs.read(4); // $a0
-                let src = self.cpu.regs.read(5); // $a1
-                let size = self.cpu.regs.read(6); // $a2
-                self.memory.memcpy(dest, src, size)?;
-                self.cpu.regs.write(2, dest); // $v0
-                log::trace!("  memcpy({:#010x}, {:#010x}, {})", dest, src, size);
-            }
-            "strlen" => {
-                let ptr = self.cpu.regs.read(4); // $a0
-                let len = self.memory.read_string_len(ptr);
-                self.cpu.regs.write(2, len); // $v0
-                log::trace!("  strlen({:#010x}) = {}", ptr, len);
-            }
-            "__to_locale_ansi" => {
-                let ptr = self.cpu.regs.read(4);
-                let result = self.convert_guest_w_string_to_ansi(ptr);
-                self.cpu.regs.write(2, result);
-                log::trace!("  __to_locale_ansi({:#010x}) = {:#010x}", ptr, result);
-            }
-            "cmGetSysModel" => {
-                let ptr = self.cpu.regs.read(4);
-                for (index, word) in "A320\0".encode_utf16().enumerate() {
-                    self.memory
-                        .write_u16(ptr.wrapping_add((index * 2) as u32), word)?;
-                }
-                self.cpu.regs.write(2, 0);
-                log::trace!("  cmGetSysModel({:#010x}) = 0", ptr);
-            }
-            "U8TOU32" => {
-                let ptr = self.cpu.regs.read(4);
-                let value = self.memory.read_u32(ptr)?;
-                self.cpu.regs.write(2, value);
-                log::trace!("  U8TOU32({:#010x}) = {:#010x}", ptr, value);
-            }
-
-            // Graphics/LCD
-            "_lcd_get_frame" | "lcd_get_frame" | "lcd_get_cframe" => {
-                // Return fixed guest-visible framebuffer address
-                // The game writes directly to this address
-                let phys_addr = crate::video::VM_LCD_FB_ADDRESS;
-                self.cpu.regs.write(2, phys_addr); // $v0
-                log::trace!("  lcd_get_frame() = {:#010x}", phys_addr);
-            }
-            "_lcd_set_frame" | "lcd_set_frame" | "ap_lcd_set_frame" => {
-                self.sync_framebuffer();
-                log::trace!("  lcd_set_frame() - framebuffer updated");
-            }
-            "lcd_flip" => {
-                self.sync_framebuffer();
-                log::trace!("  lcd_flip() - framebuffer updated");
-            }
-            "LcdGetDisMode" => {
-                self.cpu.regs.write(2, 0); // $v0 = 0
-                log::trace!("  LcdGetDisMode() = 0");
-            }
-            "LCD_GetXSize" => {
-                self.cpu.regs.write(2, crate::video::SCREEN_WIDTH);
-                log::trace!("  LCD_GetXSize() = {}", crate::video::SCREEN_WIDTH);
-            }
-            "LCD_GetYSize" => {
-                self.cpu.regs.write(2, crate::video::SCREEN_HEIGHT);
-                log::trace!("  LCD_GetYSize() = {}", crate::video::SCREEN_HEIGHT);
-            }
-
-            // Input
-            "_kbd_get_status" | "kbd_get_status" => {
-                let status_ptr = self.cpu.regs.read(4); // $a0
-                let (pressed, released, status) = self.input.take_status();
-                self.memory.write_u32(status_ptr, pressed)?;
-                self.memory
-                    .write_u32(status_ptr.wrapping_add(4), released)?;
-                self.memory.write_u32(status_ptr.wrapping_add(8), status)?;
-                log::trace!(
-                    "  kbd_get_status({:#010x}) pressed={:#010x} released={:#010x} status={:#010x}",
-                    status_ptr,
-                    pressed,
-                    released,
-                    status
-                );
-            }
-            "_kbd_get_key" | "kbd_get_key" => {
-                // Convert bitmask to key code
-                let buttons = self.input.buttons();
-                let key = if buttons & crate::input::BUTTON_UP != 0 {
-                    20
-                } else if buttons & crate::input::BUTTON_DOWN != 0 {
-                    27
-                } else if buttons & crate::input::BUTTON_LEFT != 0 {
-                    28
-                } else if buttons & crate::input::BUTTON_RIGHT != 0 {
-                    18
-                } else if buttons & crate::input::BUTTON_A != 0 {
-                    31
-                } else if buttons & crate::input::BUTTON_B != 0 {
-                    21
-                } else if buttons & crate::input::BUTTON_X != 0 {
-                    16
-                } else if buttons & crate::input::BUTTON_Y != 0 {
-                    6
-                } else if buttons & crate::input::BUTTON_START != 0 {
-                    11
-                } else if buttons & crate::input::BUTTON_SELECT != 0 {
-                    10
-                } else if buttons & crate::input::BUTTON_L != 0 {
-                    8
-                } else if buttons & crate::input::BUTTON_R != 0 {
-                    29
-                } else {
-                    0
-                };
-                self.cpu.regs.write(2, key); // $v0
-                log::trace!("  kbd_get_key() = {}", key);
-            }
-
-            // Tasks and synchronization
-            "OSTaskCreate" => {
-                let entry = self.cpu.regs.read(4);
-                let data_ptr = self.cpu.regs.read(5);
-                let stack_ptr = self.cpu.regs.read(6);
-                let priority = self.cpu.regs.read(7);
-                let created = self.create_guest_task(entry, data_ptr, stack_ptr, priority);
-                self.cpu.regs.write(2, if created { 0 } else { u32::MAX });
-                log::trace!(
-                    "  OSTaskCreate({entry:#010x}, {data_ptr:#010x}, {stack_ptr:#010x}, {priority}) = {}",
-                    self.cpu.regs.read(2)
-                );
-            }
-            "OSSemCreate" => {
-                let count = self.cpu.regs.read(4);
-                let handle = self.create_semaphore(count);
-                self.cpu.regs.write(2, handle);
-                log::trace!("  OSSemCreate({count}) = {handle}");
-            }
-            "OSSemPend" => {
-                let handle = self.cpu.regs.read(4);
-                let error_ptr = self.cpu.regs.read(6);
-                let pending = self.pend_semaphore(handle);
-                if error_ptr != 0 {
-                    self.memory
-                        .write_u8(error_ptr, if pending { 0 } else { 1 })?;
-                }
-                log::trace!("  OSSemPend({handle}) = {pending}");
-            }
-            "OSSemPost" => {
-                let handle = self.cpu.regs.read(4);
-                let posted = self.post_semaphore(handle);
-                self.cpu.regs.write(2, if posted { 0 } else { 1 });
-                log::trace!("  OSSemPost({handle}) = {}", self.cpu.regs.read(2));
-            }
-            "OSSemDel" => {
-                let handle = self.cpu.regs.read(4);
-                let error_ptr = self.cpu.regs.read(6);
-                let removed = self.semaphores.remove(&handle).is_some();
-                if error_ptr != 0 {
-                    self.memory
-                        .write_u8(error_ptr, if removed { 0 } else { 1 })?;
-                }
-                self.cpu.regs.write(2, 0);
-                log::trace!("  OSSemDel({handle}) = {removed}");
-            }
-
-            // Audio
-            "_waveout_open" | "waveout_open" => {
-                let args_ptr = self.cpu.regs.read(4);
-                let config = AudioConfig::new(
-                    self.memory.read_u32(args_ptr)?,
-                    self.memory.read_u16(args_ptr.wrapping_add(4))?,
-                    self.memory.read_u8(args_ptr.wrapping_add(6))?,
-                    self.memory.read_u8(args_ptr.wrapping_add(7))?,
-                );
-                let opened = config.is_some_and(|config| self.audio.open(config));
-                self.cpu.regs.write(2, u32::from(opened));
-                log::trace!("  waveout_open({args_ptr:#010x}) = {opened}");
-            }
-            "waveout_write" => {
-                let buffer_ptr = self.cpu.regs.read(5);
-                let count = self.cpu.regs.read(6);
-                let written = if count == 0 || count > MAX_AUDIO_WRITE_BYTES {
-                    false
-                } else if !self.audio.can_write() {
-                    self.set_active_wait(TaskWait::AudioWrite);
-                    log::trace!(
-                        "  waveout_write({buffer_ptr:#010x}, {count}) deferred until queue space is available"
-                    );
-                    return Ok(());
-                } else {
-                    let mut data = Vec::with_capacity(count as usize);
-                    for offset in 0..count {
-                        data.push(self.memory.read_u8(buffer_ptr.wrapping_add(offset))?);
-                    }
-                    self.audio.write(&data)
-                };
-                self.cpu.regs.write(2, u32::from(written));
-                log::trace!(
-                    "  waveout_write({buffer_ptr:#010x}, {count}) = {}",
-                    u32::from(written)
-                );
-            }
-            "waveout_can_write" | "pcm_can_write" => {
-                let can_write = self.audio.can_write();
-                self.cpu.regs.write(2, u32::from(can_write));
-                log::trace!("  {func_name}() = {}", u32::from(can_write));
-            }
-            "waveout_close" | "waveout_close_at_once" => {
-                let closed = self.audio.close();
-                self.cpu.regs.write(2, u32::from(closed));
-                log::trace!("  {func_name}() = {}", u32::from(closed));
-            }
-            "_waveout_set_volume" | "waveout_set_volume" => {
-                let volume = self.cpu.regs.read(4);
-                let updated = self.audio.set_volume(volume);
-                self.cpu.regs.write(2, u32::from(updated));
-                log::trace!("  {func_name}({volume}) = {}", u32::from(updated));
-            }
-            "HP_Mute_sw" => {
-                let muted = self.cpu.regs.read(4) != 0;
-                let updated = self.audio.set_muted(muted);
-                self.cpu.regs.write(2, u32::from(updated));
-                log::trace!("  HP_Mute_sw({muted}) = {}", u32::from(updated));
-            }
-            "pcm_ioctl" => {
-                self.cpu.regs.write(2, 0);
-                log::trace!("  pcm_ioctl() = 0");
-            }
-
-            // Timer
-            "OSTimeGet" => {
-                let ticks = self
-                    .cycle_count
-                    .saturating_mul(OS_TICKS_PER_SECOND)
-                    .checked_div(CPU_CLOCK_HZ)
-                    .unwrap_or(0) as u32;
-                self.cpu.regs.write(2, ticks); // $v0
-                log::trace!("  OSTimeGet() = {}", ticks);
-            }
-            "GetTickCount" => {
-                let micros = self
-                    .cycle_count
-                    .saturating_mul(1_000_000)
-                    .checked_div(CPU_CLOCK_HZ)
-                    .unwrap_or(0);
-                self.cpu.regs.write(2, micros as u32); // $v0
-                log::trace!("  GetTickCount() = {}", micros as u32);
-            }
-            "delay_ms" | "mdelay" => {
-                let ms = self.cpu.regs.read(4); // $a0
-                let delay_cycles = (ms as u64).saturating_mul(CPU_CLOCK_HZ) / 1_000;
-                self.delay_active_until(self.cycle_count.saturating_add(delay_cycles));
-                log::trace!("  delay_ms({})", ms);
-            }
-            "StartSwTimer" => {
-                self.cpu.regs.write(2, 0); // $v0 = 0
-                log::trace!("  StartSwTimer() = 0");
-            }
-            "OSTimeDly" => {
-                let ticks = self.cpu.regs.read(4); // $a0
-                let delay_cycles =
-                    (ticks as u64).saturating_mul(CPU_CLOCK_HZ) / OS_TICKS_PER_SECOND;
-                self.delay_active_until(self.cycle_count.saturating_add(delay_cycles));
-                log::trace!("  OSTimeDly({})", ticks);
-            }
-            "udelay" => {
-                let us = self.cpu.regs.read(4); // $a0
-                let delay_cycles = (us as u64).saturating_mul(CPU_CLOCK_HZ) / 1_000_000;
-                self.delay_active_until(self.cycle_count.saturating_add(delay_cycles));
-                log::trace!("  udelay({})", us);
-            }
-            "_sys_judge_event" | "sys_judge_event" => {
-                let pending = u32::from(self.input.take_pending_event());
-                self.cpu.regs.write(2, pending);
-                log::trace!("  sys_judge_event() = {}", pending);
-            }
-
-            // Resource manager
-            "get_dl_handle" => {
-                self.cpu.regs.write(2, u32::from(self.app.is_some()));
-            }
-            "dl_res_open" => {
-                let name = self.resource_name_from_args(&[
-                    self.cpu.regs.read(6),
-                    self.cpu.regs.read(5),
-                    self.cpu.regs.read(4),
-                ]);
-                let handle = name
-                    .as_deref()
-                    .map(|name| self.open_resource_file(name))
-                    .unwrap_or(0);
-                self.cpu.regs.write(2, handle);
-            }
-            "dl_res_get_size" => {
-                let handle = self.cpu.regs.read(4);
-                let size = self
-                    .open_files
-                    .get(&handle)
-                    .map(|file| file.data.len() as u32)
-                    .unwrap_or(0);
-                self.cpu.regs.write(2, size);
-            }
-            "dl_res_get_data" => {
-                let handle = self.cpu.regs.read(4);
-                let buffer = self.cpu.regs.read(5);
-                let buffer_len = self.cpu.regs.read(6);
-                let read_len = self.cpu.regs.read(7);
-                let ret = self.read_resource_data(handle, buffer, buffer_len, read_len)?;
-                self.cpu.regs.write(2, ret);
-            }
-            "dl_res_close" => {
-                let handle = self.cpu.regs.read(4);
-                self.open_files.remove(&handle);
-                self.cpu.regs.write(2, 0);
-            }
-            // Resource-backed File I/O
-            "fopen" | "fsys_fopen" => {
-                let name = self.read_guest_c_string(self.cpu.regs.read(4));
-                let mode = self.read_guest_c_string(self.cpu.regs.read(5));
-                let handle = self.open_guest_file(&name, &mode);
-                self.cpu.regs.write(2, handle);
-                log::trace!("  {}({}, {}) = {}", func_name, name, mode, handle);
-            }
-            "fsys_fopenW" => {
-                let name = self.read_guest_w_string(self.cpu.regs.read(4));
-                let mode = self.read_guest_w_string(self.cpu.regs.read(5));
-                log::trace!("  fsys_fopenW({}, {})", name, mode);
-                let handle = self.open_guest_file(&name, &mode);
-                self.cpu.regs.write(2, handle);
-            }
-            "fclose" | "fsys_fclose" | "fsys_fcloseW" => {
-                let handle = self.cpu.regs.read(4);
-                let result = self.flush_save_file(handle);
-                self.open_files.remove(&handle);
-                self.cpu
-                    .regs
-                    .write(2, if result.is_ok() { 0 } else { u32::MAX });
-            }
-            "fread" | "fsys_fread" => {
-                let dest = self.cpu.regs.read(4);
-                let size = self.cpu.regs.read(5);
-                let count = self.cpu.regs.read(6);
-                let handle = self.cpu.regs.read(7);
-                let read = self.read_file(dest, size, count, handle)?;
-                self.cpu.regs.write(2, read);
-            }
-            "fseek" | "fsys_fseek" => {
-                let handle = self.cpu.regs.read(4);
-                let offset = self.cpu.regs.read(5) as i32;
-                let origin = self.cpu.regs.read(6);
-                let ret = self.seek_file(handle, offset, origin);
-                self.cpu.regs.write(2, ret);
-            }
-            "ftell" | "fsys_ftell" => {
-                let handle = self.cpu.regs.read(4);
-                let pos = self
-                    .open_files
-                    .get(&handle)
-                    .map(|file| file.position as u32)
-                    .unwrap_or(u32::MAX);
-                self.cpu.regs.write(2, pos);
-            }
-            "feof" | "fsys_feof" => {
-                let handle = self.cpu.regs.read(4);
-                let eof = self
-                    .open_files
-                    .get(&handle)
-                    .map(|file| u32::from(file.position >= file.data.len()))
-                    .unwrap_or(1);
-                self.cpu.regs.write(2, eof);
-            }
-            "fwrite" | "fsys_fwrite" => {
-                let src = self.cpu.regs.read(4);
-                let size = self.cpu.regs.read(5);
-                let count = self.cpu.regs.read(6);
-                let handle = self.cpu.regs.read(7);
-                let written = self.write_file(src, size, count, handle)?;
-                self.cpu.regs.write(2, written);
-                log::trace!("  {}() = {}", func_name, written);
-            }
-            // System (stubs)
-            "vxGoHome" | "abort" | "TaskMediaFunStop" => {
-                self.cpu.stop();
-                log::trace!("  {} -> stopping", func_name);
-            }
-            "sprintf" => {
-                let destination = self.cpu.regs.read(4);
-                let format = self.read_guest_c_string(self.cpu.regs.read(5));
-                let rendered = self.format_guest_printf(&format)?;
-                let mut bytes = rendered.as_bytes().to_vec();
-                bytes.push(0);
-                self.memory.load_data(destination, &bytes)?;
-                self.cpu.regs.write(2, rendered.len() as u32);
-                log::trace!("  sprintf({}) = {}", format, rendered.len());
-            }
-            "printf" | "fprintf" => {
-                self.cpu.regs.write(2, 0);
-                log::trace!("  {}() = 0 (stub)", func_name);
-            }
-
-            // Cache ops (no-op)
-            "__icache_invalidate_all" | "__dcache_writeback_all" => {
-                log::trace!("  {} (no-op)", func_name);
-            }
-
-            // Other stubs
-            _ => {
-                self.cpu.regs.write(2, 0); // Return 0 for unknown functions
-                log::trace!("  {}() = 0 (unimplemented stub)", func_name);
-            }
-        }
-
-        // Return to caller: jump to $ra
-        self.cpu.regs.pc = ra;
-        self.cpu.regs.gpr[0] = 0; // R0 is always zero
-
-        Ok(())
     }
 
     /// Sync framebuffer from guest memory to video subsystem
@@ -1867,6 +1675,64 @@ fn safe_relative_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
+fn normalize_guest_search_pattern(pattern: &str) -> Option<String> {
+    let mut normalized = pattern.replace('\\', "/");
+    if normalized.as_bytes().get(1) == Some(&b':')
+        && normalized
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+    {
+        normalized.drain(..2);
+    }
+    let normalized = normalized.trim_start_matches('/');
+    let path = Path::new(normalized);
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return None;
+    }
+    Some(normalized.to_string())
+}
+
+fn wildcard_matches(pattern: &str, name: &str) -> bool {
+    let pattern = if pattern.eq_ignore_ascii_case("*.*") {
+        "*"
+    } else {
+        pattern
+    };
+    let pattern = pattern.as_bytes();
+    let name = name.as_bytes();
+    let (mut pattern_index, mut name_index) = (0, 0);
+    let (mut star_index, mut retry_name_index) = (None, 0);
+
+    while name_index < name.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?'
+                || pattern[pattern_index].eq_ignore_ascii_case(&name[name_index]))
+        {
+            pattern_index += 1;
+            name_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            retry_name_index = name_index;
+        } else if let Some(star) = star_index {
+            retry_name_index += 1;
+            name_index = retry_name_index;
+            pattern_index = star + 1;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
+}
+
 impl Default for Emulator {
     fn default() -> Self {
         Self {
@@ -1875,7 +1741,6 @@ impl Default for Emulator {
             video: Video::new(),
             input: Input::new(),
             audio: Audio::new(),
-            sdk: SdkHle::new(),
             cheats: CheatManager::default(),
             frame_count: 0,
             cycle_count: 0,
@@ -1888,10 +1753,15 @@ impl Default for Emulator {
             app: None,
             import_addrs: HashMap::new(),
             hooked_addrs: HashMap::new(),
+            unknown_hle_policy: UnknownHlePolicy::default(),
+            unknown_hle_allowlist: BTreeSet::new(),
+            unknown_hle_calls: BTreeMap::new(),
             hook_filter: vec![0; HOOK_FILTER_WORDS].into_boxed_slice(),
             open_files: HashMap::new(),
             save_directory: None,
             next_file_handle: 1,
+            file_searches: HashMap::new(),
+            gui: GuiState::default(),
             app_main_entry: None,
             app_main_init_check_address: None,
             app_main_args_initialized: false,
@@ -1920,11 +1790,107 @@ mod tests {
         AppImage::parse(&data).unwrap()
     }
 
+    fn try_invoke_sdk_import(emu: &mut Emulator, address: u32, function_name: &str) -> Result<u64> {
+        emu.hooked_addrs.insert(address, function_name.to_string());
+        let (word, mask) = hook_filter_location(address);
+        emu.hook_filter[word] |= mask;
+        emu.cpu.regs.pc = address;
+        emu.cpu.start();
+
+        emu.run_active_cpu_slice(CPU_CYCLES_PER_INSTRUCTION)
+    }
+
+    fn invoke_sdk_import(emu: &mut Emulator, address: u32, function_name: &str) {
+        assert_eq!(
+            try_invoke_sdk_import(emu, address, function_name).unwrap(),
+            CPU_CYCLES_PER_INSTRUCTION
+        );
+    }
+
     #[test]
     fn test_emulator_creation() {
         let emu = Emulator::default();
         assert_eq!(emu.frame_count(), 0);
         assert!(!emu.is_running());
+    }
+
+    #[test]
+    fn unknown_hle_calls_are_aggregated_by_name() {
+        let mut emu = Emulator::default();
+        emu.cpu.regs.write(31, 0x8000_1008);
+        for (register, value) in (4..=7).zip([1, 2, 3, 4]) {
+            emu.cpu.regs.write(register, value);
+        }
+
+        invoke_sdk_import(&mut emu, 0x1000, "missing_sdk_call");
+        emu.cpu.regs.write(31, 0x8000_2008);
+        emu.cpu.regs.write(4, 99);
+        invoke_sdk_import(&mut emu, 0x1004, "missing_sdk_call");
+
+        let calls: Vec<_> = emu.unknown_hle_calls().cloned().collect();
+        assert_eq!(
+            calls,
+            vec![UnknownHleCall {
+                name: "missing_sdk_call".to_string(),
+                count: 2,
+                import_address: 0x1000,
+                first_pc: 0x8000_1000,
+                first_arguments: [1, 2, 3, 4],
+            }]
+        );
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(emu.cpu.regs.pc, 0x8000_2008);
+    }
+
+    #[test]
+    fn strict_unknown_hle_policy_stops_and_keeps_diagnostics() {
+        let mut emu = Emulator::default();
+        emu.set_unknown_hle_policy(UnknownHlePolicy::Stop);
+        emu.cpu.regs.write(31, 0x8000_3008);
+        emu.cpu.regs.write(4, 0x1234);
+
+        let error = try_invoke_sdk_import(&mut emu, 0x2000, "strict_missing").unwrap_err();
+        assert!(matches!(
+            error,
+            SimulatorError::UnknownHle {
+                ref name,
+                pc: 0x8000_3000,
+                import_address: 0x2000,
+                arguments: [0x1234, 0, 0, 0],
+            } if name == "strict_missing"
+        ));
+        assert_eq!(emu.unknown_hle_calls().len(), 1);
+    }
+
+    #[test]
+    fn strict_unknown_hle_allowlist_is_exact_and_survives_reset() {
+        let mut emu = Emulator::from_app(minimal_app()).unwrap();
+        emu.set_unknown_hle_policy(UnknownHlePolicy::Stop);
+        emu.set_unknown_hle_allowlist(["allowed_missing"]);
+        emu.cpu.regs.write(31, 0x8000_4008);
+
+        invoke_sdk_import(&mut emu, 0x3000, "allowed_missing");
+        assert_eq!(emu.unknown_hle_calls().len(), 1);
+
+        emu.reset().unwrap();
+        assert_eq!(emu.unknown_hle_policy, UnknownHlePolicy::Stop);
+        assert!(emu.unknown_hle_allowlist.contains("allowed_missing"));
+        assert_eq!(emu.unknown_hle_calls().len(), 0);
+
+        emu.cpu.regs.write(31, 0x8000_5008);
+        invoke_sdk_import(&mut emu, 0x3004, "allowed_missing");
+        assert!(try_invoke_sdk_import(&mut emu, 0x3008, "Allowed_Missing").is_err());
+    }
+
+    #[test]
+    fn test_legacy_load_base_requests_lcd_initialization() {
+        let legacy = Emulator::from_app(minimal_app()).unwrap();
+        assert_eq!(legacy.cpu.regs.read(5), 1);
+
+        let mut standard_app = minimal_app();
+        standard_app.rawd.origin = STANDARD_APP_LOAD_BASE;
+        let standard = Emulator::from_app(standard_app).unwrap();
+        assert_eq!(standard.cpu.regs.read(5), 0);
     }
 
     #[test]
@@ -2001,6 +1967,77 @@ mod tests {
     }
 
     #[test]
+    fn test_hle_modules_execute_through_runtime_hooks() {
+        let mut emu = Emulator::default();
+        let return_address = 0x9000;
+        emu.cpu.regs.write(31, return_address);
+
+        emu.memory.load_data(0x100, b"hello\0").unwrap();
+        emu.cpu.regs.write(4, 0x100);
+        invoke_sdk_import(&mut emu, 0x1000, "strlen");
+        assert_eq!(emu.cpu.regs.read(2), 5);
+        assert_eq!(emu.cpu.regs.pc, return_address);
+
+        invoke_sdk_import(&mut emu, 0x1004, "LCD_GetXSize");
+        assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_WIDTH);
+
+        emu.set_buttons(crate::input::BUTTON_A);
+        invoke_sdk_import(&mut emu, 0x1008, "kbd_get_key");
+        assert_eq!(emu.cpu.regs.read(2), 31);
+
+        invoke_sdk_import(&mut emu, 0x100c, "pcm_ioctl");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+
+        emu.cpu.regs.write(4, 2);
+        invoke_sdk_import(&mut emu, 0x1010, "OSSemCreate");
+        assert_eq!(emu.semaphores.get(&emu.cpu.regs.read(2)), Some(&2));
+
+        invoke_sdk_import(&mut emu, 0x1014, "get_dl_handle");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+    }
+
+    #[test]
+    fn test_gui_exec_dispatches_key_transitions_to_focused_guest_window() {
+        let mut emu = Emulator::default();
+        let return_address = 0x9000;
+        let callback = 0x4000;
+        let stack_pointer = 0x3000;
+        emu.cpu.regs.write(29, stack_pointer);
+        emu.cpu.regs.write(31, return_address);
+        emu.memory.write_u32(stack_pointer + 20, callback).unwrap();
+
+        invoke_sdk_import(&mut emu, 0x1100, "WM_CreateWindow");
+        let window = emu.cpu.regs.read(2);
+        assert_ne!(window, 0);
+
+        emu.cpu.regs.write(4, window);
+        invoke_sdk_import(&mut emu, 0x1104, "WM_SetFocus");
+        invoke_sdk_import(&mut emu, 0x1108, "open_gui_key_msg");
+
+        emu.set_buttons(crate::input::BUTTON_RIGHT);
+        invoke_sdk_import(&mut emu, 0x110c, "GUI_Exec");
+        assert_eq!(emu.cpu.regs.pc, callback);
+        assert_eq!(emu.cpu.regs.read(31), return_address);
+        let message = emu.cpu.regs.read(4);
+        assert_eq!(emu.memory.read_u32(message).unwrap(), 14);
+        assert_eq!(emu.memory.read_u32(message + 4).unwrap(), window);
+        let key_info = emu.memory.read_u32(message + 8).unwrap();
+        assert_eq!(emu.memory.read_u32(key_info).unwrap(), 18);
+        assert_eq!(emu.memory.read_u32(key_info + 4).unwrap(), 1);
+
+        emu.cpu.regs.write(31, return_address);
+        invoke_sdk_import(&mut emu, 0x110c, "GUI_Exec");
+        assert_eq!(emu.cpu.regs.pc, return_address);
+
+        emu.set_buttons(0);
+        emu.cpu.regs.write(31, return_address);
+        invoke_sdk_import(&mut emu, 0x110c, "GUI_Exec");
+        assert_eq!(emu.cpu.regs.pc, callback);
+        assert_eq!(emu.memory.read_u32(key_info).unwrap(), 18);
+        assert_eq!(emu.memory.read_u32(key_info + 4).unwrap(), 0);
+    }
+
+    #[test]
     fn test_semaphore_wakes_waiting_main_task() {
         let mut emu = Emulator::default();
         let semaphore = emu.create_semaphore(0);
@@ -2049,10 +2086,10 @@ mod tests {
             ..Default::default()
         };
 
-        emu.handle_sdk_call(0, "OSTimeGet").unwrap();
+        invoke_sdk_import(&mut emu, 0, "OSTimeGet");
         assert_eq!(emu.cpu.regs.read(2), 1);
 
-        emu.handle_sdk_call(0, "GetTickCount").unwrap();
+        invoke_sdk_import(&mut emu, 0, "GetTickCount");
         assert_eq!(emu.cpu.regs.read(2), 10_000);
     }
 
@@ -2068,7 +2105,7 @@ mod tests {
         emu.cpu.regs.write(5, format);
         emu.cpu.regs.write(6, directory);
 
-        emu.handle_sdk_call(0, "sprintf").unwrap();
+        invoke_sdk_import(&mut emu, 0, "sprintf");
 
         assert_eq!(
             emu.read_guest_c_string(destination),
@@ -2093,7 +2130,7 @@ mod tests {
         emu.cpu.regs.write(29, stack);
         emu.memory.write_u32(stack + 16, 3).unwrap();
 
-        emu.handle_sdk_call(0, "sprintf").unwrap();
+        invoke_sdk_import(&mut emu, 0, "sprintf");
 
         assert_eq!(emu.read_guest_c_string(destination), "Ver: 1.2.0003");
         assert_eq!(emu.cpu.regs.read(2), 13);
@@ -2142,7 +2179,7 @@ mod tests {
         emu.cpu.regs.write(4, ptr);
         emu.cpu.regs.write(31, 0x1234);
 
-        emu.handle_sdk_call(0, "__to_locale_ansi").unwrap();
+        invoke_sdk_import(&mut emu, 0, "__to_locale_ansi");
 
         let output = emu.cpu.regs.read(2);
         assert_ne!(output, ptr);
@@ -2156,7 +2193,7 @@ mod tests {
         assert_eq!(emu.read_guest_w_string(ptr), "Ali中.app");
 
         emu.cpu.regs.write(4, ptr);
-        emu.handle_sdk_call(0, "__to_locale_ansi").unwrap();
+        invoke_sdk_import(&mut emu, 0, "__to_locale_ansi");
 
         assert_eq!(emu.cpu.regs.read(2), output);
         assert_eq!(emu.read_guest_c_string(output), "Ali?.app");
@@ -2169,7 +2206,7 @@ mod tests {
         emu.cpu.regs.write(4, ptr);
         emu.cpu.regs.write(31, 0x1234);
 
-        emu.handle_sdk_call(0, "cmGetSysModel").unwrap();
+        invoke_sdk_import(&mut emu, 0, "cmGetSysModel");
 
         assert_eq!(emu.cpu.regs.read(2), 0);
         assert_eq!(emu.cpu.regs.pc, 0x1234);
@@ -2185,7 +2222,7 @@ mod tests {
             .unwrap();
         emu.cpu.regs.write(4, ptr);
 
-        emu.handle_sdk_call(0, "U8TOU32").unwrap();
+        invoke_sdk_import(&mut emu, 0, "U8TOU32");
 
         assert_eq!(emu.cpu.regs.read(2), 0x0001_C218);
     }
@@ -2194,10 +2231,10 @@ mod tests {
     fn test_lcd_size_matches_a320_display() {
         let mut emu = Emulator::default();
 
-        emu.handle_sdk_call(0, "LCD_GetXSize").unwrap();
+        invoke_sdk_import(&mut emu, 0, "LCD_GetXSize");
         assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_WIDTH);
 
-        emu.handle_sdk_call(0, "LCD_GetYSize").unwrap();
+        invoke_sdk_import(&mut emu, 0, "LCD_GetYSize");
         assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_HEIGHT);
     }
 
@@ -2211,7 +2248,7 @@ mod tests {
         emu.memory.write_u8(args_ptr + 6, 1).unwrap();
         emu.memory.write_u8(args_ptr + 7, 100).unwrap();
         emu.cpu.regs.write(4, args_ptr);
-        emu.handle_sdk_call(0, "waveout_open").unwrap();
+        invoke_sdk_import(&mut emu, 0, "waveout_open");
 
         assert_eq!(emu.cpu.regs.read(2), 1);
         assert_eq!(emu.audio.config(), AudioConfig::new(16_000, 16, 1, 100));
@@ -2229,7 +2266,7 @@ mod tests {
         }
         emu.cpu.regs.write(5, buffer_ptr);
         emu.cpu.regs.write(6, 3_200);
-        emu.handle_sdk_call(0, "waveout_write").unwrap();
+        invoke_sdk_import(&mut emu, 0, "waveout_write");
 
         assert_eq!(emu.cpu.regs.read(2), 1);
         assert!(emu.take_audio_samples().iter().any(|&sample| sample != 0));
@@ -2256,7 +2293,7 @@ mod tests {
         emu.cpu.regs.write(6, 2);
         emu.cpu.regs.write(31, return_address);
 
-        emu.handle_sdk_call(hook_address, "waveout_write").unwrap();
+        invoke_sdk_import(&mut emu, hook_address, "waveout_write");
 
         assert_eq!(emu.main_wait, Some(TaskWait::AudioWrite));
         assert_eq!(emu.cpu.regs.pc, hook_address);
@@ -2271,7 +2308,7 @@ mod tests {
         assert!(emu.audio.can_write());
         assert!(!emu.active_context_waiting());
 
-        emu.handle_sdk_call(hook_address, "waveout_write").unwrap();
+        invoke_sdk_import(&mut emu, hook_address, "waveout_write");
 
         assert_eq!(emu.main_wait, None);
         assert_eq!(emu.cpu.regs.pc, return_address);
@@ -2296,7 +2333,7 @@ mod tests {
         emu.cpu.regs.write(4, 0x100);
         emu.cpu.regs.write(5, 0x120);
 
-        emu.handle_sdk_call(0, "fsys_fopen").unwrap();
+        invoke_sdk_import(&mut emu, 0, "fsys_fopen");
         let handle = emu.cpu.regs.read(2);
         assert_ne!(handle, 0);
 
@@ -2304,13 +2341,13 @@ mod tests {
         emu.cpu.regs.write(5, 2);
         emu.cpu.regs.write(6, 3);
         emu.cpu.regs.write(7, handle);
-        emu.handle_sdk_call(0, "fsys_fwrite").unwrap();
+        invoke_sdk_import(&mut emu, 0, "fsys_fwrite");
 
         assert_eq!(emu.cpu.regs.read(2), 3);
         assert_eq!(emu.open_files[&handle].data, b"abcdef");
 
         emu.cpu.regs.write(4, handle);
-        emu.handle_sdk_call(0, "fsys_fclose").unwrap();
+        invoke_sdk_import(&mut emu, 0, "fsys_fclose");
         assert_eq!(emu.cpu.regs.read(2), 0);
         assert_eq!(
             std::fs::read(save_directory.join("test.log")).unwrap(),
@@ -2320,11 +2357,40 @@ mod tests {
         emu.memory.load_data(0x120, b"r\0").unwrap();
         emu.cpu.regs.write(4, 0x100);
         emu.cpu.regs.write(5, 0x120);
-        emu.handle_sdk_call(0, "fsys_fopen").unwrap();
+        invoke_sdk_import(&mut emu, 0, "fsys_fopen");
         let reopened = emu.cpu.regs.read(2);
         assert_eq!(emu.open_files[&reopened].data, b"abcdef");
 
         std::fs::remove_dir_all(save_directory).unwrap();
+    }
+
+    #[test]
+    fn test_read_only_file_can_be_read_but_not_written() {
+        let mut emu = Emulator::default();
+        let handle = 7;
+        emu.open_files.insert(
+            handle,
+            OpenFile {
+                data: b"resource".to_vec(),
+                position: 0,
+                data_ptr: 0,
+                save_path: None,
+                writable: false,
+                dirty: false,
+            },
+        );
+
+        assert_eq!(emu.read_file(0x100, 1, 8, handle).unwrap(), 8);
+        let read_back = (0..8)
+            .map(|offset| emu.memory.read_u8(0x100 + offset).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(read_back, b"resource");
+
+        emu.open_files.get_mut(&handle).unwrap().position = 0;
+        emu.memory.load_data(0x200, b"modified").unwrap();
+        assert_eq!(emu.write_file(0x200, 1, 8, handle).unwrap(), 0);
+        assert_eq!(emu.open_files[&handle].data, b"resource");
+        assert!(!emu.open_files[&handle].dirty);
     }
 
     #[test]
@@ -2336,6 +2402,87 @@ mod tests {
         assert!(emu.save_file_path("A:\\save\\profile.dat").is_some());
         assert!(emu.save_file_path("../outside.dat").is_none());
         assert!(emu.save_file_path("save/../../outside.dat").is_none());
+    }
+
+    #[test]
+    fn test_file_search_enumerates_matching_entries_and_terminates() {
+        let directory =
+            std::env::temp_dir().join(format!("dingooemu-file-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("Music")).unwrap();
+        std::fs::write(directory.join("Dn-Beyond.xm"), b"xm").unwrap();
+        std::fs::write(directory.join("Fountain.mod"), b"mod").unwrap();
+
+        let mut emu = Emulator {
+            app_path: directory.join("GooPlayer.app").display().to_string(),
+            ..Default::default()
+        };
+        emu.memory.load_data(0x100, b"*\0").unwrap();
+        emu.cpu.regs.write(4, 0x100);
+        emu.cpu.regs.write(5, 0x10);
+        emu.cpu.regs.write(6, 0x200);
+        invoke_sdk_import(&mut emu, 0x1000, "fsys_findfirst");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(
+            emu.read_guest_c_string(0x200 + FILE_SEARCH_NAME_OFFSET),
+            "Music"
+        );
+
+        emu.cpu.regs.write(4, 0x200);
+        invoke_sdk_import(&mut emu, 0x1004, "fsys_findnext");
+        assert_eq!(emu.cpu.regs.read(2), u32::MAX);
+
+        emu.cpu.regs.write(4, 0x100);
+        emu.cpu.regs.write(5, 0);
+        emu.cpu.regs.write(6, 0x300);
+        invoke_sdk_import(&mut emu, 0x1008, "fsys_findfirst");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(
+            emu.read_guest_c_string(0x300 + FILE_SEARCH_NAME_OFFSET),
+            "Dn-Beyond.xm"
+        );
+
+        emu.cpu.regs.write(4, 0x300);
+        invoke_sdk_import(&mut emu, 0x100c, "fsys_findnext");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(
+            emu.read_guest_c_string(0x300 + FILE_SEARCH_NAME_OFFSET),
+            "Fountain.mod"
+        );
+
+        emu.cpu.regs.write(4, 0x200);
+        invoke_sdk_import(&mut emu, 0x1010, "fsys_findclose");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert!(!emu.file_searches.contains_key(&0x200));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_file_search_filters_wildcards_and_rejects_parent_paths() {
+        let directory =
+            std::env::temp_dir().join(format!("dingooemu-file-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("Track.XM"), b"xm").unwrap();
+        std::fs::write(directory.join("Track.mod"), b"mod").unwrap();
+
+        let mut emu = Emulator {
+            app_path: directory.join("GooPlayer.app").display().to_string(),
+            ..Default::default()
+        };
+        assert_eq!(emu.begin_file_search("*.xm", 0, 0x200).unwrap(), 0);
+        assert_eq!(
+            emu.read_guest_c_string(0x200 + FILE_SEARCH_NAME_OFFSET),
+            "Track.XM"
+        );
+        assert_eq!(emu.next_file_search(0x200).unwrap(), u32::MAX);
+        assert_eq!(
+            emu.begin_file_search("../*", 0x10, 0x300).unwrap(),
+            u32::MAX
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -2360,6 +2507,20 @@ mod tests {
                 dirty: true,
             },
         );
+        emu.file_searches.insert(
+            0x3000,
+            FileSearch {
+                entries: vec!["first.mod".to_string(), "second.xm".to_string()],
+                next_index: 1,
+            },
+        );
+        emu.gui.key_messages_enabled = true;
+        emu.gui.windows.insert(3, 0x8000_4000);
+        emu.gui.focused_window = Some(3);
+        emu.gui.next_window_handle = 4;
+        emu.gui.reported_key = 18;
+        emu.gui.message_buffer = Some(0x2100);
+        emu.gui.key_info_buffer = Some(0x2200);
 
         let mut state = vec![0; emu.serialized_state_size()];
         emu.serialize_state(&mut state).unwrap();
@@ -2368,6 +2529,8 @@ mod tests {
         emu.input.set_buttons(0);
         emu.frame_count = 0;
         emu.open_files.clear();
+        emu.file_searches.clear();
+        emu.gui = GuiState::default();
 
         emu.unserialize_state(&state).unwrap();
         assert_eq!(emu.cpu.regs.read(8), 0x1234_5678);
@@ -2377,6 +2540,15 @@ mod tests {
         assert_eq!(emu.cycle_count, 987_654);
         assert!(emu.is_running());
         assert_eq!(emu.open_files[&7].data, b"open save data");
+        assert_eq!(emu.file_searches[&0x3000].next_index, 1);
+        assert_eq!(emu.file_searches[&0x3000].entries[1], "second.xm");
+        assert!(emu.gui.key_messages_enabled);
+        assert_eq!(emu.gui.windows[&3], 0x8000_4000);
+        assert_eq!(emu.gui.focused_window, Some(3));
+        assert_eq!(emu.gui.next_window_handle, 4);
+        assert_eq!(emu.gui.reported_key, 18);
+        assert_eq!(emu.gui.message_buffer, Some(0x2100));
+        assert_eq!(emu.gui.key_info_buffer, Some(0x2200));
         assert_eq!(
             emu.open_files[&7].save_path.as_deref(),
             Some(save_directory.join("profile.dat").as_path())

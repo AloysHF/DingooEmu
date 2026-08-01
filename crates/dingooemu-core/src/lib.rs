@@ -13,9 +13,8 @@ pub mod error;
 pub mod input;
 pub mod memory;
 mod save_state;
-pub mod sdk_hle;
 pub mod video;
 
 // Re-export main types for convenience
-pub use emulator::Emulator;
+pub use emulator::{Emulator, UnknownHleCall, UnknownHlePolicy};
 pub use error::{Result, SimulatorError};

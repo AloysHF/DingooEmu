@@ -195,7 +195,9 @@ impl Cpu {
             0x2A => self.execute_swl(instr, memory),      // SWL
             0x2B => self.execute_sw(instr, memory),       // SW
             0x2E => self.execute_swr(instr, memory),      // SWR
+            0x30 => self.execute_ll(instr, memory),       // LL
             0x33 => Ok(()),                               // PREF
+            0x38 => self.execute_sc(instr, memory),       // SC
             _ => self.handle_unknown_instruction(instr),
         }
     }
@@ -344,6 +346,15 @@ impl Cpu {
                 let a = self.regs.read(rs);
                 let b = self.regs.read(rt);
                 self.regs.write(rd, if a < b { 1 } else { 0 });
+            }
+            0x34 => {
+                // TEQ
+                if self.regs.read(rs) == self.regs.read(rt) {
+                    return Err(SimulatorError::CpuError {
+                        pc: self.regs.pc.wrapping_sub(4),
+                        message: "trap on equal".to_string(),
+                    });
+                }
             }
             _ => return self.handle_unknown_instruction(instr),
         }
@@ -715,6 +726,32 @@ impl Cpu {
         Ok(())
     }
 
+    /// Execute LL instruction (Load Linked).
+    fn execute_ll(&mut self, instr: u32, memory: &mut Memory) -> Result<()> {
+        let rs = ((instr >> 21) & 0x1F) as usize;
+        let rt = ((instr >> 16) & 0x1F) as usize;
+        let offset = instr as i16 as i32;
+        let addr = self.regs.read(rs).wrapping_add(offset as u32);
+        let value = memory.read_u32(addr)?;
+        self.regs.write(rt, value);
+        Ok(())
+    }
+
+    /// Execute SC instruction (Store Conditional).
+    fn execute_sc(&mut self, instr: u32, memory: &mut Memory) -> Result<()> {
+        let rs = ((instr >> 21) & 0x1F) as usize;
+        let rt = ((instr >> 16) & 0x1F) as usize;
+        let offset = instr as i16 as i32;
+        let addr = self.regs.read(rs).wrapping_add(offset as u32);
+        let value = self.regs.read(rt);
+
+        // Guest contexts execute serially, so model the reservation as
+        // uncontended and report a successful conditional store.
+        memory.write_u32(addr, value)?;
+        self.regs.write(rt, 1);
+        Ok(())
+    }
+
     /// Execute SPECIAL2 instructions (opcode = 0x1c)
     fn execute_special2(&mut self, instr: u32, _memory: &mut Memory) -> Result<()> {
         let funct = instr & 0x3F;
@@ -892,6 +929,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0x11, 0xD4, 0xC3, 0xB2, 0xA1]
         );
+    }
+
+    #[test]
+    fn test_ll_sc_updates_memory_and_reports_success() {
+        let mut cpu = Cpu::new(0);
+        let mut mem = Memory::new();
+        mem.write_u32(0x100, 41).unwrap();
+
+        let ll = (0x30 << 26) | (4 << 21) | (2 << 16);
+        let addiu = (0x09 << 26) | (2 << 21) | (2 << 16) | 1;
+        let sc = (0x38 << 26) | (4 << 21) | (2 << 16);
+        mem.write_u32(0, ll).unwrap();
+        mem.write_u32(4, addiu).unwrap();
+        mem.write_u32(8, sc).unwrap();
+        cpu.regs.write(4, 0x100);
+        cpu.start();
+
+        cpu.step(&mut mem).unwrap();
+        cpu.step(&mut mem).unwrap();
+        cpu.step(&mut mem).unwrap();
+
+        assert_eq!(mem.read_u32(0x100).unwrap(), 42);
+        assert_eq!(cpu.regs.read(2), 1);
+    }
+
+    #[test]
+    fn test_teq_only_traps_equal_operands() {
+        let teq = (4 << 21) | (5 << 16) | 0x34;
+        let mut mem = Memory::new();
+        mem.write_u32(0, teq).unwrap();
+
+        let mut unequal = Cpu::new(0);
+        unequal.regs.write(4, 1);
+        unequal.regs.write(5, 2);
+        unequal.start();
+        assert!(unequal.step(&mut mem).is_ok());
+
+        let mut equal = Cpu::new(0);
+        equal.regs.write(4, 1);
+        equal.regs.write(5, 1);
+        equal.start();
+        assert!(matches!(
+            equal.step(&mut mem),
+            Err(SimulatorError::CpuError { pc: 0, .. })
+        ));
     }
 
     #[test]

@@ -21,7 +21,8 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 
 - **MIPS32 CPU interpreter** — Ingenic JZ4740 XBurst compatible instruction set
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
-- **HLE (High-Level Emulation)** — Dingoo SDK functions (graphics, input, audio, timing) implemented in Rust
+- **HLE (High-Level Emulation)** — Dingoo SDK functions for graphics, focused-window key callbacks, audio, timing, files, and companion-content discovery implemented in Rust
+- **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and produce machine-graded L0/L1/L2/L3 JSON and CSV reports with deterministic input and PCM checkpoints
 - **`.app` file support** — Parse and load Dingoo A320 game container format
 - **Frame rendering** — 320×240 RGB565 framebuffer with XRGB8888 output
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
@@ -103,22 +104,26 @@ crates/
 │   └── src/
 │       ├── lib.rs               # Crate root (module declarations)
 │       ├── emulator.rs          # Shared Emulator (both front-ends)
-│       ├── cpu/                 # MIPS32 CPU interpreter
-│       │   ├── mod.rs           # CPU module root
-│       │   ├── registers.rs     # GPR, HI/LO, PC management
-│       │   ├── instructions.rs  # MIPS32 instruction decoder and execution
-│       │   └── cop0.rs          # Coprocessor 0 (system control)
+│       ├── emulator/
+│       │   └── sdk_hle/         # Runtime SDK dispatch and implementations
+│       │       ├── mod.rs       # Single HLE dispatcher
+│       │       ├── graphics.rs  # LCD and framebuffer calls
+│       │       ├── gui.rs       # Focused-window key message dispatch
+│       │       ├── input.rs     # Buttons and input events
+│       │       ├── audio.rs     # PCM and wave output
+│       │       ├── files.rs     # Resources, files, and saves
+│       │       ├── tasks.rs     # Tasks and semaphores
+│       │       └── system.rs    # Memory, timing, and system calls
+│       ├── cpu.rs               # MIPS32 CPU interpreter
 │       ├── memory.rs            # Memory bus (32MB address space)
 │       ├── video.rs             # Framebuffer and screen rendering
 │       ├── audio.rs             # Audio engine (PCM output)
 │       ├── input.rs             # Button state management
 │       ├── app_loader.rs        # .app container parser
-│       ├── hle/                 # High-Level Emulation bridge
-│       │   ├── mod.rs           # HLE module root
-│       │   └── sdk.rs           # Dingoo SDK function implementations
 │       └── error.rs             # Error types
 ├── dingooemu/                   # Standalone binary (-> dingooemu)
 │   └── src/
+│       ├── input_script.rs      # Deterministic input replay and checkpoints
 │       └── main.rs              # Window loop and CLI front-end
 └── dingooemu-libretro/          # libretro cdylib (-> dingooemu_libretro.{dll,so,dylib})
     ├── dingooemu_libretro.info  # RetroArch core metadata
@@ -132,17 +137,9 @@ crates/
 
 ## Game Compatibility
 
-The current compatibility suite contains 36 documented `.app` entries. Each
-entry is smoke-tested for startup and initial rendering; this does not imply
-complete gameplay, audio, or save-data compatibility.
-
-| Result | Count | Status |
-|--------|-------|--------|
-| Renders a non-black frame | 35 | ✅ Pass |
-| Black screen or crash | 1 | ❌ Fail |
-| **Total** | **36** | **⚠️ Experimental** |
-
-For detailed game list with screenshots and descriptions, see [Game Compatibility](docs/Game-Compatibility.md).
+Compatibility results are experimental and cover only explicitly tested
+scenarios. See [Game Compatibility](docs/Game-Compatibility.md) for the current
+L0–L3 results, screenshots, and scope of each result.
 
 ## Keyboard Controls
 

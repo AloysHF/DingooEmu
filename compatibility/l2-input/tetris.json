@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "content": "Tetris.app",
+  "relative_path": "Tetris.app",
+  "content_sha256": "78d190e4abfcdc2c4134dbd185b980bb6f71f137481951503f1533912c9f05eb",
+  "frames": 600,
+  "events": [
+    { "frame": 60, "buttons": ["start"] },
+    { "frame": 64, "buttons": [] },
+    { "frame": 120, "buttons": ["a"] },
+    { "frame": 124, "buttons": [] },
+    { "frame": 180, "buttons": ["a"] },
+    { "frame": 184, "buttons": [] },
+    { "frame": 240, "buttons": ["left"] },
+    { "frame": 244, "buttons": [] },
+    { "frame": 300, "buttons": ["a"] },
+    { "frame": 304, "buttons": [] },
+    { "frame": 420, "buttons": ["up"] },
+    { "frame": 424, "buttons": [] }
+  ],
+  "checkpoints": [
+    { "name": "gameplay-audio-active", "frame": 600, "expected_framebuffer_crc32": "32da1dfb", "control_framebuffer_crc32": "2a567fe6" }
+  ]
+}

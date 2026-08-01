@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "content": "samegoo.app",
+  "relative_path": "SameGoo/samegoo.app",
+  "content_sha256": "c1b418a5345972ead3eab18a22e91587543dc0ae8b939920123c2e7aaf483cc9",
+  "input_script": "compatibility/l2-input/samegoo.json",
+  "input_script_sha256": "0476770594a338ecdfc6aaba92e86ea9dee823018209d9be30ed206baf484398",
+  "expected": {
+    "sample_rate": 44100,
+    "format": "S16Le",
+    "channels": 2,
+    "volume": 20,
+    "pcm_crc32": "e8106933",
+    "submitted_bytes": 1841152,
+    "decoded_frames": 460288,
+    "nonzero_samples": 865560,
+    "min_rms_amplitude": 0.16,
+    "max_clipped_samples": 0,
+    "max_rejected_write_calls": 0,
+    "max_silenced_write_calls": 0,
+    "max_underflow_frames": 0,
+    "max_consecutive_underflow_frames": 0,
+    "max_buffered_frames": 22306
+  }
+}

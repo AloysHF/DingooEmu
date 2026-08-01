@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "content": "Puzzle Bobble.app",
+  "relative_path": "Puzzle Bobble.app",
+  "content_sha256": "387de314ac5a96a00ff4e85aaacce14265305270acd1c1df6004f59976d0d57b",
+  "frames": 240,
+  "events": [
+    { "frame": 60, "buttons": ["start"] },
+    { "frame": 63, "buttons": [] },
+    { "frame": 150, "buttons": ["left"] },
+    { "frame": 160, "buttons": [] }
+  ],
+  "checkpoints": [
+    { "name": "menu-selection-changed", "frame": 240, "expected_framebuffer_crc32": "66fb6744", "control_framebuffer_crc32": "8f0499df" }
+  ]
+}

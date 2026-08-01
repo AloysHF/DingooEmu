@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "content": "samegoo.app",
+  "relative_path": "SameGoo/samegoo.app",
+  "content_sha256": "c1b418a5345972ead3eab18a22e91587543dc0ae8b939920123c2e7aaf483cc9",
+  "frames": 600,
+  "events": [
+    { "frame": 300, "buttons": ["right"] },
+    { "frame": 304, "buttons": [] },
+    { "frame": 320, "buttons": ["down"] },
+    { "frame": 324, "buttons": [] },
+    { "frame": 350, "buttons": ["a"] },
+    { "frame": 354, "buttons": [] },
+    { "frame": 420, "buttons": ["a"] },
+    { "frame": 424, "buttons": [] },
+    { "frame": 500, "buttons": ["right"] },
+    { "frame": 504, "buttons": [] }
+  ],
+  "checkpoints": [
+    { "name": "board-interaction-with-audio", "frame": 600, "expected_framebuffer_crc32": "bbf8d3f7", "control_framebuffer_crc32": "6b75e597" }
+  ]
+}

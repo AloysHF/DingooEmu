@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 const MAGIC: &[u8; 8] = b"DINGSTAT";
-const VERSION: u32 = 1;
+const VERSION: u32 = 3;
 const HEADER_SIZE: usize = 32;
 const MAX_DECODED_SIZE: usize = 64 * 1024 * 1024;
 

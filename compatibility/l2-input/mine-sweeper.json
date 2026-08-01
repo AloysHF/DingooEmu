@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "content": "Mine Sweeper.app",
+  "relative_path": "Mine Sweeper.app",
+  "content_sha256": "02ddff7c6a2c0917407b0f0134c1570476c88ce52303004a328b84258a041aa3",
+  "frames": 180,
+  "events": [
+    { "frame": 60, "buttons": ["right"] },
+    { "frame": 64, "buttons": [] },
+    { "frame": 90, "buttons": ["a"] },
+    { "frame": 93, "buttons": [] }
+  ],
+  "checkpoints": [
+    { "name": "board-action-resolved", "frame": 180, "expected_framebuffer_crc32": "b8997850", "control_framebuffer_crc32": "65c38bd6" }
+  ]
+}

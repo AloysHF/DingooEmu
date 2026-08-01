@@ -143,12 +143,3 @@ fn test_memory_operations() {
     // Test free
     mem.free(ptr);
 }
-
-/// Test SDK HLE
-#[test]
-fn test_sdk_hle() {
-    use dingooemu_core::sdk_hle::SdkHle;
-
-    let sdk = SdkHle::new();
-    assert!(sdk.call_log().is_empty());
-}
