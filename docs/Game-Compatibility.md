@@ -3,6 +3,12 @@
 Compatibility is still experimental. The results below describe the exact
 scenario that has been verified and do not imply complete gameplay support.
 
+The current deduplicated sample set contains 32 games. On August 1, 2026, all
+32 games completed the batch screenshot process using a release build. Visual
+inspection found that 31 rendered a non-black frame, while Sword and Fairy
+remained black. These results cover startup and initial rendering only; input,
+audio, save data, and full gameplay still require separate verification.
+
 ## Verified Games
 
 | English Name | 中文名 | Filename | Screenshot | Status |
@@ -34,15 +40,11 @@ scenario that has been verified and do not imply complete gameplay support.
 | Spoout | — | `tmp/dingoo_game/Spoout.app` | ![Spoout](images/Spoout.png) | ✅ Pass |
 | StopWatch | 秒表 | `tmp/dingoo_game/StopWatch.app` | ![StopWatch](images/StopWatch.png) | ✅ Pass |
 | Tetris | 俄罗斯方块 | `tmp/dingoo_game/Tetris.app` | ![Tetris](images/Tetris.png) | ✅ Pass |
+| Ultimate Drift | 极限漂移 | `tmp/dingoo_game/Ultimate Drift.app` | ![Ultimate-Drift](images/Ultimate_Drift.png) | ✅ Pass |
 | Zero Gravity | 零重力 | `tmp/dingoo_game/Zero-Gravity.app` | ![Zero-Gravity](images/Zero-Gravity.png) | ✅ Pass |
 | Zhao-Chuan RPG | 赵传RPG | `tmp/dingoo_game/Zhao-Chuan RPG.app` | ![Zhao-Chuan-RPG](images/Zhao-Chuan_RPG.png) | ✅ Pass |
-| Ultimate Drift | 极限漂移 | `tmp/dingoo_game/new/Ultimate Drift.app` | ![Ultimate-Drift](images/new__Ultimate_Drift.png) | ✅ Pass |
-| Candy (new) | 糖果 | `tmp/dingoo_game/new/candy.app` | ![Candy-new](images/new__candy.png) | ✅ Pass |
-| Link'em Up (new) | 连连看 | `tmp/dingoo_game/new/linkemup.app` | ![Link-em-Up-new](images/new__linkemup.png) | ✅ Pass |
-| Snake (new) | 贪吃蛇 | `tmp/dingoo_game/new/snake.app` | ![Snake-new](images/new__snake.png) | ✅ Pass |
-| Tetris (new) | 俄罗斯方块 | `tmp/dingoo_game/new/tetris.app` | ![Tetris-new](images/new__tetris.png) | ✅ Pass |
 | Seven Nights | 七夜 | `tmp/dingoo_game/七夜.app` | ![七夜](images/七夜.png) | ✅ Pass |
-| Sword and Fairy | 仙剑奇侠传 | `tmp/dingoo_game/仙剑奇侠传.APP` | ![仙剑奇侠传](images/仙剑奇侠传__仙剑奇侠传.png) | ❌ Fail |
+| Sword and Fairy | 仙剑奇侠传 | `tmp/dingoo_game/仙剑奇侠传/仙剑奇侠传.APP` | ![仙剑奇侠传](images/仙剑奇侠传__仙剑奇侠传.png) | ❌ Fail |
 
 ## Status Legend
 

@@ -132,15 +132,15 @@ crates/
 
 ## Game Compatibility
 
-The current compatibility suite contains 36 documented `.app` entries. Each
+The current compatibility suite contains 32 documented `.app` entries. Each
 entry is smoke-tested for startup and initial rendering; this does not imply
 complete gameplay, audio, or save-data compatibility.
 
 | Result | Count | Status |
 |--------|-------|--------|
-| Renders a non-black frame | 35 | ✅ Pass |
+| Renders a non-black frame | 31 | ✅ Pass |
 | Black screen or crash | 1 | ❌ Fail |
-| **Total** | **36** | **⚠️ Experimental** |
+| **Total** | **32** | **⚠️ Experimental** |
 
 For detailed game list with screenshots and descriptions, see [Game Compatibility](docs/Game-Compatibility.md).
 
