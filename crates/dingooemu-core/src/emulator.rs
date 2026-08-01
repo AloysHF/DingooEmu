@@ -2413,8 +2413,10 @@ mod tests {
         std::fs::write(directory.join("Dn-Beyond.xm"), b"xm").unwrap();
         std::fs::write(directory.join("Fountain.mod"), b"mod").unwrap();
 
-        let mut emu = Emulator::default();
-        emu.app_path = directory.join("GooPlayer.app").display().to_string();
+        let mut emu = Emulator {
+            app_path: directory.join("GooPlayer.app").display().to_string(),
+            ..Default::default()
+        };
         emu.memory.load_data(0x100, b"*\0").unwrap();
         emu.cpu.regs.write(4, 0x100);
         emu.cpu.regs.write(5, 0x10);
@@ -2465,8 +2467,10 @@ mod tests {
         std::fs::write(directory.join("Track.XM"), b"xm").unwrap();
         std::fs::write(directory.join("Track.mod"), b"mod").unwrap();
 
-        let mut emu = Emulator::default();
-        emu.app_path = directory.join("GooPlayer.app").display().to_string();
+        let mut emu = Emulator {
+            app_path: directory.join("GooPlayer.app").display().to_string(),
+            ..Default::default()
+        };
         assert_eq!(emu.begin_file_search("*.xm", 0, 0x200).unwrap(), 0);
         assert_eq!(
             emu.read_guest_c_string(0x200 + FILE_SEARCH_NAME_OFFSET),

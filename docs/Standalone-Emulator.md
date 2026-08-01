@@ -122,33 +122,9 @@ dingooemu --cheat mem8:0x80100000=99 --cheat reg:r4=0x1234 game.app
 Writes still pass through the emulator's normal memory validation. Invalid or
 out-of-range rules stop startup with a clear error instead of being ignored.
 
-## Compatibility Diagnostics and Scripted Input
-
 For compatibility testing, `--unknown-instruction-policy stop` turns the first
 unimplemented MIPS instruction into an execution error. The default `skip`
 behavior logs the instruction and continues, matching previous releases.
-
-Unknown SDK calls are always aggregated by exact function name. The default
-`--unknown-hle-policy report` returns zero for compatibility and logs only the
-first occurrence plus an end-of-run summary. Each entry records the total call
-count, import address, first guest call site, and the first `a0` through `a3`
-arguments. `--unknown-hle-policy stop` turns the first unknown call into an
-execution error after recording it. Use `--allow-unknown-hle NAME` only for a
-reviewed compatibility exception; matching is case-sensitive and exact.
-
-The JSON report also includes requested/executed frame counts, executed
-instructions, deterministic RGB565 framebuffer statistics, and optional input
-checkpoint evidence. It is written even when strict mode stops emulation:
-
-```bash
-dingooemu game.app --headless --frames 300 --unknown-hle-policy stop \
-  --hle-report hle-report.json
-```
-
-Input scripts use zero-based event frames and one-based completed-frame
-checkpoints. Each event replaces the complete held-button state until the next
-event. The script's content name and frame count must match the run. Batch
-testing additionally verifies its content SHA-256.
 
 ## Audio Output
 
@@ -186,61 +162,19 @@ dingooemu path/to/game.app --screenshot preview.png
 dingooemu path/to/game.app --screenshot preview.png --screenshot-frames 60
 ```
 
-## Batch Screenshot Mode
+## Compatibility Testing
 
-Build the standalone emulator and capture every `.app` file under
-`tmp/dingoo_game` recursively:
+The diagnostic and input options above support strict instruction/HLE checks,
+machine-readable reports, and deterministic input replay. To run the
+repository's complete compatibility suite against locally supplied games:
 
 ```powershell
 pwsh -NoProfile -File scripts/batch-screenshots.ps1
 ```
 
-Screenshots are written to `docs/images`, while per-game JSON diagnostics and
-unified `summary.json` / `summary.csv` files are written to
-`tmp/hle-reports`. The summaries record content and screenshot SHA-256 hashes,
-the Git revision and dirty state, binary hash, runtime configuration, elapsed
-time, log tail, framebuffer metrics, input evidence, guest PCM and queue
-metrics, and unknown HLE calls.
-
-The batch runner grades four levels automatically:
-
-- **L0** passes when the content loads and produces a valid diagnostics report
-  matching the requested capture.
-- **L1** passes when L0 passes, the process completes every requested frame, a
-  screenshot is produced, and the framebuffer contains non-black pixels and
-  more than one RGB565 color.
-- **L2** applies to games with a matching script under
-  `compatibility/l2-input`. It requires L1, matching content and script
-  metadata, at least one nonzero-input frame, and every exact RGB565 checkpoint
-  to match while differing from its recorded no-input control.
-- **L3** applies to games with a matching manifest under
-  `compatibility/l3-audio`. It requires L2 plus the expected PCM CRC32, sample
-  rate, format, channel count, volume, nonzero sample evidence, and bounded
-  virtual queue behavior without rejected writes or sustained underflow.
-
-Failed captures are kept inside the report directory when available. A
-verified screenshot is copied to `docs/images` only after the configured L1 or
-L2/L3 level passes, so a strict, checkpoint, audio, or runtime failure cannot delete the
-previous known-good artifact. The default capture point is 60 frames, with
-per-game and input-script overrides for deterministic checkpoints. Explicit
-parameters apply to games without an input scenario:
-
-```powershell
-pwsh -NoProfile -File scripts/batch-screenshots.ps1 -Frames 60 -TimeoutSeconds 30
-```
-
-Run the same set in strict mode, optionally with reviewed exceptions:
-
-```powershell
-pwsh -NoProfile -File scripts/batch-screenshots.ps1 `
-  -UnknownHlePolicy stop `
-  -AllowUnknownHle legacy_function `
-  -ReportDirectory tmp/hle-reports-strict
-```
-
-For the design rationale, external-fixture policy, complete scenario schema,
-step-by-step authoring workflow, report interpretation, negative validation,
-and determinism rules, see [Compatibility Testing](Compatibility-Testing.md).
+For level definitions, report artifacts, strict-mode usage, scenario formats,
+authoring workflows, negative validation, and determinism rules, see
+[Compatibility Testing](Compatibility-Testing.md).
 
 ## Examples
 
@@ -271,11 +205,4 @@ dingooemu --headless path/to/game.app
 
 # Run exactly 120 frames without opening a window
 dingooemu --headless --frames 120 path/to/game.app
-
-# Save aggregated SDK compatibility diagnostics
-dingooemu --headless --hle-report hle-report.json path/to/game.app
-
-# Replay deterministic input and record checkpoints
-dingooemu --headless --frames 180 --input-script scenario.json \
-  --hle-report input-report.json path/to/game.app
 ```

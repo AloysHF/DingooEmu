@@ -30,24 +30,6 @@ cargo build
 cargo test --workspace
 ```
 
-For compatibility changes, run the sample collection and retain the generated
-unknown-HLE diagnostics:
-
-```powershell
-pwsh -NoProfile -File scripts/batch-screenshots.ps1
-```
-
-The command writes level-verified screenshots to `docs/images`, per-game JSON
-to `tmp/hle-reports`, and unified `summary.json` / `summary.csv` results.
-Games listed under `compatibility/l2-input` replay deterministic button events
-and must match exact framebuffer checkpoints that differ from their no-input
-controls. Review the automatic L0/L1/L2 reasons, hashes, run configuration,
-input evidence, framebuffer metrics, and `unknown_hle` list instead of treating
-a non-empty screenshot as sufficient proof. Before declaring a representative
-sample clean, rerun it with
-`-UnknownHlePolicy stop`; any exception must use an explicit, reviewed
-`-AllowUnknownHle` name.
-
 ## Areas Where Help Is Needed
 
 We welcome contributions in the following areas:

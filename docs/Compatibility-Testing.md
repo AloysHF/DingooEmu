@@ -74,6 +74,34 @@ docs/images/                  Published screenshots from verified runs
 scripts/batch-screenshots.ps1 Batch runner and L0/L1/L2/L3 grader
 ```
 
+## Running a Single Diagnostic
+
+For one game, `--unknown-instruction-policy stop` turns the first unimplemented
+MIPS instruction into an execution error. The default `skip` policy logs the
+instruction and continues.
+
+Unknown SDK calls are aggregated by exact function name. The default
+`--unknown-hle-policy report` records them while retaining the compatibility
+zero return. Each entry contains its total call count, import address, first
+guest call site, and initial `a0` through `a3` arguments. Use
+`--unknown-hle-policy stop` to fail after recording the first unsupported call,
+and reserve `--allow-unknown-hle NAME` for an exact, case-sensitive, reviewed
+exception.
+
+Write the diagnostic report explicitly when running the standalone binary. The
+report is retained even when a strict policy stops execution:
+
+```bash
+dingooemu game.app --headless --frames 300 --unknown-hle-policy stop \
+  --hle-report hle-report.json
+```
+
+Use `--input-script` with headless or screenshot mode to replay a versioned
+input scenario. Event frames are zero-based, checkpoint frames are one-based
+completed frames, and each event replaces the complete held-button state. See
+[Input Scenario Format](#input-scenario-format) for the complete schema and
+validation rules.
+
 ## Running the Batch Suite
 
 Place game files below `tmp/dingoo_game`, preserving any subdirectories used by

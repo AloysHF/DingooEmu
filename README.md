@@ -96,13 +96,6 @@ Run the unit tests:
 cargo test --workspace
 ```
 
-Compatibility runs generate per-game diagnostics plus unified `summary.json`
-and `summary.csv` files with content/screenshot hashes, the Git revision,
-runtime configuration, timing, log tails, unknown HLE calls, scripted input
-evidence, guest PCM metrics, and automatic L0/L1/L2/L3 results. Use
-`-UnknownHlePolicy stop` to make
-any non-allowlisted SDK gap fail immediately.
-
 ## Architecture
 
 ```
@@ -144,26 +137,9 @@ crates/
 
 ## Game Compatibility
 
-The current compatibility suite contains 32 documented `.app` entries. Every
-entry is automatically graded for loading (L0) and initial rendering (L1).
-Thirteen representative games also replay versioned per-frame button scripts and
-match exact RGB565 framebuffer checkpoints against distinct no-input controls
-(L2). Five of those games additionally match deterministic non-silent guest
-PCM, exact audio formats, and bounded queue evidence (L3). These levels prove
-only the configured interactions and audio streams; they do not imply complete
-gameplay, host-device playback, or save-data compatibility.
-
-| Result | Count | Status |
-|--------|-------|--------|
-| L0: loads and emits valid diagnostics | 32 | ✅ Pass |
-| L1: completes capture with a non-black, non-solid frame | 32 | ✅ Pass |
-| L2: scripted input reaches exact checkpoints | 13 | ✅ Pass |
-| L2: not yet tested | 19 | ⚪ Pending |
-| L3: deterministic non-silent PCM matches | 5 | ✅ Pass |
-| L3: not yet tested | 27 | ⚪ Pending |
-| **Total** | **32** | **⚠️ Experimental** |
-
-For detailed game list with screenshots and descriptions, see [Game Compatibility](docs/Game-Compatibility.md).
+Compatibility results are experimental and cover only explicitly tested
+scenarios. See [Game Compatibility](docs/Game-Compatibility.md) for the current
+L0–L3 results, screenshots, and scope of each result.
 
 ## Keyboard Controls
 
