@@ -11,6 +11,7 @@ pub mod emulator;
 pub mod error;
 pub mod input;
 pub mod memory;
+mod save_state;
 pub mod sdk_hle;
 pub mod video;
 

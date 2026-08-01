@@ -46,10 +46,11 @@ platform-specific installation requirements:
 - `.app` content loading
 - Cold reset through RetroArch's **Reset** command
 - Persistent guest save files in RetroArch's configured save directory
+- Save states with content identity and corruption checks
 - Live core options, including host master volume
 
-The current basic core does not yet provide save states, cheats, frontend
-memory exposure or subsystem loading. The metadata marks these
+The current basic core does not yet provide cheats, frontend memory exposure
+or subsystem loading. The metadata marks these
 features unavailable so RetroArch does not present unsupported capabilities.
 
 ## Game Save Files
@@ -59,6 +60,14 @@ configured save directory and reopened from there on later sessions. Guest
 paths are normalized inside that directory; parent-directory traversal is
 rejected. Modified files are flushed when the guest closes them and when the
 core resets or unloads content.
+
+## Save States
+
+RetroArch save and load state commands capture the complete mutable CPU,
+memory, video, input, audio, scheduler, semaphore, and open-file state. Each
+state contains a format version, content checksum, payload length, and payload
+checksum. States for different content and damaged or incompatible states are
+rejected without changing the running emulator.
 
 ## Core Options
 

@@ -14,7 +14,7 @@ const MAX_QUEUED_AUDIO_FRAMES: usize = OUTPUT_SAMPLE_RATE as usize / 2;
 #[cfg(feature = "standalone")]
 const MAX_QUEUED_AUDIO_BUFFERS: usize = 4;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SampleFormat {
     U8,
     S16Le,
@@ -30,7 +30,7 @@ impl SampleFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioConfig {
     pub sample_rate: u32,
     pub format: SampleFormat,
@@ -52,16 +52,20 @@ impl AudioConfig {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Audio {
     config: Option<AudioConfig>,
     volume: u8,
     master_volume: u8,
     muted: bool,
     #[cfg(feature = "standalone")]
+    #[serde(skip)]
     mixer_device: Option<rodio::MixerDeviceSink>,
     #[cfg(feature = "standalone")]
+    #[serde(skip)]
     mixer: Option<rodio::mixer::Mixer>,
     #[cfg(feature = "standalone")]
+    #[serde(skip)]
     player: Option<rodio::Player>,
     #[cfg(not(feature = "standalone"))]
     pending_samples: VecDeque<i16>,
@@ -277,6 +281,19 @@ impl Audio {
         self.config
     }
 
+    pub(crate) fn resume_after_state_load(&mut self) {
+        #[cfg(feature = "standalone")]
+        if let Some(config) = self.config.take() {
+            let volume = self.volume;
+            let master_volume = self.master_volume;
+            let muted = self.muted;
+            self.open(config);
+            self.set_volume(volume as u32);
+            self.set_master_volume(master_volume);
+            self.set_muted(muted);
+        }
+    }
+
     fn effective_volume(&self) -> f32 {
         if self.muted {
             return 0.0;
@@ -311,7 +328,7 @@ fn decode_pcm(data: &[u8], format: SampleFormat, channels: u8) -> Vec<f32> {
 }
 
 #[cfg(not(feature = "standalone"))]
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct StreamingResampler {
     input_rate: u32,
     input_frames_seen: u64,

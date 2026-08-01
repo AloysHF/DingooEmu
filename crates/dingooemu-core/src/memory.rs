@@ -33,6 +33,7 @@ const IPU_CTRL_RUN: u32 = 1 << 1;
 const IPU_STATUS_OUT_END: u8 = 1;
 
 /// Memory manager for the Dingoo A320
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Memory {
     /// Main RAM (32 MB)
     ram: Box<[u8]>,
@@ -350,6 +351,12 @@ impl Memory {
     /// Get the shared LCD framebuffer mapping.
     pub fn framebuffer(&self) -> &[u8] {
         &self.framebuffer
+    }
+
+    pub(crate) fn snapshot_layout_is_valid(&self) -> bool {
+        self.ram.len() == RAM_SIZE as usize
+            && self.framebuffer.len() == FRAMEBUFFER_MAP_SIZE
+            && self.ipu_registers.len() == IPU_REGISTER_SIZE
     }
 
     fn track_writes(&mut self, addr: u32, count: usize) {

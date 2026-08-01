@@ -7,7 +7,7 @@ use crate::memory::Memory;
 use crate::sdk_hle::SdkHle;
 use crate::video::Video;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const CPU_CLOCK_HZ: u64 = 336_000_000;
 const FRAMES_PER_SECOND: u64 = 60;
@@ -29,6 +29,7 @@ fn hook_filter_location(address: u32) -> (usize, u64) {
     )
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct OpenFile {
     data: Vec<u8>,
     position: usize,
@@ -38,17 +39,62 @@ struct OpenFile {
     dirty: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum TaskWait {
     AudioWrite,
     Semaphore(u32),
     UntilCycle(u64),
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct GuestTask {
     cpu: Cpu,
     priority: u32,
     wait: Option<TaskWait>,
+}
+
+#[derive(serde::Serialize)]
+struct EmulatorStateRef<'a> {
+    cpu: &'a Cpu,
+    memory: &'a Memory,
+    video: &'a Video,
+    input: &'a Input,
+    audio: &'a Audio,
+    frame_count: u64,
+    cycle_count: u64,
+    tasks: &'a [GuestTask],
+    scheduler_cursor: usize,
+    main_wait: Option<TaskWait>,
+    active_task: Option<usize>,
+    semaphores: &'a HashMap<u32, u32>,
+    next_semaphore_handle: u32,
+    open_files: HashMap<u32, OpenFile>,
+    next_file_handle: u32,
+    app_main_args_initialized: bool,
+    locale_ansi_buffer: Option<u32>,
+    framebuffer_submitted: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct EmulatorState {
+    cpu: Cpu,
+    memory: Memory,
+    video: Video,
+    input: Input,
+    audio: Audio,
+    frame_count: u64,
+    cycle_count: u64,
+    tasks: Vec<GuestTask>,
+    scheduler_cursor: usize,
+    main_wait: Option<TaskWait>,
+    active_task: Option<usize>,
+    semaphores: HashMap<u32, u32>,
+    next_semaphore_handle: u32,
+    open_files: HashMap<u32, OpenFile>,
+    next_file_handle: u32,
+    app_main_args_initialized: bool,
+    locale_ansi_buffer: Option<u32>,
+    framebuffer_submitted: bool,
 }
 
 fn prepare_resource_file_data(name: &str, kind: ResourceKind, data: Vec<u8>) -> Vec<u8> {
@@ -329,6 +375,118 @@ impl Emulator {
         }
         *self = replacement;
         log::info!("Emulator reset");
+        Ok(())
+    }
+
+    /// Return the fixed buffer capacity required for a serialized state.
+    pub fn serialized_state_size(&self) -> usize {
+        crate::save_state::SERIALIZED_SIZE
+    }
+
+    /// Serialize the complete mutable runtime state into a fixed-size buffer.
+    pub fn serialize_state(&self, output: &mut [u8]) -> anyhow::Result<()> {
+        let app = self
+            .app
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("cannot save state without loaded content"))?;
+        let mut open_files = self.open_files.clone();
+        for file in open_files.values_mut() {
+            let Some(path) = file.save_path.take() else {
+                continue;
+            };
+            let root = self
+                .save_directory
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("save file has no configured save directory"))?;
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| anyhow::anyhow!("save file is outside the configured directory"))?;
+            if !safe_relative_path(relative) {
+                anyhow::bail!("save file has an unsafe relative path");
+            }
+            file.save_path = Some(relative.to_path_buf());
+        }
+        let state = EmulatorStateRef {
+            cpu: &self.cpu,
+            memory: &self.memory,
+            video: &self.video,
+            input: &self.input,
+            audio: &self.audio,
+            frame_count: self.frame_count,
+            cycle_count: self.cycle_count,
+            tasks: &self.tasks,
+            scheduler_cursor: self.scheduler_cursor,
+            main_wait: self.main_wait,
+            active_task: self.active_task,
+            semaphores: &self.semaphores,
+            next_semaphore_handle: self.next_semaphore_handle,
+            open_files,
+            next_file_handle: self.next_file_handle,
+            app_main_args_initialized: self.app_main_args_initialized,
+            locale_ansi_buffer: self.locale_ansi_buffer,
+            framebuffer_submitted: self.framebuffer_submitted,
+        };
+        crate::save_state::encode(&state, crc32fast::hash(&app.data), output)
+    }
+
+    /// Restore a serialized state without changing the emulator on failure.
+    pub fn unserialize_state(&mut self, input: &[u8]) -> anyhow::Result<()> {
+        let app = self
+            .app
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("cannot load state without loaded content"))?;
+        let mut state: EmulatorState =
+            crate::save_state::decode(input, crc32fast::hash(&app.data))?;
+        if !state.memory.snapshot_layout_is_valid() || !state.video.snapshot_layout_is_valid() {
+            anyhow::bail!("save state has an incompatible memory layout");
+        }
+        if state.tasks.len() > MAX_GUEST_TASKS
+            || state
+                .active_task
+                .is_some_and(|index| index >= state.tasks.len())
+        {
+            anyhow::bail!("save state has an invalid task layout");
+        }
+        for file in state.open_files.values_mut() {
+            let Some(relative) = file.save_path.take() else {
+                continue;
+            };
+            if !safe_relative_path(&relative) {
+                anyhow::bail!("save state contains an unsafe save path");
+            }
+            let root = self
+                .save_directory
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("save state requires a save directory"))?;
+            file.save_path = Some(root.join(relative));
+        }
+
+        let was_running = state.cpu.is_running();
+        let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
+        replacement.save_directory = self.save_directory.clone();
+        replacement.cpu = state.cpu;
+        replacement.memory = state.memory;
+        replacement.video = state.video;
+        replacement.input = state.input;
+        replacement.audio = state.audio;
+        replacement.audio.resume_after_state_load();
+        replacement.frame_count = state.frame_count;
+        replacement.cycle_count = state.cycle_count;
+        replacement.tasks = state.tasks;
+        replacement.scheduler_cursor = state.scheduler_cursor;
+        replacement.main_wait = state.main_wait;
+        replacement.active_task = state.active_task;
+        replacement.semaphores = state.semaphores;
+        replacement.next_semaphore_handle = state.next_semaphore_handle;
+        replacement.open_files = state.open_files;
+        replacement.next_file_handle = state.next_file_handle;
+        replacement.app_main_args_initialized = state.app_main_args_initialized;
+        replacement.locale_ansi_buffer = state.locale_ansi_buffer;
+        replacement.framebuffer_submitted = state.framebuffer_submitted;
+        if was_running {
+            replacement.cpu.start();
+        }
+        *self = replacement;
         Ok(())
     }
 
@@ -1666,6 +1824,13 @@ impl Emulator {
     }
 }
 
+fn safe_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
 impl Default for Emulator {
     fn default() -> Self {
         Self {
@@ -2134,5 +2299,65 @@ mod tests {
         assert!(emu.save_file_path("A:\\save\\profile.dat").is_some());
         assert!(emu.save_file_path("../outside.dat").is_none());
         assert!(emu.save_file_path("save/../../outside.dat").is_none());
+    }
+
+    #[test]
+    fn test_save_state_round_trip_and_transactional_rejection() {
+        let mut emu = Emulator::from_app(minimal_app()).unwrap();
+        let save_directory = std::env::temp_dir().join("dingooemu-state-save-root");
+        emu.set_save_directory(&save_directory);
+        emu.start();
+        emu.cpu.regs.write(8, 0x1234_5678);
+        emu.memory.write_u32(0x2000, 0xaabb_ccdd).unwrap();
+        emu.input.set_buttons(crate::input::BUTTON_A);
+        emu.frame_count = 42;
+        emu.cycle_count = 987_654;
+        emu.open_files.insert(
+            7,
+            OpenFile {
+                data: b"open save data".to_vec(),
+                position: 4,
+                data_ptr: 0,
+                save_path: Some(save_directory.join("profile.dat")),
+                writable: true,
+                dirty: true,
+            },
+        );
+
+        let mut state = vec![0; emu.serialized_state_size()];
+        emu.serialize_state(&mut state).unwrap();
+        emu.cpu.regs.write(8, 0);
+        emu.memory.write_u32(0x2000, 0).unwrap();
+        emu.input.set_buttons(0);
+        emu.frame_count = 0;
+        emu.open_files.clear();
+
+        emu.unserialize_state(&state).unwrap();
+        assert_eq!(emu.cpu.regs.read(8), 0x1234_5678);
+        assert_eq!(emu.memory.read_u32(0x2000).unwrap(), 0xaabb_ccdd);
+        assert_eq!(emu.input.buttons(), crate::input::BUTTON_A);
+        assert_eq!(emu.frame_count, 42);
+        assert_eq!(emu.cycle_count, 987_654);
+        assert!(emu.is_running());
+        assert_eq!(emu.open_files[&7].data, b"open save data");
+        assert_eq!(
+            emu.open_files[&7].save_path.as_deref(),
+            Some(save_directory.join("profile.dat").as_path())
+        );
+
+        let unchanged_pc = emu.cpu.regs.pc;
+        let unchanged_memory = emu.memory.read_u32(0x2000).unwrap();
+        state[32] ^= 1;
+        assert!(emu.unserialize_state(&state).is_err());
+        assert_eq!(emu.cpu.regs.pc, unchanged_pc);
+        assert_eq!(emu.memory.read_u32(0x2000).unwrap(), unchanged_memory);
+
+        state[32] ^= 1;
+        let mut other_app = minimal_app();
+        other_app.data.push(1);
+        let mut other = Emulator::from_app(other_app).unwrap();
+        other.cpu.regs.pc = 0x8765_4321;
+        assert!(other.unserialize_state(&state).is_err());
+        assert_eq!(other.cpu.regs.pc, 0x8765_4321);
     }
 }

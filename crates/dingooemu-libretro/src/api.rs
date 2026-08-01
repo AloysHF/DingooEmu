@@ -222,17 +222,46 @@ pub extern "C" fn retro_reset() {
 
 #[no_mangle]
 pub extern "C" fn retro_serialize_size() -> usize {
-    0
+    unsafe { EMULATOR.as_ref() }.map_or(0, Emulator::serialized_state_size)
 }
 
 #[no_mangle]
-pub extern "C" fn retro_serialize(_data: *mut c_void, _size: usize) -> bool {
-    false
+pub extern "C" fn retro_serialize(data: *mut c_void, size: usize) -> bool {
+    let Some(emulator) = (unsafe { EMULATOR.as_ref() }) else {
+        return false;
+    };
+    if data.is_null() || size < emulator.serialized_state_size() {
+        return false;
+    }
+    let output = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), size) };
+    match emulator.serialize_state(output) {
+        Ok(()) => true,
+        Err(error) => {
+            log::error!("Failed to serialize state: {error}");
+            false
+        }
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn retro_unserialize(_data: *const c_void, _size: usize) -> bool {
-    false
+pub extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> bool {
+    let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
+        return false;
+    };
+    if data.is_null() || size < emulator.serialized_state_size() {
+        return false;
+    }
+    let input = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) };
+    match emulator.unserialize_state(input) {
+        Ok(()) => {
+            apply_core_options(emulator);
+            true
+        }
+        Err(error) => {
+            log::error!("Failed to unserialize state: {error}");
+            false
+        }
+    }
 }
 
 #[no_mangle]
@@ -739,6 +768,24 @@ mod tests {
             assert!(emulator.is_running());
             assert_eq!(emulator.input.buttons(), BUTTON_A | BUTTON_START);
             emulator.memory.write_u32(0x1000, 0x1234_5678).unwrap();
+        }
+
+        let mut state = vec![0u8; retro_serialize_size()];
+        assert!(retro_serialize(state.as_mut_ptr().cast(), state.len()));
+        unsafe {
+            EMULATOR
+                .as_mut()
+                .unwrap()
+                .memory
+                .write_u32(0x1000, 0)
+                .unwrap();
+        }
+        assert!(retro_unserialize(state.as_ptr().cast(), state.len()));
+        unsafe {
+            assert_eq!(
+                EMULATOR.as_ref().unwrap().memory.read_u32(0x1000).unwrap(),
+                0x1234_5678
+            );
         }
 
         retro_reset();

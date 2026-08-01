@@ -1,7 +1,7 @@
 use crate::error::{Result, SimulatorError};
 use crate::memory::Memory;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UnknownInstructionPolicy {
     Stop,
     #[default]
@@ -9,7 +9,7 @@ pub enum UnknownInstructionPolicy {
 }
 
 /// MIPS32 register file
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Registers {
     /// General purpose registers (R0-R31)
     /// R0 is hardwired to zero
@@ -54,6 +54,7 @@ impl Registers {
 }
 
 /// MIPS32 CPU for Dingoo A320 (Ingenic JZ4740 XBurst)
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cpu {
     /// Register file
     pub regs: Registers,

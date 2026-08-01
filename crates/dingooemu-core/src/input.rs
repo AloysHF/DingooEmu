@@ -13,6 +13,7 @@ pub const BUTTON_L: u32 = 1 << 8;
 pub const BUTTON_R: u32 = 1 << 29;
 
 /// Input subsystem
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Input {
     /// Current button state (bitmask)
     buttons: u32,
