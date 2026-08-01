@@ -46,21 +46,14 @@ installation, keyboard controls, screenshot mode, and all command-line options.
 
 ### RetroArch Mode
 
-Build the libretro core and load it in RetroArch:
+<!-- TODO: Publish DingooEmu in the official RetroArch Core Downloader index. -->
 
-```bash
-cargo build -p dingooemu-libretro --release
-```
-
-The core file will be produced at `target/release/dingooemu_libretro.dll`
-(Windows) or `libdingooemu_libretro.so` (Linux). Basic gameplay features are
-available, including live volume, input-repeat, A/B layout, logging, and
-unknown-instruction core options, save states, and frontend cheat slots.
-Guest-created save files persist in RetroArch's configured save directory.
-System RAM and video RAM are exposed to compatible frontend tools.
+Install **Dingoo A320 (DingooEmu)** from RetroArch's Core Downloader, or
+install the release files manually, then load a `.app` game through
+**Load Content**.
 
 See the [RetroArch Core](docs/RetroArch-Core.md) guide for installation,
-supported features, and RetroPad mapping.
+supported platforms and features, RetroPad mapping, core options, and cheats.
 
 ## Building
 
@@ -71,9 +64,11 @@ Requires [Rust](https://www.rust-lang.org/tools/install) (stable).
 ```bash
 cargo build -p dingooemu --release
 cargo run -p dingooemu --release -- path/to/game.app
+cargo run -p dingooemu --release -- --fullscreen path/to/game.app
 ```
 
-The binary is produced at `target/release/dingooemu` (`.exe` on Windows).
+The binary is produced at `target/release/dingoo-emu` (`dingoo-emu.exe` on
+Windows).
 
 ### Libretro Core (for RetroArch)
 
@@ -81,9 +76,16 @@ The binary is produced at `target/release/dingooemu` (`.exe` on Windows).
 cargo build -p dingooemu-libretro --release
 ```
 
-Cargo names the cdylib after its lib target, producing
-`dingooemu_libretro.dll` on Windows (`libdingooemu_libretro.so` on Linux)
-under `target/release/`.
+Cargo names the cdylib after its lib target, so this produces
+`dingooemu_libretro.dll` on Windows, `libdingooemu_libretro.so` on Linux, or
+`libdingooemu_libretro.dylib` on macOS under `target/release/`. RetroArch
+expects the core file to be named `dingooemu_libretro.<ext>`, so remove the
+leading `lib` from the Linux or macOS output before copying it into
+RetroArch's `cores/` directory.
+
+For Android cross-compilation, see
+[Android Libretro Core](docs/Android-Libretro-Core.md). For iOS, see
+[iOS Libretro Core](docs/iOS-Libretro-Core.md).
 
 ## Testing
 
@@ -130,13 +132,15 @@ crates/
 
 ## Game Compatibility
 
-🚧 **Under Active Development**
+The current compatibility suite contains 36 documented `.app` entries. Each
+entry is smoke-tested for startup and initial rendering; this does not imply
+complete gameplay, audio, or save-data compatibility.
 
-This project is in early development. The basic architecture is being established, and simple `.app` titles can now reach the rendering path. Compatibility remains experimental.
-
-| Category | Count | Status |
-|----------|-------|--------|
-| Verified Games | 8 | ⚠️ Partial |
+| Result | Count | Status |
+|--------|-------|--------|
+| Renders a non-black frame | 35 | ✅ Pass |
+| Black screen or crash | 1 | ❌ Fail |
+| **Total** | **36** | **⚠️ Experimental** |
 
 For detailed game list with screenshots and descriptions, see [Game Compatibility](docs/Game-Compatibility.md).
 

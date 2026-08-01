@@ -6,13 +6,27 @@ supported frontend features, and controls.
 
 ## Installation
 
+### Online Updater
+
+<!-- TODO: Publish DingooEmu in the official RetroArch Core Downloader index. -->
+
+1. Open RetroArch.
+2. Go to **Main Menu > Online Updater > Core Downloader**.
+3. Select **Dingoo A320 (DingooEmu)**.
+
 ### Manual Installation
 
 Download the core from the
-[Releases](https://github.com/jiangxincode/DingooEmu/releases) page. Copy
-`dingooemu_libretro.dll` (`.so` on Linux or `.dylib` on macOS) to
-RetroArch's `cores/` directory, and copy `dingooemu_libretro.info` to its
+[Releases](https://github.com/jiangxincode/DingooEmu/releases) page and extract
+the archive for your operating system and CPU architecture. Copy the core file
+to RetroArch's `cores/` directory, and copy `dingooemu_libretro.info` to its
 `info/` directory.
+
+| Platform | Core file |
+|---|---|
+| Windows | `dingooemu_libretro.dll` |
+| Linux | `dingooemu_libretro.so` |
+| macOS | `dingooemu_libretro.dylib` |
 
 ### Building from Source
 
@@ -21,8 +35,20 @@ cargo build -p dingooemu-libretro --release
 ```
 
 Cargo names the cdylib after its lib target, producing
-`dingooemu_libretro.dll` on Windows (`libdingooemu_libretro.so` on Linux)
-under `target/release/`.
+`dingooemu_libretro.dll` on Windows, `libdingooemu_libretro.so` on Linux, or
+`libdingooemu_libretro.dylib` on macOS under `target/release/`. Rename the
+Linux or macOS output to remove the leading `lib` before copying it into
+RetroArch's `cores/` directory.
+
+## Supported Platforms
+
+| Platform | Architectures | Distribution |
+|---|---|---|
+| Windows | x86_64 | Core Downloader or release archive |
+| Linux | x86_64, aarch64 | Core Downloader or release archive |
+| macOS | x86_64, Apple silicon | Core Downloader or release archive |
+| Android | arm64-v8a, armeabi-v7a, x86, x86_64 | See the Android guide |
+| iOS | arm64 devices, Apple silicon simulator | See the iOS guide |
 
 ## Mobile Platforms
 

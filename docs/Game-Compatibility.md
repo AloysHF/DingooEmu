@@ -50,8 +50,3 @@ scenario that has been verified and do not imply complete gameplay support.
 |--------|---------|
 | ✅ Pass | Renders correctly (not black screen) |
 | ❌ Fail | Black screen or crashes |
-
-## Game Notes
-
-- Snake starts with its in-game sound setting disabled. On the title menu,
-  select `Sound: Off` and confirm it to enable music and sound effects.
