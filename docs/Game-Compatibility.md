@@ -8,7 +8,7 @@ release batch produced unified JSON and CSV results with 32/32 L0 passes and
 32/32 L1 passes. L0 means the content loaded and emitted valid diagnostics for
 the requested capture. L1 additionally means every requested frame completed,
 a screenshot was produced, and the RGB565 framebuffer was neither black nor a
-single solid color. Twelve representative games also pass L2: versioned per-frame
+single solid color. Thirteen representative games also pass L2: versioned per-frame
 button scripts reach exact RGB565 framebuffer CRC32 checkpoints that differ
 from same-frame no-input controls. Five of those games pass L3 by matching an
 exact non-silent guest PCM stream, its declared format, and bounded virtual
@@ -22,6 +22,11 @@ PCM metrics, queue evidence, and unknown HLE summaries. L2 proves only the
 named interaction shown in the table. L3 proves only the configured guest PCM
 stream; host-device playback, save data, extended gameplay, and full completion
 still require separate verification.
+
+Overlord Fighter's L2 scenario verifies the guest window-manager input path:
+one focused-window confirm-key transition leaves the title menu and reaches the
+character-selection screen. This scenario previously remained unchanged because
+the window callback was never registered or dispatched.
 
 GooPlayer's content-discovery check confirms that its startup scan finds the
 three companion tracker files in the game directory and opens the playlist
@@ -48,7 +53,7 @@ playback and verifies 44.1 kHz stereo PCM evidence.
 | Mine Sweeper | 扫雷 | `tmp/dingoo_game/Mine Sweeper.app` | ![Mine-Sweeper](images/Mine_Sweeper.png) | ✅ L2 |
 | Mushroom Roulette | 蘑菇轮盘 | `tmp/dingoo_game/Mushroom Roulette.app` | ![Mushroom-Roulette](images/Mushroom_Roulette.png) | ✅ Pass |
 | Nose Breaker | 破鼻者 | `tmp/dingoo_game/Nose Breaker.app` | ![Nose-Breaker](images/Nose_Breaker.png) | ✅ Pass |
-| Overlord Fighter | 霸王战纪 | `tmp/dingoo_game/Overlord-Fighter.app` | ![Overlord-Fighter](images/Overlord-Fighter.png) | ✅ Pass |
+| Overlord Fighter | 霸王战纪 | `tmp/dingoo_game/Overlord-Fighter.app` | ![Overlord-Fighter](images/Overlord-Fighter.png) | ✅ L2 |
 | Platinum Sudoku | 白金数独 | `tmp/dingoo_game/Platinum Sudoku.app` | ![Platinum-Sudoku](images/Platinum_Sudoku.png) | ✅ L2 |
 | Puzzle Bobble | 泡泡龙 | `tmp/dingoo_game/Puzzle Bobble.app` | ![Puzzle-Bobble](images/Puzzle_Bobble.png) | ✅ L2 |
 | Rick Dangerous | 里克危险 | `tmp/dingoo_game/Rick-Dangerous.app` | ![Rick-Dangerous](images/Rick-Dangerous.png) | ✅ Pass |

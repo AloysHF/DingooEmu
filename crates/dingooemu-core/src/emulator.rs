@@ -70,6 +70,31 @@ struct FileSearch {
     next_index: usize,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct GuiState {
+    key_messages_enabled: bool,
+    windows: BTreeMap<u32, u32>,
+    focused_window: Option<u32>,
+    next_window_handle: u32,
+    reported_key: u32,
+    message_buffer: Option<u32>,
+    key_info_buffer: Option<u32>,
+}
+
+impl Default for GuiState {
+    fn default() -> Self {
+        Self {
+            key_messages_enabled: false,
+            windows: BTreeMap::new(),
+            focused_window: None,
+            next_window_handle: 1,
+            reported_key: 0,
+            message_buffer: None,
+            key_info_buffer: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum TaskWait {
     AudioWrite,
@@ -102,6 +127,7 @@ struct EmulatorStateRef<'a> {
     open_files: HashMap<u32, OpenFile>,
     next_file_handle: u32,
     file_searches: &'a HashMap<u32, FileSearch>,
+    gui: &'a GuiState,
     app_main_args_initialized: bool,
     locale_ansi_buffer: Option<u32>,
     framebuffer_submitted: bool,
@@ -125,6 +151,7 @@ struct EmulatorState {
     open_files: HashMap<u32, OpenFile>,
     next_file_handle: u32,
     file_searches: HashMap<u32, FileSearch>,
+    gui: GuiState,
     app_main_args_initialized: bool,
     locale_ansi_buffer: Option<u32>,
     framebuffer_submitted: bool,
@@ -215,6 +242,8 @@ pub struct Emulator {
     next_file_handle: u32,
     /// Active file searches keyed by the guest find-data address
     file_searches: HashMap<u32, FileSearch>,
+    /// Minimal window-manager state used to deliver guest key messages
+    gui: GuiState,
     /// AppMain export address
     app_main_entry: Option<u32>,
     /// AppMain startup check hook address
@@ -353,6 +382,7 @@ impl Emulator {
             save_directory,
             next_file_handle: 1,
             file_searches: HashMap::new(),
+            gui: GuiState::default(),
             app_main_entry,
             app_main_init_check_address: app_main_entry.map(|addr| addr.wrapping_add(0x34)),
             app_main_args_initialized: false,
@@ -546,6 +576,7 @@ impl Emulator {
             open_files,
             next_file_handle: self.next_file_handle,
             file_searches: &self.file_searches,
+            gui: &self.gui,
             app_main_args_initialized: self.app_main_args_initialized,
             locale_ansi_buffer: self.locale_ansi_buffer,
             framebuffer_submitted: self.framebuffer_submitted,
@@ -616,6 +647,7 @@ impl Emulator {
         replacement.open_files = state.open_files;
         replacement.next_file_handle = state.next_file_handle;
         replacement.file_searches = state.file_searches;
+        replacement.gui = state.gui;
         replacement.app_main_args_initialized = state.app_main_args_initialized;
         replacement.locale_ansi_buffer = state.locale_ansi_buffer;
         replacement.framebuffer_submitted = state.framebuffer_submitted;
@@ -1729,6 +1761,7 @@ impl Default for Emulator {
             save_directory: None,
             next_file_handle: 1,
             file_searches: HashMap::new(),
+            gui: GuiState::default(),
             app_main_entry: None,
             app_main_init_check_address: None,
             app_main_args_initialized: false,
@@ -1961,6 +1994,47 @@ mod tests {
 
         invoke_sdk_import(&mut emu, 0x1014, "get_dl_handle");
         assert_eq!(emu.cpu.regs.read(2), 0);
+    }
+
+    #[test]
+    fn test_gui_exec_dispatches_key_transitions_to_focused_guest_window() {
+        let mut emu = Emulator::default();
+        let return_address = 0x9000;
+        let callback = 0x4000;
+        let stack_pointer = 0x3000;
+        emu.cpu.regs.write(29, stack_pointer);
+        emu.cpu.regs.write(31, return_address);
+        emu.memory.write_u32(stack_pointer + 20, callback).unwrap();
+
+        invoke_sdk_import(&mut emu, 0x1100, "WM_CreateWindow");
+        let window = emu.cpu.regs.read(2);
+        assert_ne!(window, 0);
+
+        emu.cpu.regs.write(4, window);
+        invoke_sdk_import(&mut emu, 0x1104, "WM_SetFocus");
+        invoke_sdk_import(&mut emu, 0x1108, "open_gui_key_msg");
+
+        emu.set_buttons(crate::input::BUTTON_RIGHT);
+        invoke_sdk_import(&mut emu, 0x110c, "GUI_Exec");
+        assert_eq!(emu.cpu.regs.pc, callback);
+        assert_eq!(emu.cpu.regs.read(31), return_address);
+        let message = emu.cpu.regs.read(4);
+        assert_eq!(emu.memory.read_u32(message).unwrap(), 14);
+        assert_eq!(emu.memory.read_u32(message + 4).unwrap(), window);
+        let key_info = emu.memory.read_u32(message + 8).unwrap();
+        assert_eq!(emu.memory.read_u32(key_info).unwrap(), 18);
+        assert_eq!(emu.memory.read_u32(key_info + 4).unwrap(), 1);
+
+        emu.cpu.regs.write(31, return_address);
+        invoke_sdk_import(&mut emu, 0x110c, "GUI_Exec");
+        assert_eq!(emu.cpu.regs.pc, return_address);
+
+        emu.set_buttons(0);
+        emu.cpu.regs.write(31, return_address);
+        invoke_sdk_import(&mut emu, 0x110c, "GUI_Exec");
+        assert_eq!(emu.cpu.regs.pc, callback);
+        assert_eq!(emu.memory.read_u32(key_info).unwrap(), 18);
+        assert_eq!(emu.memory.read_u32(key_info + 4).unwrap(), 0);
     }
 
     #[test]
@@ -2436,6 +2510,13 @@ mod tests {
                 next_index: 1,
             },
         );
+        emu.gui.key_messages_enabled = true;
+        emu.gui.windows.insert(3, 0x8000_4000);
+        emu.gui.focused_window = Some(3);
+        emu.gui.next_window_handle = 4;
+        emu.gui.reported_key = 18;
+        emu.gui.message_buffer = Some(0x2100);
+        emu.gui.key_info_buffer = Some(0x2200);
 
         let mut state = vec![0; emu.serialized_state_size()];
         emu.serialize_state(&mut state).unwrap();
@@ -2445,6 +2526,7 @@ mod tests {
         emu.frame_count = 0;
         emu.open_files.clear();
         emu.file_searches.clear();
+        emu.gui = GuiState::default();
 
         emu.unserialize_state(&state).unwrap();
         assert_eq!(emu.cpu.regs.read(8), 0x1234_5678);
@@ -2456,6 +2538,13 @@ mod tests {
         assert_eq!(emu.open_files[&7].data, b"open save data");
         assert_eq!(emu.file_searches[&0x3000].next_index, 1);
         assert_eq!(emu.file_searches[&0x3000].entries[1], "second.xm");
+        assert!(emu.gui.key_messages_enabled);
+        assert_eq!(emu.gui.windows[&3], 0x8000_4000);
+        assert_eq!(emu.gui.focused_window, Some(3));
+        assert_eq!(emu.gui.next_window_handle, 4);
+        assert_eq!(emu.gui.reported_key, 18);
+        assert_eq!(emu.gui.message_buffer, Some(0x2100));
+        assert_eq!(emu.gui.key_info_buffer, Some(0x2200));
         assert_eq!(
             emu.open_files[&7].save_path.as_deref(),
             Some(save_directory.join("profile.dat").as_path())

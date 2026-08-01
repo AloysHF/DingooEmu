@@ -4,6 +4,7 @@ use crate::error::Result;
 mod audio;
 mod files;
 mod graphics;
+mod gui;
 mod input;
 mod system;
 mod tasks;
@@ -13,12 +14,14 @@ pub(super) enum HandlerResult {
     NotHandled,
     Complete,
     Deferred,
+    GuestCallback,
 }
 
 type Handler = fn(&mut Emulator, &str) -> Result<HandlerResult>;
 
-const HANDLERS: [Handler; 6] = [
+const HANDLERS: [Handler; 7] = [
     graphics::handle,
+    gui::handle,
     input::handle,
     audio::handle,
     files::handle,
@@ -41,6 +44,7 @@ pub(super) fn dispatch(emu: &mut Emulator, addr: u32, func_name: &str) -> Result
     match result {
         HandlerResult::Complete => emu.cpu.regs.pc = return_address,
         HandlerResult::Deferred => {}
+        HandlerResult::GuestCallback => {}
         HandlerResult::NotHandled => {
             emu.record_unknown_hle(func_name, addr, return_address)?;
             emu.cpu.regs.write(2, 0);

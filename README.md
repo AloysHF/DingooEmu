@@ -21,7 +21,7 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 
 - **MIPS32 CPU interpreter** — Ingenic JZ4740 XBurst compatible instruction set
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
-- **HLE (High-Level Emulation)** — Dingoo SDK functions for graphics, input, audio, timing, files, and companion-content discovery implemented in Rust
+- **HLE (High-Level Emulation)** — Dingoo SDK functions for graphics, focused-window key callbacks, audio, timing, files, and companion-content discovery implemented in Rust
 - **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and produce machine-graded L0/L1/L2/L3 JSON and CSV reports with deterministic input and PCM checkpoints
 - **`.app` file support** — Parse and load Dingoo A320 game container format
 - **Frame rendering** — 320×240 RGB565 framebuffer with XRGB8888 output
@@ -115,6 +115,7 @@ crates/
 │       │   └── sdk_hle/         # Runtime SDK dispatch and implementations
 │       │       ├── mod.rs       # Single HLE dispatcher
 │       │       ├── graphics.rs  # LCD and framebuffer calls
+│       │       ├── gui.rs       # Focused-window key message dispatch
 │       │       ├── input.rs     # Buttons and input events
 │       │       ├── audio.rs     # PCM and wave output
 │       │       ├── files.rs     # Resources, files, and saves
@@ -145,7 +146,7 @@ crates/
 
 The current compatibility suite contains 32 documented `.app` entries. Every
 entry is automatically graded for loading (L0) and initial rendering (L1).
-Twelve representative games also replay versioned per-frame button scripts and
+Thirteen representative games also replay versioned per-frame button scripts and
 match exact RGB565 framebuffer checkpoints against distinct no-input controls
 (L2). Five of those games additionally match deterministic non-silent guest
 PCM, exact audio formats, and bounded queue evidence (L3). These levels prove
@@ -156,8 +157,8 @@ gameplay, host-device playback, or save-data compatibility.
 |--------|-------|--------|
 | L0: loads and emits valid diagnostics | 32 | ✅ Pass |
 | L1: completes capture with a non-black, non-solid frame | 32 | ✅ Pass |
-| L2: scripted input reaches exact checkpoints | 12 | ✅ Pass |
-| L2: not yet tested | 20 | ⚪ Pending |
+| L2: scripted input reaches exact checkpoints | 13 | ✅ Pass |
+| L2: not yet tested | 19 | ⚪ Pending |
 | L3: deterministic non-silent PCM matches | 5 | ✅ Pass |
 | L3: not yet tested | 27 | ⚪ Pending |
 | **Total** | **32** | **⚠️ Experimental** |

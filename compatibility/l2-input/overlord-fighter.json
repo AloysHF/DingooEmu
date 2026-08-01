@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "content": "Overlord-Fighter.app",
+  "relative_path": "Overlord-Fighter.app",
+  "content_sha256": "a4414f0d7f7add4fbef2c81b062dd245b24933a3d5e0b7795b0e2ec9f2a68fbf",
+  "frames": 120,
+  "events": [
+    { "frame": 40, "buttons": ["a"] },
+    { "frame": 45, "buttons": [] }
+  ],
+  "checkpoints": [
+    { "name": "character-selection-reached", "frame": 120, "expected_framebuffer_crc32": "74b71e8b", "control_framebuffer_crc32": "d7d5e307" }
+  ]
+}

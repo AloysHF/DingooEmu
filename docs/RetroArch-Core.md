@@ -92,10 +92,10 @@ core resets or unloads content.
 
 RetroArch save and load state commands capture the complete mutable CPU,
 memory, video, input, audio, scheduler, semaphore, and open-file state. Each
-state also preserves active file enumeration and contains a format version,
-content checksum, payload length, and payload checksum. States for different
-content and damaged or incompatible states are rejected without changing the
-running emulator.
+state also preserves active file enumeration and focused-window input dispatch,
+and contains a format version, content checksum, payload length, and payload
+checksum. States for different content and damaged or incompatible states are
+rejected without changing the running emulator.
 
 ## Cheats
 
