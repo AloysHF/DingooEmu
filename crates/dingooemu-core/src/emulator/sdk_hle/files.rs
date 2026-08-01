@@ -104,6 +104,28 @@ pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResul
             emu.cpu.regs.write(2, written);
             log::trace!("  {func_name}() = {written}");
         }
+        "fsys_findfirst" => {
+            let pattern = emu.read_guest_c_string(emu.cpu.regs.read(4));
+            let attributes = emu.cpu.regs.read(5);
+            let data_ptr = emu.cpu.regs.read(6);
+            let result = emu.begin_file_search(&pattern, attributes, data_ptr)?;
+            emu.cpu.regs.write(2, result);
+            log::trace!(
+                "  fsys_findfirst({pattern}, {attributes:#x}, {data_ptr:#010x}) = {result:#010x}"
+            );
+        }
+        "fsys_findnext" => {
+            let data_ptr = emu.cpu.regs.read(4);
+            let result = emu.next_file_search(data_ptr)?;
+            emu.cpu.regs.write(2, result);
+            log::trace!("  fsys_findnext({data_ptr:#010x}) = {result:#010x}");
+        }
+        "fsys_findclose" => {
+            let data_ptr = emu.cpu.regs.read(4);
+            let result = emu.close_file_search(data_ptr);
+            emu.cpu.regs.write(2, result);
+            log::trace!("  fsys_findclose({data_ptr:#010x}) = {result}");
+        }
         _ => return Ok(HandlerResult::NotHandled),
     }
     Ok(HandlerResult::Complete)

@@ -23,6 +23,8 @@ const TASK_QUANTUM_CYCLES: u64 = 4_096;
 const TASK_RETURN_ADDRESS: u32 = u32::MAX;
 const MAX_GUEST_TASKS: usize = 16;
 const HOOK_FILTER_WORDS: usize = 1_024;
+const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
+const FILE_SEARCH_NAME_CAPACITY: usize = 256;
 
 fn hook_filter_location(address: u32) -> (usize, u64) {
     let bit_index = (address as usize >> 2) & (HOOK_FILTER_WORDS * u64::BITS as usize - 1);
@@ -40,6 +42,12 @@ struct OpenFile {
     save_path: Option<PathBuf>,
     writable: bool,
     dirty: bool,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct FileSearch {
+    entries: Vec<String>,
+    next_index: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -73,6 +81,7 @@ struct EmulatorStateRef<'a> {
     next_semaphore_handle: u32,
     open_files: HashMap<u32, OpenFile>,
     next_file_handle: u32,
+    file_searches: &'a HashMap<u32, FileSearch>,
     app_main_args_initialized: bool,
     locale_ansi_buffer: Option<u32>,
     framebuffer_submitted: bool,
@@ -95,6 +104,7 @@ struct EmulatorState {
     next_semaphore_handle: u32,
     open_files: HashMap<u32, OpenFile>,
     next_file_handle: u32,
+    file_searches: HashMap<u32, FileSearch>,
     app_main_args_initialized: bool,
     locale_ansi_buffer: Option<u32>,
     framebuffer_submitted: bool,
@@ -177,6 +187,8 @@ pub struct Emulator {
     save_directory: Option<PathBuf>,
     /// Next guest file handle
     next_file_handle: u32,
+    /// Active file searches keyed by the guest find-data address
+    file_searches: HashMap<u32, FileSearch>,
     /// AppMain export address
     app_main_entry: Option<u32>,
     /// AppMain startup check hook address
@@ -311,6 +323,7 @@ impl Emulator {
             open_files: HashMap::new(),
             save_directory,
             next_file_handle: 1,
+            file_searches: HashMap::new(),
             app_main_entry,
             app_main_init_check_address: app_main_entry.map(|addr| addr.wrapping_add(0x34)),
             app_main_args_initialized: false,
@@ -428,6 +441,7 @@ impl Emulator {
             next_semaphore_handle: self.next_semaphore_handle,
             open_files,
             next_file_handle: self.next_file_handle,
+            file_searches: &self.file_searches,
             app_main_args_initialized: self.app_main_args_initialized,
             locale_ansi_buffer: self.locale_ansi_buffer,
             framebuffer_submitted: self.framebuffer_submitted,
@@ -488,6 +502,7 @@ impl Emulator {
         replacement.next_semaphore_handle = state.next_semaphore_handle;
         replacement.open_files = state.open_files;
         replacement.next_file_handle = state.next_file_handle;
+        replacement.file_searches = state.file_searches;
         replacement.app_main_args_initialized = state.app_main_args_initialized;
         replacement.locale_ansi_buffer = state.locale_ansi_buffer;
         replacement.framebuffer_submitted = state.framebuffer_submitted;
@@ -1065,6 +1080,109 @@ impl Emulator {
         Path::new(&app_directory).join(path)
     }
 
+    fn begin_file_search(&mut self, pattern: &str, attributes: u32, data_ptr: u32) -> Result<u32> {
+        self.file_searches.remove(&data_ptr);
+        if data_ptr == 0 {
+            return Ok(u32::MAX);
+        }
+
+        let Some(entries) = self.collect_file_search_entries(pattern, attributes) else {
+            return Ok(u32::MAX);
+        };
+        let Some(first) = entries.first().cloned() else {
+            return Ok(u32::MAX);
+        };
+
+        self.write_file_search_name(data_ptr, &first)?;
+        self.file_searches.insert(
+            data_ptr,
+            FileSearch {
+                entries,
+                next_index: 1,
+            },
+        );
+        Ok(0)
+    }
+
+    fn next_file_search(&mut self, data_ptr: u32) -> Result<u32> {
+        let Some(name) = self.file_searches.get_mut(&data_ptr).and_then(|search| {
+            let name = search.entries.get(search.next_index)?.clone();
+            search.next_index += 1;
+            Some(name)
+        }) else {
+            return Ok(u32::MAX);
+        };
+
+        self.write_file_search_name(data_ptr, &name)?;
+        Ok(0)
+    }
+
+    fn close_file_search(&mut self, data_ptr: u32) -> u32 {
+        self.file_searches.remove(&data_ptr);
+        0
+    }
+
+    fn collect_file_search_entries(&self, pattern: &str, attributes: u32) -> Option<Vec<String>> {
+        let normalized = normalize_guest_search_pattern(pattern)?;
+        let (directory, file_pattern) = normalized
+            .rsplit_once('/')
+            .map_or(("", normalized.as_str()), |(directory, pattern)| {
+                (directory, pattern)
+            });
+        let file_pattern = if file_pattern.is_empty() {
+            "*"
+        } else {
+            file_pattern
+        };
+
+        let app_directory = Path::new(&self.app_path).parent().unwrap_or(Path::new("."));
+        let search_directory = if directory.is_empty() {
+            app_directory.to_path_buf()
+        } else {
+            app_directory.join(directory.replace('/', std::path::MAIN_SEPARATOR_STR))
+        };
+        let root = app_directory.canonicalize().ok()?;
+        let search_directory = search_directory.canonicalize().ok()?;
+        if !search_directory.starts_with(&root) {
+            return None;
+        }
+
+        let find_directories = attributes & 0x10 != 0;
+        let mut entries = std::fs::read_dir(search_directory)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let file_type = entry.file_type().ok()?;
+                if (find_directories && !file_type.is_dir())
+                    || (!find_directories && !file_type.is_file())
+                {
+                    return None;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                wildcard_matches(file_pattern, &name).then_some(name)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.to_ascii_lowercase()
+                .cmp(&right.to_ascii_lowercase())
+                .then_with(|| left.cmp(right))
+        });
+        Some(entries)
+    }
+
+    fn write_file_search_name(&mut self, data_ptr: u32, name: &str) -> Result<()> {
+        let name = name.as_bytes();
+        let length = name.len().min(FILE_SEARCH_NAME_CAPACITY - 1);
+        let destination = data_ptr.wrapping_add(FILE_SEARCH_NAME_OFFSET);
+        for (offset, byte) in name.iter().copied().take(length).enumerate() {
+            self.memory
+                .write_u8(destination.wrapping_add(offset as u32), byte)?;
+        }
+        self.memory
+            .write_u8(destination.wrapping_add(length as u32), 0)?;
+        Ok(())
+    }
+
     fn open_memory_file(
         &mut self,
         data: Vec<u8>,
@@ -1411,6 +1529,64 @@ fn safe_relative_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
+fn normalize_guest_search_pattern(pattern: &str) -> Option<String> {
+    let mut normalized = pattern.replace('\\', "/");
+    if normalized.as_bytes().get(1) == Some(&b':')
+        && normalized
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+    {
+        normalized.drain(..2);
+    }
+    let normalized = normalized.trim_start_matches('/');
+    let path = Path::new(normalized);
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return None;
+    }
+    Some(normalized.to_string())
+}
+
+fn wildcard_matches(pattern: &str, name: &str) -> bool {
+    let pattern = if pattern.eq_ignore_ascii_case("*.*") {
+        "*"
+    } else {
+        pattern
+    };
+    let pattern = pattern.as_bytes();
+    let name = name.as_bytes();
+    let (mut pattern_index, mut name_index) = (0, 0);
+    let (mut star_index, mut retry_name_index) = (None, 0);
+
+    while name_index < name.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?'
+                || pattern[pattern_index].eq_ignore_ascii_case(&name[name_index]))
+        {
+            pattern_index += 1;
+            name_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            retry_name_index = name_index;
+        } else if let Some(star) = star_index {
+            retry_name_index += 1;
+            name_index = retry_name_index;
+            pattern_index = star + 1;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
+}
+
 impl Default for Emulator {
     fn default() -> Self {
         Self {
@@ -1435,6 +1611,7 @@ impl Default for Emulator {
             open_files: HashMap::new(),
             save_directory: None,
             next_file_handle: 1,
+            file_searches: HashMap::new(),
             app_main_entry: None,
             app_main_init_check_address: None,
             app_main_args_initialized: false,
@@ -1966,6 +2143,83 @@ mod tests {
     }
 
     #[test]
+    fn test_file_search_enumerates_matching_entries_and_terminates() {
+        let directory =
+            std::env::temp_dir().join(format!("dingooemu-file-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("Music")).unwrap();
+        std::fs::write(directory.join("Dn-Beyond.xm"), b"xm").unwrap();
+        std::fs::write(directory.join("Fountain.mod"), b"mod").unwrap();
+
+        let mut emu = Emulator::default();
+        emu.app_path = directory.join("GooPlayer.app").display().to_string();
+        emu.memory.load_data(0x100, b"*\0").unwrap();
+        emu.cpu.regs.write(4, 0x100);
+        emu.cpu.regs.write(5, 0x10);
+        emu.cpu.regs.write(6, 0x200);
+        invoke_sdk_import(&mut emu, 0x1000, "fsys_findfirst");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(
+            emu.read_guest_c_string(0x200 + FILE_SEARCH_NAME_OFFSET),
+            "Music"
+        );
+
+        emu.cpu.regs.write(4, 0x200);
+        invoke_sdk_import(&mut emu, 0x1004, "fsys_findnext");
+        assert_eq!(emu.cpu.regs.read(2), u32::MAX);
+
+        emu.cpu.regs.write(4, 0x100);
+        emu.cpu.regs.write(5, 0);
+        emu.cpu.regs.write(6, 0x300);
+        invoke_sdk_import(&mut emu, 0x1008, "fsys_findfirst");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(
+            emu.read_guest_c_string(0x300 + FILE_SEARCH_NAME_OFFSET),
+            "Dn-Beyond.xm"
+        );
+
+        emu.cpu.regs.write(4, 0x300);
+        invoke_sdk_import(&mut emu, 0x100c, "fsys_findnext");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(
+            emu.read_guest_c_string(0x300 + FILE_SEARCH_NAME_OFFSET),
+            "Fountain.mod"
+        );
+
+        emu.cpu.regs.write(4, 0x200);
+        invoke_sdk_import(&mut emu, 0x1010, "fsys_findclose");
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert!(!emu.file_searches.contains_key(&0x200));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_file_search_filters_wildcards_and_rejects_parent_paths() {
+        let directory =
+            std::env::temp_dir().join(format!("dingooemu-file-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("Track.XM"), b"xm").unwrap();
+        std::fs::write(directory.join("Track.mod"), b"mod").unwrap();
+
+        let mut emu = Emulator::default();
+        emu.app_path = directory.join("GooPlayer.app").display().to_string();
+        assert_eq!(emu.begin_file_search("*.xm", 0, 0x200).unwrap(), 0);
+        assert_eq!(
+            emu.read_guest_c_string(0x200 + FILE_SEARCH_NAME_OFFSET),
+            "Track.XM"
+        );
+        assert_eq!(emu.next_file_search(0x200).unwrap(), u32::MAX);
+        assert_eq!(
+            emu.begin_file_search("../*", 0x10, 0x300).unwrap(),
+            u32::MAX
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn test_save_state_round_trip_and_transactional_rejection() {
         let mut emu = Emulator::from_app(minimal_app()).unwrap();
         let save_directory = std::env::temp_dir().join("dingooemu-state-save-root");
@@ -1987,6 +2241,13 @@ mod tests {
                 dirty: true,
             },
         );
+        emu.file_searches.insert(
+            0x3000,
+            FileSearch {
+                entries: vec!["first.mod".to_string(), "second.xm".to_string()],
+                next_index: 1,
+            },
+        );
 
         let mut state = vec![0; emu.serialized_state_size()];
         emu.serialize_state(&mut state).unwrap();
@@ -1995,6 +2256,7 @@ mod tests {
         emu.input.set_buttons(0);
         emu.frame_count = 0;
         emu.open_files.clear();
+        emu.file_searches.clear();
 
         emu.unserialize_state(&state).unwrap();
         assert_eq!(emu.cpu.regs.read(8), 0x1234_5678);
@@ -2004,6 +2266,8 @@ mod tests {
         assert_eq!(emu.cycle_count, 987_654);
         assert!(emu.is_running());
         assert_eq!(emu.open_files[&7].data, b"open save data");
+        assert_eq!(emu.file_searches[&0x3000].next_index, 1);
+        assert_eq!(emu.file_searches[&0x3000].entries[1], "second.xm");
         assert_eq!(
             emu.open_files[&7].save_path.as_deref(),
             Some(save_directory.join("profile.dat").as_path())

@@ -10,6 +10,11 @@ because its startup sequence contains several timed splash screens. These
 results cover startup and initial rendering only; input, audio, save data, and
 full gameplay still require separate verification.
 
+GooPlayer has an additional content-discovery check: its startup scan finds the
+three companion tracker files in the game directory and opens the playlist
+instead of remaining on the title screen. Playback correctness is not yet part
+of this check.
+
 ## Verified Games
 
 | English Name | 中文名 | Filename | Screenshot | Status |
