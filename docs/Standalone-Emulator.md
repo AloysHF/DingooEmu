@@ -127,6 +127,13 @@ If the default output device cannot be opened, emulation continues without
 audio and logs a warning. When the output queue is full, the guest audio task
 waits and retries the same buffer so playback data is not skipped.
 
+## Game Save Files
+
+Files created through the emulated file API persist beside the loaded `.app`
+file. Guest subdirectories are supported, while parent-directory traversal is
+rejected. Modified files are flushed when the guest closes them and when the
+emulator stops or resets.
+
 ## Performance
 
 Use a release build for normal gameplay. The interpreter uses multi-cycle CPU

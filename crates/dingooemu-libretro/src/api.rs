@@ -139,6 +139,9 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
 
     match Emulator::from_path(path) {
         Ok(mut emulator) => {
+            if let Some(save_directory) = frontend_directory(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY) {
+                emulator.set_save_directory(save_directory);
+            }
             apply_core_options(&mut emulator);
             emulator.start();
             unsafe { EMULATOR = Some(emulator) };
@@ -163,6 +166,9 @@ pub extern "C" fn retro_load_game_special(
 
 #[no_mangle]
 pub extern "C" fn retro_unload_game() {
+    if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
+        emulator.flush_save_files();
+    }
     unsafe { EMULATOR = None };
 }
 
@@ -251,6 +257,17 @@ fn set_pixel_format() -> bool {
         RETRO_ENVIRONMENT_SET_PIXEL_FORMAT,
         (&mut format as *mut u32).cast(),
     )
+}
+
+fn frontend_directory(command: u32) -> Option<std::path::PathBuf> {
+    let mut value: *const c_char = ptr::null();
+    if !callbacks::environment(command, (&mut value as *mut *const c_char).cast())
+        || value.is_null()
+    {
+        return None;
+    }
+    let path = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    (!path.is_empty()).then(|| std::path::PathBuf::from(path.as_ref()))
 }
 
 fn set_performance_level() {
@@ -485,6 +502,7 @@ mod tests {
     static INPUT_POLLED: AtomicBool = AtomicBool::new(false);
     static VIDEO_WIDTH: AtomicU32 = AtomicU32::new(0);
     static AUDIO_BATCH_CALLED: AtomicBool = AtomicBool::new(false);
+    static SAVE_DIRECTORY: Mutex<Option<CString>> = Mutex::new(None);
 
     unsafe extern "C" fn test_environment(command: u32, data: *mut c_void) -> bool {
         match command {
@@ -502,6 +520,14 @@ mod tests {
             RETRO_ENVIRONMENT_SET_VARIABLES => true,
             RETRO_ENVIRONMENT_GET_VARIABLE | RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE => false,
             RETRO_ENVIRONMENT_GET_LOG_INTERFACE => false,
+            RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY => {
+                let directory = SAVE_DIRECTORY.lock().unwrap();
+                let Some(directory) = directory.as_ref() else {
+                    return false;
+                };
+                *data.cast::<*const c_char>() = directory.as_ptr();
+                true
+            }
             _ => false,
         }
     }
@@ -682,6 +708,8 @@ mod tests {
         ));
         std::fs::write(&path, minimal_app_bytes()).unwrap();
         let path_string = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        *SAVE_DIRECTORY.lock().unwrap() =
+            Some(CString::new(path.parent().unwrap().to_string_lossy().as_bytes()).unwrap());
         let info = RetroGameInfo {
             path: path_string.as_ptr(),
             data: ptr::null(),
@@ -723,6 +751,7 @@ mod tests {
         retro_unload_game();
         unsafe { assert!(EMULATOR.is_none()) };
         retro_deinit();
+        *SAVE_DIRECTORY.lock().unwrap() = None;
         std::fs::remove_file(path).unwrap();
     }
 }

@@ -45,11 +45,20 @@ platform-specific installation requirements:
 - RetroPad input handling
 - `.app` content loading
 - Cold reset through RetroArch's **Reset** command
+- Persistent guest save files in RetroArch's configured save directory
 - Live core options, including host master volume
 
 The current basic core does not yet provide save states, cheats, frontend
 memory exposure or subsystem loading. The metadata marks these
 features unavailable so RetroArch does not present unsupported capabilities.
+
+## Game Save Files
+
+Files created through the emulated file API are stored beneath RetroArch's
+configured save directory and reopened from there on later sessions. Guest
+paths are normalized inside that directory; parent-directory traversal is
+rejected. Modified files are flushed when the guest closes them and when the
+core resets or unloads content.
 
 ## Core Options
 

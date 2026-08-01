@@ -33,6 +33,9 @@ struct OpenFile {
     data: Vec<u8>,
     position: usize,
     data_ptr: u32,
+    save_path: Option<PathBuf>,
+    writable: bool,
+    dirty: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +124,8 @@ pub struct Emulator {
     hook_filter: Box<[u64]>,
     /// Open guest resource files
     open_files: HashMap<u32, OpenFile>,
+    /// Host directory used for persistent guest-created files
+    save_directory: Option<PathBuf>,
     /// Next guest file handle
     next_file_handle: u32,
     /// AppMain export address
@@ -234,6 +239,7 @@ impl Emulator {
             log::trace!("Hooked SDK import: {:#010x} = {}", addr, name);
         }
 
+        let save_directory = Path::new(&app_path).parent().map(Path::to_path_buf);
         Ok(Self {
             cpu,
             memory,
@@ -254,6 +260,7 @@ impl Emulator {
             hooked_addrs,
             hook_filter,
             open_files: HashMap::new(),
+            save_directory,
             next_file_handle: 1,
             app_main_entry,
             app_main_init_check_address: app_main_entry.map(|addr| addr.wrapping_add(0x34)),
@@ -302,18 +309,21 @@ impl Emulator {
 
     /// Stop the emulator
     pub fn stop(&mut self) {
+        self.flush_save_files();
         self.cpu.stop();
         log::info!("Emulator stopped");
     }
 
     /// Rebuild all mutable runtime state from the loaded app image.
     pub fn reset(&mut self) -> Result<()> {
+        self.flush_save_files();
         let app = self
             .app
             .clone()
             .ok_or_else(|| "cannot reset an emulator without a loaded app".to_string())?;
         let was_running = self.is_running();
         let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
+        replacement.save_directory = self.save_directory.clone();
         if was_running {
             replacement.start();
         }
@@ -839,6 +849,9 @@ impl Emulator {
                 data,
                 position: 0,
                 data_ptr: 0,
+                save_path: None,
+                writable: false,
+                dirty: false,
             },
         );
         log::trace!("Resource opened: {name} -> {handle} ({size} bytes)");
@@ -861,6 +874,9 @@ impl Emulator {
                 data,
                 position: 0,
                 data_ptr: 0,
+                save_path: None,
+                writable: false,
+                dirty: false,
             },
         );
         log::trace!("  host file open: {} -> {} ({} bytes)", name, handle, size);
@@ -882,24 +898,149 @@ impl Emulator {
         Path::new(&app_directory).join(path)
     }
 
-    fn open_memory_file(&mut self) -> u32 {
+    fn open_memory_file(
+        &mut self,
+        data: Vec<u8>,
+        save_path: PathBuf,
+        append: bool,
+        writable: bool,
+        dirty: bool,
+    ) -> u32 {
         let handle = self.next_file_handle;
         self.next_file_handle = self.next_file_handle.wrapping_add(1).max(1);
+        let position = if append { data.len() } else { 0 };
         self.open_files.insert(
             handle,
             OpenFile {
-                data: Vec::new(),
-                position: 0,
+                data,
+                position,
                 data_ptr: 0,
+                save_path: Some(save_path),
+                writable,
+                dirty,
             },
         );
         handle
+    }
+
+    fn save_file_path(&self, name: &str) -> Option<PathBuf> {
+        let root = self.save_directory.as_ref()?;
+        let normalized = name.replace('\\', "/");
+        let mut relative = PathBuf::new();
+        for (index, component) in normalized.split('/').enumerate() {
+            if component.is_empty() || component == "." {
+                continue;
+            }
+            if component == ".." || component.contains('\0') {
+                return None;
+            }
+            let component = if index == 0
+                && component.len() == 2
+                && component.as_bytes()[0].is_ascii_alphabetic()
+                && component.ends_with(':')
+            {
+                &component[..1]
+            } else {
+                component
+            };
+            if component.contains(':') {
+                return None;
+            }
+            relative.push(component);
+        }
+        (!relative.as_os_str().is_empty()).then(|| root.join(relative))
+    }
+
+    fn open_save_file(&mut self, name: &str, operation: u8, writable: bool) -> u32 {
+        let Some(path) = self.save_file_path(name) else {
+            log::warn!("Rejected guest save path: {name}");
+            return 0;
+        };
+        let data = match operation {
+            b'w' => Vec::new(),
+            b'a' | b'r' => match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(error) if operation == b'a' && error.kind() == std::io::ErrorKind::NotFound => {
+                    Vec::new()
+                }
+                Err(_) => return 0,
+            },
+            _ => return 0,
+        };
+        self.open_memory_file(
+            data,
+            path,
+            operation == b'a',
+            writable,
+            writable && operation != b'r',
+        )
+    }
+
+    fn open_guest_file(&mut self, name: &str, mode: &str) -> u32 {
+        let operation = mode.as_bytes().first().copied().unwrap_or(b'r');
+        let writable = operation == b'w' || operation == b'a' || mode.contains('+');
+        if writable {
+            let handle = self.open_save_file(name, operation, true);
+            if handle != 0 {
+                return handle;
+            }
+            if operation != b'r' {
+                return 0;
+            }
+        } else {
+            let handle = self.open_save_file(name, b'r', false);
+            if handle != 0 {
+                return handle;
+            }
+        }
+
+        match self.open_resource_file(name) {
+            0 => self.open_host_file(name),
+            handle => handle,
+        }
+    }
+
+    fn flush_save_file(&mut self, handle: u32) -> std::io::Result<()> {
+        let Some(file) = self.open_files.get_mut(&handle) else {
+            return Ok(());
+        };
+        if !file.dirty {
+            return Ok(());
+        }
+        let Some(path) = file.save_path.as_ref() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, &file.data)?;
+        file.dirty = false;
+        Ok(())
+    }
+
+    /// Flush all modified guest save files to the configured save directory.
+    pub fn flush_save_files(&mut self) {
+        let handles: Vec<u32> = self.open_files.keys().copied().collect();
+        for handle in handles {
+            if let Err(error) = self.flush_save_file(handle) {
+                log::error!("Failed to flush guest save file {handle}: {error}");
+            }
+        }
+    }
+
+    /// Set the directory used for persistent guest-created files.
+    pub fn set_save_directory<P: Into<PathBuf>>(&mut self, directory: P) {
+        self.flush_save_files();
+        self.save_directory = Some(directory.into());
     }
 
     fn read_file(&mut self, dest: u32, size: u32, count: u32, handle: u32) -> Result<u32> {
         let Some(file) = self.open_files.get_mut(&handle) else {
             return Ok(0);
         };
+        if !file.writable {
+            return Ok(0);
+        }
         let requested = (size as usize).saturating_mul(count as usize);
         if requested == 0 {
             return Ok(0);
@@ -940,6 +1081,7 @@ impl Emulator {
         }
         file.data[file.position..end].copy_from_slice(&data);
         file.position = end;
+        file.dirty = true;
 
         Ok(count)
     }
@@ -1367,29 +1509,7 @@ impl Emulator {
             "fopen" | "fsys_fopen" => {
                 let name = self.read_guest_c_string(self.cpu.regs.read(4));
                 let mode = self.read_guest_c_string(self.cpu.regs.read(5));
-                let operation = mode.as_bytes().first().copied().unwrap_or(b'r');
-                let handle = match operation {
-                    b'w' => self.open_memory_file(),
-                    b'a' => {
-                        let handle = match self.open_resource_file(&name) {
-                            0 => self.open_host_file(&name),
-                            handle => handle,
-                        };
-                        let handle = if handle == 0 {
-                            self.open_memory_file()
-                        } else {
-                            handle
-                        };
-                        if let Some(file) = self.open_files.get_mut(&handle) {
-                            file.position = file.data.len();
-                        }
-                        handle
-                    }
-                    _ => match self.open_resource_file(&name) {
-                        0 => self.open_host_file(&name),
-                        handle => handle,
-                    },
-                };
+                let handle = self.open_guest_file(&name, &mode);
                 self.cpu.regs.write(2, handle);
                 log::trace!("  {}({}, {}) = {}", func_name, name, mode, handle);
             }
@@ -1397,16 +1517,16 @@ impl Emulator {
                 let name = self.read_guest_w_string(self.cpu.regs.read(4));
                 let mode = self.read_guest_w_string(self.cpu.regs.read(5));
                 log::trace!("  fsys_fopenW({}, {})", name, mode);
-                let handle = match self.open_resource_file(&name) {
-                    0 => self.open_host_file(&name),
-                    handle => handle,
-                };
+                let handle = self.open_guest_file(&name, &mode);
                 self.cpu.regs.write(2, handle);
             }
             "fclose" | "fsys_fclose" | "fsys_fcloseW" => {
                 let handle = self.cpu.regs.read(4);
+                let result = self.flush_save_file(handle);
                 self.open_files.remove(&handle);
-                self.cpu.regs.write(2, 0);
+                self.cpu
+                    .regs
+                    .write(2, if result.is_ok() { 0 } else { u32::MAX });
             }
             "fread" | "fsys_fread" => {
                 let dest = self.cpu.regs.read(4);
@@ -1568,6 +1688,7 @@ impl Default for Emulator {
             hooked_addrs: HashMap::new(),
             hook_filter: vec![0; HOOK_FILTER_WORDS].into_boxed_slice(),
             open_files: HashMap::new(),
+            save_directory: None,
             next_file_handle: 1,
             app_main_entry: None,
             app_main_init_check_address: None,
@@ -1956,8 +2077,17 @@ mod tests {
     }
 
     #[test]
-    fn test_writable_file_is_buffered_in_memory() {
+    fn test_writable_file_persists_and_reopens() {
         let mut emu = Emulator::default();
+        let save_directory = std::env::temp_dir().join(format!(
+            "dingooemu-save-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        emu.set_save_directory(&save_directory);
         emu.memory.load_data(0x100, b"test.log\0").unwrap();
         emu.memory.load_data(0x120, b"w\0").unwrap();
         emu.memory.load_data(0x140, b"abcdef").unwrap();
@@ -1976,5 +2106,33 @@ mod tests {
 
         assert_eq!(emu.cpu.regs.read(2), 3);
         assert_eq!(emu.open_files[&handle].data, b"abcdef");
+
+        emu.cpu.regs.write(4, handle);
+        emu.handle_sdk_call(0, "fsys_fclose").unwrap();
+        assert_eq!(emu.cpu.regs.read(2), 0);
+        assert_eq!(
+            std::fs::read(save_directory.join("test.log")).unwrap(),
+            b"abcdef"
+        );
+
+        emu.memory.load_data(0x120, b"r\0").unwrap();
+        emu.cpu.regs.write(4, 0x100);
+        emu.cpu.regs.write(5, 0x120);
+        emu.handle_sdk_call(0, "fsys_fopen").unwrap();
+        let reopened = emu.cpu.regs.read(2);
+        assert_eq!(emu.open_files[&reopened].data, b"abcdef");
+
+        std::fs::remove_dir_all(save_directory).unwrap();
+    }
+
+    #[test]
+    fn test_guest_save_path_cannot_escape_save_directory() {
+        let mut emu = Emulator::default();
+        emu.set_save_directory(std::env::temp_dir().join("dingooemu-save-root"));
+
+        assert!(emu.save_file_path("save/profile.dat").is_some());
+        assert!(emu.save_file_path("A:\\save\\profile.dat").is_some());
+        assert!(emu.save_file_path("../outside.dat").is_none());
+        assert!(emu.save_file_path("save/../../outside.dat").is_none());
     }
 }

@@ -27,7 +27,7 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
 - **Screenshot mode** — Headless frame capture for automated testing and preview generation
 - **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`
-- **RetroArch integration** — libretro core with video, audio, RetroPad input, and reset support
+- **RetroArch integration** — libretro core with video, audio, RetroPad input, reset, and persistent game saves
 - **Cross-platform** — Windows, Linux, macOS
 
 ## Usage
@@ -55,8 +55,9 @@ cargo build -p dingooemu-libretro --release
 The core file will be produced at `target/release/dingooemu_libretro.dll`
 (Windows) or `libdingooemu_libretro.so` (Linux). Basic gameplay features are
 available, including live volume, input-repeat, A/B layout, logging, and
-unknown-instruction core options. Save states, cheats, and memory exposure are
-not yet implemented.
+unknown-instruction core options. Guest-created save files persist in
+RetroArch's configured save directory. Save states, cheats, and memory
+exposure are not yet implemented.
 
 See the [RetroArch Core](docs/RetroArch-Core.md) guide for installation,
 supported features, and RetroPad mapping.
