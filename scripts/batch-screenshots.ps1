@@ -92,7 +92,7 @@ function Get-CaptureFrames {
 
     switch ($RelativePath) {
         "7day.app" { return 30 }
-        "仙剑奇侠传\仙剑奇侠传.APP" { return 30 }
+        "仙剑奇侠传\仙剑奇侠传.APP" { return 1200 }
         "Decollation-Warrior.app" { return 30 }
         "Overlord-Fighter.app" { return 30 }
         "SameGoo\samegoo.app" { return 300 }

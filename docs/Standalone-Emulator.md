@@ -167,9 +167,9 @@ Build the standalone emulator and capture every `.app` file under
 pwsh -NoProfile -File scripts/batch-screenshots.ps1
 ```
 
-Screenshots are written to `docs/images`. The default capture point is 300
-frames, with shorter per-game overrides for titles that exceed the default
-timeout. Explicit parameters apply the requested values to every game:
+Screenshots are written to `docs/images`. The default capture point is 60
+frames, with per-game overrides for slow-starting or performance-sensitive
+titles. Explicit parameters apply the requested values to every game:
 
 ```powershell
 pwsh -NoProfile -File scripts/batch-screenshots.ps1 -Frames 60 -TimeoutSeconds 30

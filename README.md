@@ -138,8 +138,8 @@ complete gameplay, audio, or save-data compatibility.
 
 | Result | Count | Status |
 |--------|-------|--------|
-| Renders a non-black frame | 31 | ✅ Pass |
-| Black screen or crash | 1 | ❌ Fail |
+| Renders a non-black frame | 32 | ✅ Pass |
+| Black screen or crash | 0 | ❌ Fail |
 | **Total** | **32** | **⚠️ Experimental** |
 
 For detailed game list with screenshots and descriptions, see [Game Compatibility](docs/Game-Compatibility.md).

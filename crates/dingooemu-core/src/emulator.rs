@@ -16,6 +16,7 @@ const OS_TICKS_PER_SECOND: u64 = 100;
 const CYCLES_PER_FRAME: u64 = CPU_CLOCK_HZ / FRAMES_PER_SECOND;
 // Model the pipeline and memory stalls with a conservative average CPI.
 const CPU_CYCLES_PER_INSTRUCTION: u64 = 2;
+const STANDARD_APP_LOAD_BASE: u32 = 0x80A0_0000;
 const MAX_AUDIO_WRITE_BYTES: u32 = 4 * 1024 * 1024;
 const TASK_QUANTUM_CYCLES: u64 = 4_096;
 const TASK_RETURN_ADDRESS: u32 = u32::MAX;
@@ -238,7 +239,9 @@ impl Emulator {
             cpu.regs.write(31, app_main_entry);
             cpu.regs.write(25, app.entry_point());
         }
-        cpu.regs.write(5, 0);
+        // Older app layouts require the loader to request LCD initialization.
+        cpu.regs
+            .write(5, u32::from(load_base != STANDARD_APP_LOAD_BASE));
 
         // Initialize stack pointer to a reasonable value in RAM
         // Stack grows downward from top of RAM (32MB)
@@ -1925,6 +1928,17 @@ mod tests {
         let emu = Emulator::default();
         assert_eq!(emu.frame_count(), 0);
         assert!(!emu.is_running());
+    }
+
+    #[test]
+    fn test_legacy_load_base_requests_lcd_initialization() {
+        let legacy = Emulator::from_app(minimal_app()).unwrap();
+        assert_eq!(legacy.cpu.regs.read(5), 1);
+
+        let mut standard_app = minimal_app();
+        standard_app.rawd.origin = STANDARD_APP_LOAD_BASE;
+        let standard = Emulator::from_app(standard_app).unwrap();
+        assert_eq!(standard.cpu.regs.read(5), 0);
     }
 
     #[test]
