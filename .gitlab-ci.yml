@@ -1,0 +1,108 @@
+# DESCRIPTION: GitLab CI/CD for libRetro (NOT FOR GitLab-proper)
+#
+# This recipe is consumed by the Libretro buildbot so the DingooEmu core can
+# be distributed through RetroArch's Online Updater > Core Downloader.
+#
+# DingooEmu is written in Rust, so it uses the official Rust CI templates from
+# libretro-infrastructure/ci-templates. Those templates run
+# `cargo build --release --target <triple>` and rename the produced cdylib to
+# `${CORENAME}_libretro.<ext>`. The cdylib lib target is named `dingooemu`
+# (see crates/dingooemu-libretro/Cargo.toml) and the workspace `default-members`
+# is set to the libretro core, so the bare cargo build only builds the core.
+
+# Core definitions
+.core-defs:
+  variables:
+    CORENAME: dingooemu
+
+include:
+  # Windows 64-bit
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-windows-x64.yml'
+
+  # Linux 64-bit
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-linux-x64.yml'
+
+  # macOS/iOS/tvOS
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-apple.yml'
+
+  # Android
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-android-jni.yml'
+
+  # webOS
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/rust-webos.yml'
+
+stages:
+  - build-prepare
+  - build-shared
+  - build-static
+
+# Windows 64-bit
+libretro-build-windows-x64:
+  extends:
+    - .libretro-rust-windows-x64-default
+    - .core-defs
+
+# Linux 64-bit
+libretro-build-linux-x64:
+  extends:
+    - .libretro-rust-linux-x64-default
+    - .core-defs
+
+# macOS 64-bit
+libretro-build-osx-x64:
+  extends:
+    - .libretro-rust-osx-x86_64-default
+    - .core-defs
+
+# macOS ARM 64-bit
+libretro-build-osx-arm64:
+  extends:
+    - .libretro-rust-osx-arm64-default
+    - .core-defs
+
+# Android ARMv7a
+android-armeabi-v7a:
+  extends:
+    - .libretro-rust-android-jni-armeabi-v7a
+    - .core-defs
+
+# Android ARMv8a
+android-arm64-v8a:
+  extends:
+    - .libretro-rust-android-jni-arm64-v8a
+    - .core-defs
+
+# Android 64-bit x86
+android-x86_64:
+  extends:
+    - .libretro-rust-android-jni-x86_64
+    - .core-defs
+
+# Android 32-bit x86
+android-x86:
+  extends:
+    - .libretro-rust-android-jni-x86
+    - .core-defs
+
+# iOS
+libretro-build-ios-arm64:
+  extends:
+    - .libretro-rust-ios-arm64-default
+    - .core-defs
+
+# tvOS
+libretro-build-tvos-arm64:
+  extends:
+    - .libretro-rust-tvos-arm64-default
+    - .core-defs
+
+# webOS
+libretro-build-webos-armv7a:
+  extends:
+    - .libretro-rust-webos-armv7a-default
+    - .core-defs

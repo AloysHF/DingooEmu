@@ -6,7 +6,12 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "dingooemu_libretro"
+# The libretro buildbot's official Rust CI templates build with
+# `cargo build --release` and then rename the cdylib by appending `_libretro`
+# (e.g. libdingooemu.so -> dingooemu_libretro.so), so the lib target is
+# named `dingooemu` (matching CORENAME in .gitlab-ci.yml). For local RetroArch
+# installs, rename the produced cdylib to dingooemu_libretro.<ext> manually.
+name = "dingooemu"
 crate-type = ["cdylib"]
 
 [dependencies]
