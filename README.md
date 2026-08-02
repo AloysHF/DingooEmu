@@ -139,7 +139,7 @@ crates/
 
 Compatibility results are experimental and cover only explicitly tested
 scenarios. See [Game Compatibility](docs/Game-Compatibility.md) for the current
-L0–L3 results, screenshots, and scope of each result.
+36-entry L0–L3 results, screenshots, and scope of each result.
 
 ## Keyboard Controls
 
