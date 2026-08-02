@@ -176,7 +176,7 @@ function Get-CaptureFrames {
     }
 
     switch ($RelativePath) {
-        "7day.app" { return 30 }
+        "7day-20081217192316.app" { return 30 }
         "仙剑奇侠传\仙剑奇侠传.APP" { return 1200 }
         "Decollation-Warrior.app" { return 30 }
         "GooPlayer\GooPlayer.app" { return 300 }

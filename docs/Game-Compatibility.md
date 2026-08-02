@@ -38,7 +38,7 @@ playback and verifies 44.1 kHz stereo PCM evidence.
 
 | English Name | 中文名 | Filename | Screenshot | Status |
 |--------------|--------|----------|------------|--------|
-| 7 Day | 七日 | `tmp/dingoo_game/7day.app` | ![7day](images/7day.png) | ✅ Pass |
+| 7 Day (2008-12-17 build) | 七日（2008-12-17 版本） | `tmp/dingoo_game/7day-20081217192316.app` | ![7day-2008-build](images/7day-20081217192316.png) | ✅ Pass |
 | Ali Baba | 阿里巴巴 | `tmp/dingoo_game/AliBaba.app` | ![AliBaba](images/AliBaba.png) | ✅ Pass |
 | Astro Lander | 星际着陆 | `tmp/dingoo_game/Astro-Lander/Astro-Lander.app` | ![Astro-Lander](images/Astro-Lander__Astro-Lander.png) | ✅ Pass |
 | Block Breaker | 打砖块 | `tmp/dingoo_game/Block Breaker.app` | ![Block-Breaker](images/Block_Breaker.png) | ✅ L2 |
@@ -58,21 +58,21 @@ playback and verifies 44.1 kHz stereo PCM evidence.
 | Platinum Sudoku | 白金数独 | `tmp/dingoo_game/Platinum Sudoku.app` | ![Platinum-Sudoku](images/Platinum_Sudoku.png) | ✅ L2 |
 | Puzzle Bobble | 泡泡龙（PoPo Bash） | `tmp/dingoo_game/Puzzle Bobble.app` | ![Puzzle-Bobble](images/Puzzle_Bobble.png) | ✅ L2 |
 | Rick Dangerous | 里克危险 | `tmp/dingoo_game/Rick-Dangerous.app` | ![Rick-Dangerous](images/Rick-Dangerous.png) | ✅ Pass |
-| Rubido (Alternate Version) | 鲁比多（另一版本） | `tmp/dingoo_game/Rubido_AnotherVersion.app` | ![Rubido-Alternate-Version](images/Rubido_AnotherVersion.png) | ✅ Pass |
-| Rubido | 鲁比多 | `tmp/dingoo_game/Rubido.app` | ![Rubido](images/Rubido.png) | ✅ L2 |
+| Rubido (2009-05-12 build) | 鲁比多（2009-05-12 版本） | `tmp/dingoo_game/Rubido-20090512001427.app` | ![Rubido-2009-05-12-build](images/Rubido-20090512001427.png) | ✅ Pass |
+| Rubido (2009-05-16 build) | 鲁比多（2009-05-16 版本） | `tmp/dingoo_game/Rubido-20090516230856.app` | ![Rubido-2009-05-16-build](images/Rubido-20090516230856.png) | ✅ L2 |
 | SameGoo | 消消乐 | `tmp/dingoo_game/SameGoo/samegoo.app` | ![SameGoo](images/SameGoo__samegoo.png) | ✅ L3 |
-| Centipede | 贪吃蛇 | `tmp/dingoo_game/贪吃蛇.app` | ![Centipede](images/贪吃蛇.png) | ✅ Pass |
+| Millipede | 千足虫 | `tmp/dingoo_game/Millipede.app` | ![Millipede](images/Millipede.png) | ✅ Pass |
 | Snake | 贪吃蛇(迪克蛇) | `tmp/dingoo_game/Snake.app` | ![Snake](images/Snake.png) | ✅ L3 |
 | Sokuban | 推箱子 | `tmp/dingoo_game/Sokuban/Sokuban.app` | ![Sokuban](images/Sokuban__Sokuban.png) | ✅ L2 |
 | Spoout | — | `tmp/dingoo_game/Spoout.app` | ![Spoout](images/Spoout.png) | ✅ Pass |
 | StopWatch | 秒表 | `tmp/dingoo_game/StopWatch.app` | ![StopWatch](images/StopWatch.png) | ✅ L2 |
 | Tetris | 俄罗斯方块 | `tmp/dingoo_game/Tetris.app` | ![Tetris](images/Tetris.png) | ✅ L3 |
-| Ultimate Drift (Chinese Version) | 极限漂移（中文版） | `tmp/dingoo_game/极限漂移.app` | ![Ultimate-Drift-Chinese-Version](images/极限漂移.png) | ✅ Pass |
-| Ultimate Drift | 极限漂移 | `tmp/dingoo_game/Ultimate Drift.app` | ![Ultimate-Drift](images/Ultimate_Drift.png) | ✅ L3 |
+| Ultimate Drift (2008-07-16 build) | 极限漂移（2008-07-16 版本） | `tmp/dingoo_game/Ultimate Drift-20080716163042.app` | ![Ultimate-Drift-2008-07-16-build](images/Ultimate_Drift-20080716163042.png) | ✅ Pass |
+| Ultimate Drift (2008-11-17 build) | 极限漂移（2008-11-17 版本） | `tmp/dingoo_game/Ultimate Drift-20081117180631.app` | ![Ultimate-Drift-2008-11-17-build](images/Ultimate_Drift-20081117180631.png) | ✅ L3 |
 | Zero Gravity | 零重力 | `tmp/dingoo_game/Zero-Gravity.app` | ![Zero-Gravity](images/Zero-Gravity.png) | ✅ Pass |
 | Zhao-Chuan RPG | 赵云传 | `tmp/dingoo_game/Zhao-Chuan RPG.app` | ![Zhao-Chuan-RPG](images/Zhao-Chuan_RPG.png) | ✅ Pass |
-| Seven Nights (Alternate Version) | 七夜（另一版本） | `tmp/dingoo_game/七夜_AnotherVersion.app` | ![Seven-Nights-Alternate-Version](images/七夜_AnotherVersion.png) | ✅ Pass |
-| Seven Nights | 七夜 | `tmp/dingoo_game/七夜.app` | ![七夜](images/七夜.png) | ✅ Pass |
+| Seven Nights (2009-07-15 11:04 build) | 七夜（2009-07-15 11:04 版本） | `tmp/dingoo_game/7day-20090715110443.app` | ![Seven-Nights-2009-07-15-1104-build](images/7day-20090715110443.png) | ✅ Pass |
+| Seven Nights (2009-07-15 11:12 build) | 七夜（2009-07-15 11:12 版本） | `tmp/dingoo_game/7day-20090715111247.app` | ![Seven-Nights-2009-07-15-1112-build](images/7day-20090715111247.png) | ✅ Pass |
 | Sword and Fairy | 仙剑奇侠传 | `tmp/dingoo_game/仙剑奇侠传/仙剑奇侠传.APP` | ![仙剑奇侠传](images/仙剑奇侠传__仙剑奇侠传.png) | ✅ Pass |
 
 ## Status Legend
