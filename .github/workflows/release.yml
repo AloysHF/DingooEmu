@@ -64,11 +64,11 @@ jobs:
           out="libretro/${{ matrix.artifact }}"
           mkdir -p "$out"
           rel="target/${{ matrix.target }}/release"
-          # Cargo names the cdylib after its lib target (dingooemu_libretro); copy it
+          # Cargo names the cdylib after its lib target (dingooemu); copy it
           # to the dingooemu_libretro.<ext> name RetroArch expects.
-          for f in "dingooemu_libretro.dll:dingooemu_libretro.dll" \
-                   "libdingooemu_libretro.so:dingooemu_libretro.so" \
-                   "libdingooemu_libretro.dylib:dingooemu_libretro.dylib"; do
+          for f in "dingooemu.dll:dingooemu_libretro.dll" \
+                   "libdingooemu.so:dingooemu_libretro.so" \
+                   "libdingooemu.dylib:dingooemu_libretro.dylib"; do
             src="${f%%:*}"; dst="${f##*:}"
             if [ -f "$rel/$src" ]; then
               cp "$rel/$src" "$out/$dst"
@@ -117,8 +117,9 @@ jobs:
             ${{ matrix.artifact }}-libretro.*
 
   build-android:
-    name: Build libretro (Android)
+    name: Build (Android)
     runs-on: ubuntu-22.04
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -128,53 +129,39 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
-      - name: Cache Rust artifacts
-        uses: swatinem/rust-cache@v2
-        with:
-          key: android
-
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
-        id: setup-ndk
         with:
           ndk-version: r27c
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      - name: Build libretro core (all ABIs)
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          key: release-android
+
+      - name: Build libretro core for Android
         run: |
           cargo ndk \
             -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 \
             --platform 21 \
             build -p dingooemu-libretro --release
 
-      - name: Stage libretro core (Android)
+      - name: Stage libretro core
         shell: bash
         run: |
-          # RetroArch on Android loads cores named <corename>_libretro_android.so,
-          # one per ABI directory (matching RetroArch's cores/<abi>/ layout).
-          declare -A ABI_TRIPLE=(
-            [arm64-v8a]=aarch64-linux-android
-            [armeabi-v7a]=armv7-linux-androideabi
-            [x86]=i686-linux-android
-            [x86_64]=x86_64-linux-android
-          )
-          for abi in "${!ABI_TRIPLE[@]}"; do
-            triple="${ABI_TRIPLE[$abi]}"
-            out="libretro/dingoo-emu-android/$abi"
-            mkdir -p "$out"
-            cp "target/$triple/release/libdingooemu_libretro.so" \
-               "$out/dingooemu_libretro_android.so"
-          done
-          cp crates/dingooemu-libretro/dingooemu_libretro.info \
-             libretro/dingoo-emu-android/dingooemu_libretro.info
-          ls -laR libretro/dingoo-emu-android
+          out="libretro/dingoo-emu-android"
+          mkdir -p "$out/arm64-v8a" "$out/armeabi-v7a" "$out/x86" "$out/x86_64"
+          cp target/aarch64-linux-android/release/libdingooemu.so "$out/arm64-v8a/dingooemu_libretro_android.so"
+          cp target/armv7-linux-androideabi/release/libdingooemu.so "$out/armeabi-v7a/dingooemu_libretro_android.so"
+          cp target/i686-linux-android/release/libdingooemu.so "$out/x86/dingooemu_libretro_android.so"
+          cp target/x86_64-linux-android/release/libdingooemu.so "$out/x86_64/dingooemu_libretro_android.so"
+          cp crates/dingooemu-libretro/dingooemu_libretro.info "$out/"
+          ls -laR "$out"
 
-      - name: Package libretro (Android)
+      - name: Package libretro
         shell: bash
         run: |
           cd libretro
@@ -188,8 +175,9 @@ jobs:
           path: dingoo-emu-android-libretro.tar.gz
 
   build-ios:
-    name: Build libretro (iOS)
+    name: Build (iOS)
     runs-on: macos-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -202,41 +190,34 @@ jobs:
       - name: Cache Rust artifacts
         uses: swatinem/rust-cache@v2
         with:
-          key: ios
+          key: release-ios
 
-      - name: Build libretro core (arm64 for real devices)
-        run: |
-          cargo build -p dingooemu-libretro --release --target aarch64-apple-ios
+      - name: Build libretro core (arm64 device)
+        run: cargo build -p dingooemu-libretro --release --target aarch64-apple-ios
 
-      - name: Build libretro core (x86_64 for real devices)
-        run: |
-          cargo build -p dingooemu-libretro --release --target x86_64-apple-ios
+      - name: Build libretro core (x86_64 device)
+        run: cargo build -p dingooemu-libretro --release --target x86_64-apple-ios
 
-      - name: Build libretro core (arm64 for simulator)
-        run: |
-          cargo build -p dingooemu-libretro --release --target aarch64-apple-ios-sim
+      - name: Build libretro core (arm64 simulator)
+        run: cargo build -p dingooemu-libretro --release --target aarch64-apple-ios-sim
 
-      - name: Create universal library and stage
+      - name: Create universal binary and stage
         shell: bash
         run: |
           out="libretro/dingoo-emu-ios"
           mkdir -p "$out/simulator"
-
-          # Create universal library for real devices (arm64 + x86_64)
+          # Universal binary for real devices (arm64 + x86_64)
           lipo -create \
-            target/aarch64-apple-ios/release/libdingooemu_libretro.dylib \
-            target/x86_64-apple-ios/release/libdingooemu_libretro.dylib \
+            target/aarch64-apple-ios/release/libdingooemu.dylib \
+            target/x86_64-apple-ios/release/libdingooemu.dylib \
             -output "$out/dingooemu_libretro_ios.dylib"
-
-          # Copy arm64 simulator library
-          cp target/aarch64-apple-ios-sim/release/libdingooemu_libretro.dylib \
+          # Simulator binary (arm64 only)
+          cp target/aarch64-apple-ios-sim/release/libdingooemu.dylib \
              "$out/simulator/dingooemu_libretro_ios.dylib"
-
-          # Copy info file
           cp crates/dingooemu-libretro/dingooemu_libretro.info "$out/"
           ls -laR "$out"
 
-      - name: Package libretro (iOS)
+      - name: Package libretro
         shell: bash
         run: |
           cd libretro
@@ -250,11 +231,12 @@ jobs:
           path: dingoo-emu-ios-libretro.tar.gz
 
   build-webos:
-    name: Build libretro (webOS)
+    name: Build (webOS)
     runs-on: ubuntu-22.04
     env:
       WEBOS_TOOLCHAIN_URL: https://github.com/openlgtv/buildroot-nc4/releases/latest/download/arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz
       RUST_TARGET: armv7-unknown-linux-gnueabi
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -262,14 +244,9 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: armv7-unknown-linux-gnueabi
+          targets: ${{ env.RUST_TARGET }}
 
-      - name: Cache Rust artifacts
-        uses: swatinem/rust-cache@v2
-        with:
-          key: webos
-
-      - name: Install webOS native toolchain
+      - name: Install webOS toolchain
         shell: bash
         run: |
           curl --fail --location --retry 3 \
@@ -282,27 +259,34 @@ jobs:
           echo "$RUNNER_TEMP/webos-toolchain/bin" >> "$GITHUB_PATH"
           echo "WEBOS_TOOLCHAIN=$RUNNER_TEMP/webos-toolchain" >> "$GITHUB_ENV"
 
-      - name: Build libretro core (webOS ARMv7)
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          key: release-webos
+
+      - name: Build libretro core
         env:
           CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_LINKER: arm-webos-linux-gnueabi-gcc
           CC_armv7_unknown_linux_gnueabi: arm-webos-linux-gnueabi-gcc
           AR_armv7_unknown_linux_gnueabi: arm-webos-linux-gnueabi-ar
         run: cargo build -p dingooemu-libretro --release --target "$RUST_TARGET"
 
-      - name: Verify and stage libretro core (webOS)
+      - name: Verify ELF binary
         shell: bash
         run: |
-          core="target/$RUST_TARGET/release/libdingooemu_libretro.so"
-          arm-webos-linux-gnueabi-readelf -h "$core"
-          arm-webos-linux-gnueabi-readelf -d "$core"
+          arm-webos-linux-gnueabi-readelf -h target/$RUST_TARGET/release/libdingooemu.so
+          arm-webos-linux-gnueabi-readelf -d target/$RUST_TARGET/release/libdingooemu.so
 
+      - name: Stage libretro core
+        shell: bash
+        run: |
           out="libretro/dingoo-emu-webos"
           mkdir -p "$out"
-          cp "$core" "$out/dingooemu_libretro.so"
+          cp target/$RUST_TARGET/release/libdingooemu.so "$out/dingooemu_libretro.so"
           cp crates/dingooemu-libretro/dingooemu_libretro.info "$out/"
-          ls -la "$out"
+          ls -laR "$out"
 
-      - name: Package libretro (webOS)
+      - name: Package libretro
         shell: bash
         run: |
           cd libretro
