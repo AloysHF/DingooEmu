@@ -38,31 +38,30 @@ playback and verifies 44.1 kHz stereo PCM evidence.
 
 | English Name | 中文名 | Filename | Screenshot | Status |
 |--------------|--------|----------|------------|--------|
-| 7 Day (2008-12-17 build) | 七日（2008-12-17 版本） | `tmp/dingoo_game/7day-20081217192316.app` | ![7day-2008-build](images/7day-20081217192316.png) | ✅ Pass |
 | Ali Baba | 阿里巴巴 | `tmp/dingoo_game/AliBaba.app` | ![AliBaba](images/AliBaba.png) | ✅ Pass |
 | Astro Lander | 星际着陆 | `tmp/dingoo_game/Astro-Lander/Astro-Lander.app` | ![Astro-Lander](images/Astro-Lander__Astro-Lander.png) | ✅ Pass |
 | Block Breaker | 打砖块 | `tmp/dingoo_game/Block Breaker.app` | ![Block-Breaker](images/Block_Breaker.png) | ✅ L2 |
 | Candy | 糖果屋 | `tmp/dingoo_game/Candy.app` | ![Candy](images/Candy.png) | ✅ Pass |
-| Decollation Warrior | 斩首战士(战神刑天) | `tmp/dingoo_game/Decollation-Warrior.app` | ![Decollation-Warrior](images/Decollation-Warrior.png) | ✅ Pass |
+| Decollation Warrior | 战神刑天 | `tmp/dingoo_game/Decollation-Warrior.app` | ![Decollation-Warrior](images/Decollation-Warrior.png) | ✅ Pass |
 | Formula One | F1赛车 | `tmp/dingoo_game/Fomula-One.app` | ![Fomula-One](images/Fomula-One.png) | ✅ Pass |
 | GooPlayer | Goo播放器 | `tmp/dingoo_game/GooPlayer/GooPlayer.app` | ![GooPlayer](images/GooPlayer__GooPlayer.png) | ✅ L3 |
-| Hell Striker II | 地狱打击者II(天地道) | `tmp/dingoo_game/Hell Striker II.app` | ![Hell-Striker-II](images/Hell_Striker_II.png) | ✅ Pass |
+| Hell Striker II | 天地道 | `tmp/dingoo_game/Hell Striker II.app` | ![Hell-Striker-II](images/Hell_Striker_II.png) | ✅ Pass |
 | Hexa-Virus | 六角病毒(病毒感染) | `tmp/dingoo_game/Hexa-Virus.app` | ![Hexa-Virus](images/Hexa-Virus.png) | ✅ Pass |
 | Landlord | 斗地主 | `tmp/dingoo_game/Landlord.app` | ![Landlord](images/Landlord.png) | ✅ Pass |
 | Link'em Up | 连连看 | `tmp/dingoo_game/Link'em Up.app` | ![Link-em-Up](images/Link'em_Up.png) | ✅ Pass |
 | Manic Miner | 疯狂矿工 | `tmp/dingoo_game/Manic-Miner.app` | ![Manic-Miner](images/Manic-Miner.png) | ✅ Pass |
 | Mine Sweeper | 扫雷 | `tmp/dingoo_game/Mine Sweeper.app` | ![Mine-Sweeper](images/Mine_Sweeper.png) | ✅ L2 |
 | Mushroom Roulette | 蘑菇轮盘 | `tmp/dingoo_game/Mushroom Roulette.app` | ![Mushroom-Roulette](images/Mushroom_Roulette.png) | ✅ Pass |
-| Nose Breaker | 破鼻者(卢比卢比) | `tmp/dingoo_game/Nose Breaker.app` | ![Nose-Breaker](images/Nose_Breaker.png) | ✅ Pass |
+| Nose Breaker | 卢比卢比 | `tmp/dingoo_game/Nose Breaker.app` | ![Nose-Breaker](images/Nose_Breaker.png) | ✅ Pass |
 | Overlord Fighter | 霸王战纪(Yi-chi King Fighter) | `tmp/dingoo_game/Overlord-Fighter.app` | ![Overlord-Fighter](images/Overlord-Fighter.png) | ✅ L2 |
 | Platinum Sudoku | 白金数独 | `tmp/dingoo_game/Platinum Sudoku.app` | ![Platinum-Sudoku](images/Platinum_Sudoku.png) | ✅ L2 |
-| Puzzle Bobble | 泡泡龙（PoPo Bash） | `tmp/dingoo_game/Puzzle Bobble.app` | ![Puzzle-Bobble](images/Puzzle_Bobble.png) | ✅ L2 |
+| PoPo Bash | 泡泡 | `tmp/dingoo_game/PoPo Bash.app` | ![PoPo-Bash](images/PoPo_Bash.png) | ✅ L2 |
 | Rick Dangerous | 里克危险 | `tmp/dingoo_game/Rick-Dangerous.app` | ![Rick-Dangerous](images/Rick-Dangerous.png) | ✅ Pass |
 | Rubido (2009-05-12 build) | 鲁比多（2009-05-12 版本） | `tmp/dingoo_game/Rubido-20090512001427.app` | ![Rubido-2009-05-12-build](images/Rubido-20090512001427.png) | ✅ Pass |
 | Rubido (2009-05-16 build) | 鲁比多（2009-05-16 版本） | `tmp/dingoo_game/Rubido-20090516230856.app` | ![Rubido-2009-05-16-build](images/Rubido-20090516230856.png) | ✅ L2 |
 | SameGoo | 消消乐 | `tmp/dingoo_game/SameGoo/samegoo.app` | ![SameGoo](images/SameGoo__samegoo.png) | ✅ L3 |
 | Millipede | 千足虫 | `tmp/dingoo_game/Millipede.app` | ![Millipede](images/Millipede.png) | ✅ Pass |
-| Snake | 贪吃蛇(迪克蛇) | `tmp/dingoo_game/Snake.app` | ![Snake](images/Snake.png) | ✅ L3 |
+| Snake | 迪克蛇 | `tmp/dingoo_game/Snake.app` | ![Snake](images/Snake.png) | ✅ L3 |
 | Sokuban | 推箱子 | `tmp/dingoo_game/Sokuban/Sokuban.app` | ![Sokuban](images/Sokuban__Sokuban.png) | ✅ L2 |
 | Spoout | — | `tmp/dingoo_game/Spoout.app` | ![Spoout](images/Spoout.png) | ✅ Pass |
 | StopWatch | 秒表 | `tmp/dingoo_game/StopWatch.app` | ![StopWatch](images/StopWatch.png) | ✅ L2 |
@@ -71,8 +70,9 @@ playback and verifies 44.1 kHz stereo PCM evidence.
 | Ultimate Drift (2008-11-17 build) | 极限漂移（2008-11-17 版本） | `tmp/dingoo_game/Ultimate Drift-20081117180631.app` | ![Ultimate-Drift-2008-11-17-build](images/Ultimate_Drift-20081117180631.png) | ✅ L3 |
 | Zero Gravity | 零重力 | `tmp/dingoo_game/Zero-Gravity.app` | ![Zero-Gravity](images/Zero-Gravity.png) | ✅ Pass |
 | Zhao-Chuan RPG | 赵云传 | `tmp/dingoo_game/Zhao-Chuan RPG.app` | ![Zhao-Chuan-RPG](images/Zhao-Chuan_RPG.png) | ✅ Pass |
-| Seven Nights (2009-07-15 11:04 build) | 七夜（2009-07-15 11:04 版本） | `tmp/dingoo_game/7day-20090715110443.app` | ![Seven-Nights-2009-07-15-1104-build](images/7day-20090715110443.png) | ✅ Pass |
-| Seven Nights (2009-07-15 11:12 build) | 七夜（2009-07-15 11:12 版本） | `tmp/dingoo_game/7day-20090715111247.app` | ![Seven-Nights-2009-07-15-1112-build](images/7day-20090715111247.png) | ✅ Pass |
+| Seven Nights (20081217192316) | 七夜（20081217192316） | `tmp/dingoo_game/7day-20081217192316.app` | ![Seven-Nights-20081217192316](images/7day-20081217192316.png) | ✅ Pass |
+| Seven Nights (20090715110443) | 七夜（20090715110443） | `tmp/dingoo_game/7day-20090715110443.app` | ![Seven-Nights-20090715110443](images/7day-20090715110443.png) | ✅ Pass |
+| Seven Nights (20090715111247) | 七夜（20090715111247） | `tmp/dingoo_game/7day-20090715111247.app` | ![Seven-Nights-20090715111247](images/7day-20090715111247.png) | ✅ Pass |
 | Sword and Fairy | 仙剑奇侠传 | `tmp/dingoo_game/仙剑奇侠传/仙剑奇侠传.APP` | ![仙剑奇侠传](images/仙剑奇侠传__仙剑奇侠传.png) | ✅ Pass |
 
 ## Status Legend

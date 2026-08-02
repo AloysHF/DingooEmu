@@ -3,94 +3,385 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DingooEmu - Dingoo A320 Emulator</title>
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-      color: #fff;
-      min-height: 100vh;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-    }
-
-    .container {
-      text-align: center;
-      padding: 2rem;
-    }
-
-    h1 {
-      font-size: 3rem;
-      margin-bottom: 1rem;
-      background: linear-gradient(90deg, #e94560, #ff6b6b);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-
-    .subtitle {
-      font-size: 1.2rem;
-      color: #a0a0a0;
-      margin-bottom: 2rem;
-    }
-
-    .status {
-      font-size: 1.5rem;
-      color: #ffd700;
-      margin-bottom: 1rem;
-    }
-
-    .description {
-      font-size: 1rem;
-      color: #808080;
-      max-width: 600px;
-      margin: 0 auto;
-      line-height: 1.6;
-    }
-
-    .emoji {
-      font-size: 4rem;
-      margin-bottom: 1rem;
-    }
-
-    .links {
-      margin-top: 2rem;
-    }
-
-    .links a {
-      color: #e94560;
-      text-decoration: none;
-      margin: 0 1rem;
-      transition: color 0.3s;
-    }
-
-    .links a:hover {
-      color: #ff6b6b;
-    }
-  </style>
+  <title>DingooEmu — Dingoo A320 掌机模拟器</title>
+  <meta name="description" content="用 Rust 编写的 Dingoo A320 掌机模拟器，支持 MIPS32 CPU 模拟、Dingoo SDK HLE、RetroArch 核心">
+  <link rel="icon" type="image/png" href="res/logo-banner.png">
+  <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <div class="container">
-    <div class="emoji">🎮</div>
-    <h1>DingooEmu</h1>
-    <p class="subtitle">A Dingoo A320 handheld emulator written in Rust</p>
-    <p class="status">🚧 开发中，敬请期待 🚧</p>
-    <p class="description">
-      Emulating the Dingoo A320 handheld game console powered by Ingenic JZ4740 MIPS SoC.<br>
-      Supports real-time CPU scheduling, framebuffer rendering, Dingoo SDK HLE, and PCM audio output.<br>
-      模拟搭载 Ingenic JZ4740 MIPS SoC 的 Dingoo A320 掌上游戏机，支持实时 CPU 调度、画面渲染、SDK 高层模拟和 PCM 音频输出。
-    </p>
-    <div class="links">
-      <a href="https://github.com/jiangxincode/DingooEmu">GitHub</a>
-      <a href="https://github.com/jiangxincode/DingooEmu/releases">Downloads</a>
+
+  <!-- ====== NAV ====== -->
+  <nav id="navbar">
+    <div class="nav-inner">
+      <a href="#hero" class="nav-logo">
+        <img src="res/logo-banner.png" alt="DingooEmu" width="120" height="40">
+        <span>DingooEmu</span>
+      </a>
+      <div class="nav-links">
+        <a href="#features" data-i18n="nav-features">核心特性</a>
+        <a href="#gallery" data-i18n="nav-games">游戏库</a>
+        <a href="#architecture" data-i18n="nav-arch">技术架构</a>
+        <a href="#quickstart" data-i18n="nav-quickstart">快速开始</a>
+        <button id="lang-toggle" class="lang-toggle" aria-label="Switch language">EN</button>
+        <a href="https://github.com/jiangxincode/DingooEmu" class="nav-github" target="_blank">
+          <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        </a>
+      </div>
+      <button class="nav-toggle" aria-label="Toggle menu">
+        <span></span><span></span><span></span>
+      </button>
     </div>
-  </div>
+  </nav>
+
+  <!-- ====== HERO ====== -->
+  <section id="hero">
+    <div class="hero-bg">
+      <canvas id="pixel-canvas"></canvas>
+    </div>
+    <div class="hero-content">
+      <h1 class="hero-title">
+        <span class="hero-title-line">Dingoo</span>
+        <span class="hero-title-line accent">Emulator</span>
+      </h1>
+      <p class="hero-subtitle" data-i18n="hero-subtitle">重温经典掌机游戏</p>
+      <p class="hero-desc" data-i18n="hero-desc">用 Rust 编写的 Dingoo A320 掌机模拟器，完整支持 Ingenic JZ4740 MIPS SoC 和 Dingoo SDK</p>
+      <div class="hero-badges">
+        <img src="https://img.shields.io/github/v/release/jiangxincode/DingooEmu?style=for-the-badge" alt="Release">
+        <img src="https://img.shields.io/badge/license-BSD%203--Clause-blue?style=for-the-badge" alt="License">
+        <img src="https://img.shields.io/github/downloads/jiangxincode/DingooEmu/total?style=for-the-badge&label=downloads" alt="Downloads">
+        <img src="https://sonarcloud.io/api/project_badges/measure?project=jiangxincode_DingooEmu&metric=alert_status&style=for-the-badge" alt="Quality Gate">
+      </div>
+      <div class="hero-actions">
+        <a href="https://github.com/jiangxincode/DingooEmu/releases/latest" class="btn btn-primary" target="_blank">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2.75 14A1.75 1.75 0 011 12.25v-2.5a.75.75 0 011.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 00.25-.25v-2.5a.75.75 0 011.5 0v2.5A1.75 1.75 0 0113.25 14H2.75z"/><path d="M7.25 7.689V2a.75.75 0 011.5 0v5.689l1.97-1.969a.749.749 0 111.06 1.06l-3.25 3.25a.749.749 0 01-1.06 0L4.22 6.78a.749.749 0 111.06-1.06l1.97 1.969z"/></svg>
+          <span data-i18n="hero-download">下载</span>
+        </a>
+        <a href="https://github.com/jiangxincode/DingooEmu" class="btn btn-secondary" target="_blank">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          <span data-i18n="hero-github">查看源码</span>
+        </a>
+      </div>
+    </div>
+    <div class="hero-scroll">
+      <span data-i18n="hero-scroll">向下滚动探索</span>
+      <div class="scroll-arrow"></div>
+    </div>
+  </section>
+
+  <!-- ====== ABOUT ====== -->
+  <section id="about" class="section">
+    <div class="container">
+      <div class="about-grid">
+        <div class="about-text fade-in-up">
+          <h2 data-i18n="about-title">什么是 Dingoo A320？</h2>
+          <p data-i18n="about-p1">Dingoo A320 是一款搭载 <strong>Ingenic JZ4740</strong> MIPS 处理器的便携式游戏掌机，于 2009 年发布。它拥有 320×240 分辨率的 2.8 英寸 TFT 屏幕，支持运行原生游戏和多种模拟器。</p>
+          <p data-i18n="about-p2">通过 DingooEmu，这些经典的掌机游戏可以在现代设备上重新体验。</p>
+        </div>
+        <div class="about-diagram fade-in-up">
+          <div class="diagram-flow">
+            <div class="diagram-node">
+              <div class="diagram-icon chip-icon"></div>
+              <span data-i18n="about-chip">Ingenic JZ4740</span>
+              <small data-i18n="about-chip-sub">MIPS32 XBurst @ 336MHz</small>
+            </div>
+            <div class="diagram-arrow">→</div>
+            <div class="diagram-node">
+              <div class="diagram-icon game-icon"></div>
+              <span>.app 容器</span>
+              <small data-i18n="about-game-sub">Dingoo 原生游戏</small>
+            </div>
+            <div class="diagram-arrow">→</div>
+            <div class="diagram-node highlight">
+              <div class="diagram-icon emu-icon"></div>
+              <span>DingooEmu</span>
+              <small data-i18n="about-emu-sub">Rust 模拟器</small>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== STATS ====== -->
+  <section id="stats" class="section section-dark">
+    <div class="container">
+      <div class="stats-grid">
+        <div class="stat-item fade-in-up">
+          <div class="stat-number" data-target="32">0</div>
+          <div class="stat-label" data-i18n="stat-games">支持游戏格式</div>
+          <div class="stat-sub" data-i18n="stat-games-sub">.app 容器格式</div>
+        </div>
+        <div class="stat-item fade-in-up">
+          <div class="stat-number" data-target="200">0</div>
+          <div class="stat-label" data-i18n="stat-opcodes">MIPS 指令集</div>
+          <div class="stat-sub" data-i18n="stat-opcodes-sub">MIPS32 XBurst 架构</div>
+        </div>
+        <div class="stat-item fade-in-up">
+          <div class="stat-number" data-target="4">0</div>
+          <div class="stat-label" data-i18n="stat-platforms">目标平台</div>
+          <div class="stat-sub" data-i18n="stat-platforms-sub">Windows / macOS / Linux / Android</div>
+        </div>
+        <div class="stat-item fade-in-up">
+          <div class="stat-number" data-target="100" data-suffix="+">0</div>
+          <div class="stat-label" data-i18n="stat-lines">SDK HLE 函数</div>
+          <div class="stat-sub" data-i18n="stat-lines-sub">完整 Dingoo SDK 模拟</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== FEATURES ====== -->
+  <section id="features" class="section">
+    <div class="container">
+      <h2 class="section-title fade-in-up" data-i18n="feat-title">核心特性</h2>
+      <p class="section-subtitle fade-in-up" data-i18n="feat-subtitle">从 MIPS CPU 到 Dingoo SDK，全栈 Rust 实现</p>
+      <div class="features-grid">
+        <div class="feature-card fade-in-up">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9l3 3-3 3"/><path d="M15 15l-3-3 3-3"/></svg>
+          </div>
+          <h3 data-i18n="feat-mips-title">MIPS32 CPU 模拟</h3>
+          <p data-i18n="feat-mips-desc">完整的 MIPS32 XBurst 指令集解释器，支持寄存器、内存管理、COP0 协处理器和异常处理。</p>
+        </div>
+        <div class="feature-card fade-in-up">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          </div>
+          <h3 data-i18n="feat-sdk-title">Dingoo SDK HLE</h3>
+          <p data-i18n="feat-sdk-desc">高层模拟 Dingoo 原生 SDK，包括图形渲染、输入处理、音频播放、文件系统和多任务调度。</p>
+        </div>
+        <div class="feature-card fade-in-up">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 002 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          </div>
+          <h3 data-i18n="feat-dual-title">双前端架构</h3>
+          <p data-i18n="feat-dual-desc">平台无关的核心引擎 + 独立的 Standalone 和 RetroArch 前端，共享 100% 模拟逻辑。</p>
+        </div>
+        <div class="feature-card fade-in-up">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+          </div>
+          <h3 data-i18n="feat-app-title">.app 容器加载</h3>
+          <p data-i18n="feat-app-desc">解析 Dingoo 专有的 .app 游戏容器格式，包含 CCDL、IMPT、EXPT、RAWD 等数据块。</p>
+        </div>
+        <div class="feature-card fade-in-up">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          </div>
+          <h3 data-i18n="feat-audio-title">PCM 音频</h3>
+          <p data-i18n="feat-audio-desc">16-bit PCM 音频输出，支持 22050 Hz 采样率，完整还原掌机音效。</p>
+        </div>
+        <div class="feature-card fade-in-up">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 12h4"/><path d="M14 12h4"/><path d="M8 10v4"/><path d="M16 10v4"/></svg>
+          </div>
+          <h3 data-i18n="feat-retro-title">RetroArch 核心</h3>
+          <p data-i18n="feat-retro-desc">完整的 libretro 核心，支持 RetroPad 映射、核心选项、即时存档等 RetroArch 生态功能。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== GAME GALLERY ====== -->
+  <section id="gallery" class="section section-dark">
+    <div class="container">
+      <h2 class="section-title fade-in-up" data-i18n="gallery-title">游戏库</h2>
+      <p class="section-subtitle fade-in-up" data-i18n="gallery-subtitle">支持 Dingoo A320 原生游戏和多种模拟器</p>
+      <div id="gallery-dynamic" class="fade-in-up"></div>
+    </div>
+  </section>
+
+  <!-- ====== ARCHITECTURE ====== -->
+  <section id="architecture" class="section">
+    <div class="container">
+      <h2 class="section-title fade-in-up" data-i18n="arch-title">技术架构</h2>
+      <p class="section-subtitle fade-in-up" data-i18n="arch-subtitle">清晰的三层架构，平台无关的核心引擎</p>
+      <div class="arch-diagram fade-in-up">
+        <div class="arch-layer arch-frontend">
+          <div class="arch-label" data-i18n="arch-frontends">前端</div>
+          <div class="arch-boxes">
+            <div class="arch-box">
+              <strong>dingooemu</strong>
+              <small data-i18n="arch-standalone-sub">Standalone 可执行文件<br>minifb 窗口</small>
+            </div>
+            <div class="arch-box">
+              <strong>dingooemu-libretro</strong>
+              <small data-i18n="arch-libretro-sub">libretro cdylib<br>RetroArch 核心</small>
+            </div>
+          </div>
+        </div>
+        <div class="arch-connector">
+          <svg viewBox="0 0 100 40" preserveAspectRatio="none">
+            <path d="M20 0 L20 20 L50 40" stroke="#FF6B35" stroke-width="2" fill="none"/>
+            <path d="M80 0 L80 20 L50 40" stroke="#FF6B35" stroke-width="2" fill="none"/>
+          </svg>
+        </div>
+        <div class="arch-layer arch-core">
+          <div class="arch-label" data-i18n="arch-core">核心引擎</div>
+          <div class="arch-boxes">
+            <div class="arch-box core-box">
+              <strong>dingooemu-core</strong>
+              <small data-i18n="arch-core-sub">平台无关的库</small>
+              <div class="core-modules">
+                <span>MIPS CPU</span>
+                <span>Memory</span>
+                <span>Graphics</span>
+                <span>Audio</span>
+                <span>SDK HLE</span>
+                <span>Input</span>
+                <span>Timer</span>
+                <span>File I/O</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="arch-connector">
+          <svg viewBox="0 0 100 40" preserveAspectRatio="none">
+            <path d="M50 0 L50 40" stroke="#00D4FF" stroke-width="2" fill="none" stroke-dasharray="4,4"/>
+          </svg>
+        </div>
+        <div class="arch-layer arch-platform">
+          <div class="arch-label" data-i18n="arch-platforms">目标平台</div>
+          <div class="arch-boxes">
+            <div class="arch-box small-box">Windows</div>
+            <div class="arch-box small-box">macOS</div>
+            <div class="arch-box small-box">Linux</div>
+            <div class="arch-box small-box">Android</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== QUICK START ====== -->
+  <section id="quickstart" class="section">
+    <div class="container">
+      <h2 class="section-title fade-in-up" data-i18n="qs-title">快速开始</h2>
+      <p class="section-subtitle fade-in-up" data-i18n="qs-subtitle">几行命令，即刻体验</p>
+      <div class="quickstart-grid">
+        <div class="quickstart-card fade-in-up">
+          <div class="qs-header">
+            <span class="qs-icon">🖥️</span>
+            <h3 data-i18n="qs-standalone">Standalone</h3>
+          </div>
+          <div class="qs-steps">
+            <div class="qs-step">
+              <span class="qs-num">1</span>
+              <div>
+                <p data-i18n="qs-standalone-1">下载最新版本</p>
+                <code data-i18n="qs-standalone-1-sub">从 Releases 页面下载对应平台的二进制文件</code>
+              </div>
+            </div>
+            <div class="qs-step">
+              <span class="qs-num">2</span>
+              <div>
+                <p data-i18n="qs-standalone-2">运行游戏</p>
+                <code>dingooemu game.app</code>
+              </div>
+            </div>
+            <div class="qs-step">
+              <span class="qs-num">3</span>
+              <div>
+                <p data-i18n="qs-standalone-3">或从源码编译</p>
+                <code>cargo build -p dingooemu --release</code>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="quickstart-card fade-in-up">
+          <div class="qs-header">
+            <span class="qs-icon">🎮</span>
+            <h3>RetroArch</h3>
+          </div>
+          <div class="qs-steps">
+            <div class="qs-step">
+              <span class="qs-num">1</span>
+              <div>
+                <p data-i18n="qs-retro-1">下载 libretro 核心</p>
+                <code data-i18n="qs-retro-1-sub">从 Releases 页面下载对应平台的核心文件</code>
+              </div>
+            </div>
+            <div class="qs-step">
+              <span class="qs-num">2</span>
+              <div>
+                <p data-i18n="qs-retro-2">安装核心</p>
+                <code data-i18n="qs-retro-2-sub">复制到 RetroArch 的 cores/ 目录</code>
+              </div>
+            </div>
+            <div class="qs-step">
+              <span class="qs-num">3</span>
+              <div>
+                <p data-i18n="qs-retro-3">加载核心并启动</p>
+                <code>Load Core → DingooEmu → Load Content</code>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="quickstart-card fade-in-up">
+          <div class="qs-header">
+            <span class="qs-icon">🔨</span>
+            <h3 data-i18n="qs-build">从源码编译</h3>
+          </div>
+          <div class="qs-steps">
+            <div class="qs-step">
+              <span class="qs-num">1</span>
+              <div>
+                <p data-i18n="qs-build-1">克隆仓库</p>
+                <code>git clone https://github.com/jiangxincode/DingooEmu.git</code>
+              </div>
+            </div>
+            <div class="qs-step">
+              <span class="qs-num">2</span>
+              <div>
+                <p data-i18n="qs-build-2">编译 Standalone</p>
+                <code>cargo build -p dingooemu --release</code>
+              </div>
+            </div>
+            <div class="qs-step">
+              <span class="qs-num">3</span>
+              <div>
+                <p data-i18n="qs-build-3">或编译 RetroArch 核心</p>
+                <code>cargo build -p dingooemu-libretro --release</code>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== FOOTER ====== -->
+  <footer id="footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <span class="footer-name">DingooEmu</span>
+          <p data-i18n="footer-desc">用 Rust 编写的 Dingoo A320 掌机模拟器</p>
+        </div>
+        <div class="footer-links">
+          <h4 data-i18n="footer-project">项目</h4>
+          <a href="https://github.com/jiangxincode/DingooEmu" target="_blank">GitHub</a>
+          <a href="https://github.com/jiangxincode/DingooEmu/releases" target="_blank">Releases</a>
+          <a href="https://github.com/jiangxincode/DingooEmu/blob/master/docs/CONTRIBUTING.md" target="_blank" data-i18n="footer-contributing">贡献指南</a>
+        </div>
+        <div class="footer-links">
+          <h4 data-i18n="footer-community">社区</h4>
+          <a href="https://discord.gg/7XDdSrYD" target="_blank">Discord</a>
+          <a href="https://qm.qq.com/q/LAO7DKAWUC" target="_blank">QQ Group</a>
+        </div>
+        <div class="footer-links">
+          <h4 data-i18n="footer-docs">文档</h4>
+          <a href="https://github.com/jiangxincode/DingooEmu/blob/master/docs/Standalone-Emulator.md" target="_blank" data-i18n="footer-cli">独立模拟器</a>
+          <a href="https://github.com/jiangxincode/DingooEmu/blob/master/docs/RetroArch-Core.md" target="_blank" data-i18n="footer-core">RetroArch Core</a>
+          <a href="https://github.com/jiangxincode/DingooEmu/blob/master/docs/Game-Compatibility.md" target="_blank" data-i18n="footer-gamelist">游戏兼容性</a>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <p data-i18n="footer-copy">BSD 3-Clause License &copy; 2025 Aloys. Built with 🦀 Rust.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script src="js/main.js"></script>
 </body>
 </html>
