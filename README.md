@@ -7,6 +7,7 @@
 <p align="center">
   <a href="https://jiangxincode.github.io/DingooEmu/"><img src="https://img.shields.io/badge/Website-DingooEmu-E8553A?logo=githubpages&logoColor=white" alt="Website"></a>
   <a href="https://github.com/jiangxincode/DingooEmu/actions/workflows/ci.yml"><img src="https://github.com/jiangxincode/DingooEmu/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://git.libretro.com/libretro/dingooemu/-/pipelines"><img src="https://img.shields.io/gitlab/pipeline-status/dingooemu?gitlab_url=https%3A%2F%2Fgit.libretro.com%2Flibretro&branch=master&logo=gitlab&label=Pipeline%20Status" alt="Gitlab Pipeline Status" ></a>
   <a href="https://github.com/jiangxincode/DingooEmu/releases/latest"><img src="https://img.shields.io/github/v/release/jiangxincode/DingooEmu" alt="Release"></a>
   <a href="https://github.com/jiangxincode/DingooEmu/releases"><img src="https://img.shields.io/github/downloads/jiangxincode/DingooEmu/total" alt="Downloads"></a>
   <a href="https://sonarcloud.io/dashboard?id=jiangxincode_DingooEmu"><img src="https://sonarcloud.io/api/project_badges/measure?project=jiangxincode_DingooEmu&metric=alert_status" alt="Quality Gate Status"></a>
