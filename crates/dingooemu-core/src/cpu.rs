@@ -121,14 +121,22 @@ impl Cpu {
             return Ok(());
         }
 
+        let instr = memory.fetch_instruction(self.regs.pc)?;
+        self.step_fetched(instr, memory)
+    }
+
+    /// Execute an instruction that was fetched by the runtime.
+    pub(crate) fn step_fetched(&mut self, instr: u32, memory: &mut Memory) -> Result<()> {
+        if !self.running {
+            return Ok(());
+        }
         // If we have a pending branch (from previous instruction),
         // the delay slot is the NEXT instruction to execute
         if self.branch_delay {
             // The delay slot is at PC (which is already pointing to the delay slot)
             // Execute it first
-            let delay_instr = memory.fetch_instruction(self.regs.pc)?;
             self.regs.pc = self.regs.pc.wrapping_add(4);
-            self.execute_instruction(delay_instr, memory)?;
+            self.execute_instruction(instr, memory)?;
 
             // After delay slot executes, apply the branch target
             self.branch_delay = false;
@@ -139,7 +147,6 @@ impl Cpu {
         }
 
         // Normal instruction execution
-        let instr = memory.fetch_instruction(self.regs.pc)?;
         self.regs.pc = self.regs.pc.wrapping_add(4);
         self.execute_instruction(instr, memory)?;
 

@@ -23,6 +23,8 @@ const TASK_QUANTUM_CYCLES: u64 = 4_096;
 const TASK_RETURN_ADDRESS: u32 = u32::MAX;
 const MAX_GUEST_TASKS: usize = 16;
 const HOOK_FILTER_WORDS: usize = 1_024;
+const MAX_INSTRUCTION_BLOCK_LEN: usize = 64;
+const INSTRUCTION_BLOCK_CACHE_SLOTS: usize = 4_096;
 const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
 const FILE_SEARCH_NAME_CAPACITY: usize = 256;
 
@@ -52,6 +54,21 @@ fn hook_filter_location(address: u32) -> (usize, u64) {
         bit_index / u64::BITS as usize,
         1 << (bit_index % u64::BITS as usize),
     )
+}
+
+struct CachedInstructionBlock {
+    start: u32,
+    instructions: Box<[u32]>,
+}
+
+fn instruction_block_cache_index(address: u32) -> usize {
+    (address as usize >> 2) & (INSTRUCTION_BLOCK_CACHE_SLOTS - 1)
+}
+
+fn empty_instruction_block_cache() -> Vec<Option<CachedInstructionBlock>> {
+    std::iter::repeat_with(|| None)
+        .take(INSTRUCTION_BLOCK_CACHE_SLOTS)
+        .collect()
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -234,6 +251,8 @@ pub struct Emulator {
     unknown_hle_calls: BTreeMap<String, UnknownHleCall>,
     /// Fast rejection filter for non-hook instruction addresses
     hook_filter: Box<[u64]>,
+    /// Direct-mapped cache of sequential guest instruction blocks
+    instruction_blocks: Vec<Option<CachedInstructionBlock>>,
     /// Open guest resource files
     open_files: HashMap<u32, OpenFile>,
     /// Host directory used for persistent guest-created files
@@ -378,6 +397,7 @@ impl Emulator {
             unknown_hle_allowlist: BTreeSet::new(),
             unknown_hle_calls: BTreeMap::new(),
             hook_filter,
+            instruction_blocks: empty_instruction_block_cache(),
             open_files: HashMap::new(),
             save_directory,
             next_file_handle: 1,
@@ -761,12 +781,82 @@ impl Emulator {
                     break;
                 }
             } else {
-                self.cpu.step(&mut self.memory)?;
-                self.cycle_count = self.cycle_count.wrapping_add(CPU_CYCLES_PER_INSTRUCTION);
-                executed += CPU_CYCLES_PER_INSTRUCTION;
+                let completed = self.run_cached_instruction_block(pc, cycles - executed)?;
+                let completed_cycles = completed * CPU_CYCLES_PER_INSTRUCTION;
+                self.cycle_count = self.cycle_count.wrapping_add(completed_cycles);
+                executed += completed_cycles;
             }
         }
         Ok(executed)
+    }
+
+    fn run_cached_instruction_block(&mut self, start: u32, remaining_cycles: u64) -> Result<u64> {
+        self.ensure_instruction_block(start)?;
+        let instruction_limit = (remaining_cycles / CPU_CYCLES_PER_INSTRUCTION) as usize;
+        let cache_index = instruction_block_cache_index(start);
+        let block = self.instruction_blocks[cache_index]
+            .as_ref()
+            .expect("instruction block was cached");
+        let mut completed = 0u64;
+
+        for &instruction in block.instructions.iter().take(instruction_limit) {
+            let current_pc = self.cpu.regs.pc;
+            let step_result = self.cpu.step_fetched(instruction, &mut self.memory);
+            if step_result.is_err() {
+                self.cycle_count = self
+                    .cycle_count
+                    .wrapping_add(completed * CPU_CYCLES_PER_INSTRUCTION);
+            }
+            step_result?;
+            completed += 1;
+            if !self.cpu.is_running() || self.cpu.regs.pc != current_pc.wrapping_add(4) {
+                break;
+            }
+        }
+
+        Ok(completed)
+    }
+
+    fn ensure_instruction_block(&mut self, start: u32) -> Result<()> {
+        let cache_index = instruction_block_cache_index(start);
+        if self.instruction_blocks[cache_index]
+            .as_ref()
+            .is_some_and(|block| block.start == start)
+        {
+            return Ok(());
+        }
+
+        let mut instructions = Vec::with_capacity(MAX_INSTRUCTION_BLOCK_LEN);
+        let mut address = start;
+        while instructions.len() < MAX_INSTRUCTION_BLOCK_LEN {
+            if address != start && self.is_instruction_block_boundary(address) {
+                break;
+            }
+            instructions.push(self.memory.fetch_instruction(address)?);
+            address = address.wrapping_add(4);
+        }
+        self.instruction_blocks[cache_index] = Some(CachedInstructionBlock {
+            start,
+            instructions: instructions.into_boxed_slice(),
+        });
+        Ok(())
+    }
+
+    fn is_instruction_block_boundary(&self, address: u32) -> bool {
+        if address == TASK_RETURN_ADDRESS
+            || Some(address) == self.app_main_entry
+            || Some(address) == self.app_main_init_check_address
+        {
+            return true;
+        }
+        let (hook_word, hook_mask) = hook_filter_location(address);
+        self.hook_filter[hook_word] & hook_mask != 0 && self.hooked_addrs.contains_key(&address)
+    }
+
+    pub(crate) fn clear_instruction_cache(&mut self) {
+        for block in &mut self.instruction_blocks {
+            *block = None;
+        }
     }
 
     fn active_context_waiting(&mut self) -> bool {
@@ -1623,7 +1713,9 @@ impl Emulator {
         enabled: bool,
         code: &str,
     ) -> std::result::Result<(), CheatParseError> {
-        self.cheats.set_slot(index, enabled, code, &self.memory)
+        self.cheats.set_slot(index, enabled, code, &self.memory)?;
+        self.clear_instruction_cache();
+        Ok(())
     }
 
     /// Install an already parsed cheat rule.
@@ -1634,12 +1726,15 @@ impl Emulator {
         rule: CheatRule,
     ) -> std::result::Result<(), CheatParseError> {
         self.cheats
-            .set_parsed_rule(index, enabled, rule, &self.memory)
+            .set_parsed_rule(index, enabled, rule, &self.memory)?;
+        self.clear_instruction_cache();
+        Ok(())
     }
 
     /// Remove every configured cheat slot.
     pub fn clear_cheats(&mut self) {
         self.cheats.clear();
+        self.clear_instruction_cache();
     }
 
     /// Get one video frame of interleaved stereo audio.
@@ -1757,6 +1852,7 @@ impl Default for Emulator {
             unknown_hle_allowlist: BTreeSet::new(),
             unknown_hle_calls: BTreeMap::new(),
             hook_filter: vec![0; HOOK_FILTER_WORDS].into_boxed_slice(),
+            instruction_blocks: empty_instruction_block_cache(),
             open_files: HashMap::new(),
             save_directory: None,
             next_file_handle: 1,
@@ -1964,6 +2060,42 @@ mod tests {
         assert_eq!(emu.cpu.instruction_count, 0);
         assert_eq!(emu.cycle_count, CYCLES_PER_FRAME);
         assert!(emu.video.framebuffer().iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn test_instruction_blocks_stop_before_sdk_hooks() {
+        let mut emu = Emulator::default();
+        let hook_address = 0x1020;
+        emu.hooked_addrs
+            .insert(hook_address, "lcd_set_frame".to_string());
+        let (word, mask) = hook_filter_location(hook_address);
+        emu.hook_filter[word] |= mask;
+
+        emu.ensure_instruction_block(0x1000).unwrap();
+
+        let cache_index = instruction_block_cache_index(0x1000);
+        assert_eq!(
+            emu.instruction_blocks[cache_index]
+                .as_ref()
+                .unwrap()
+                .instructions
+                .len(),
+            8
+        );
+    }
+
+    #[test]
+    fn test_instruction_cache_is_cleared_by_guest_invalidation() {
+        let mut emu = Emulator::default();
+        let cache_index = instruction_block_cache_index(0x1000);
+        emu.instruction_blocks[cache_index] = Some(CachedInstructionBlock {
+            start: 0x1000,
+            instructions: vec![0].into_boxed_slice(),
+        });
+
+        invoke_sdk_import(&mut emu, 0x2000, "__icache_invalidate_all");
+
+        assert!(emu.instruction_blocks.iter().all(Option::is_none));
     }
 
     #[test]

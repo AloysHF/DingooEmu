@@ -126,7 +126,11 @@ pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResul
             emu.cpu.regs.write(2, 0);
             log::trace!("  {func_name}() = 0 (stub)");
         }
-        "__icache_invalidate_all" | "__dcache_writeback_all" => {
+        "__icache_invalidate_all" => {
+            emu.clear_instruction_cache();
+            log::trace!("  {func_name} (instruction cache cleared)");
+        }
+        "__dcache_writeback_all" => {
             log::trace!("  {func_name} (no-op)");
         }
         _ => return Ok(HandlerResult::NotHandled),
