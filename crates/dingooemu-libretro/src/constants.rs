@@ -34,7 +34,7 @@ pub const RETRO_MEMORY_VIDEO_RAM: u32 = 3;
 pub const RETRO_MEMDESC_SYSTEM_RAM: u64 = 1 << 2;
 pub const RETRO_MEMDESC_VIDEO_RAM: u64 = 1 << 4;
 
-pub const RETRO_PIXEL_FORMAT_XRGB8888: u32 = 1;
+pub const RETRO_PIXEL_FORMAT_RGB565: u32 = 2;
 
 pub const RETRO_LOG_DEBUG: u32 = 0;
 pub const RETRO_LOG_INFO: u32 = 1;

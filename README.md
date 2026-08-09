@@ -25,7 +25,7 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 - **HLE (High-Level Emulation)** — Dingoo SDK functions for graphics, focused-window key callbacks, audio, timing, files, and companion-content discovery implemented in Rust
 - **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and produce machine-graded L0/L1/L2/L3 JSON and CSV reports with deterministic input and PCM checkpoints
 - **`.app` file support** — Parse and load Dingoo A320 game container format
-- **Frame rendering** — 320×240 RGB565 framebuffer with XRGB8888 output
+- **Frame rendering** — Native 320×240 RGB565 framebuffer output
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
 - **Screenshot mode** — Headless frame capture for automated testing and preview generation
 - **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`

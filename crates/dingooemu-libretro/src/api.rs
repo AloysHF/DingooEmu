@@ -131,7 +131,7 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
     unsafe { EMULATOR = None };
 
     if !set_pixel_format() {
-        log::error!("Frontend rejected the required XRGB8888 pixel format");
+        log::error!("Frontend rejected the required RGB565 pixel format");
         return false;
     }
     register_input_descriptors();
@@ -195,12 +195,11 @@ pub extern "C" fn retro_run() {
         log::error!("Frame execution failed: {error}");
     }
 
-    let frame = emulator.video.to_xrgb8888();
     callbacks::video_refresh(
-        frame.as_ptr().cast(),
+        emulator.video.framebuffer().as_ptr().cast(),
         SCREEN_WIDTH,
         SCREEN_HEIGHT,
-        SCREEN_WIDTH as usize * std::mem::size_of::<u32>(),
+        SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
     );
 
     let samples = emulator.take_audio_samples();
@@ -314,7 +313,7 @@ pub extern "C" fn retro_get_memory_size(id: c_uint) -> usize {
 }
 
 fn set_pixel_format() -> bool {
-    let mut format = RETRO_PIXEL_FORMAT_XRGB8888;
+    let mut format = RETRO_PIXEL_FORMAT_RGB565;
     callbacks::environment(
         RETRO_ENVIRONMENT_SET_PIXEL_FORMAT,
         (&mut format as *mut u32).cast(),
@@ -645,7 +644,7 @@ mod tests {
         pitch: usize,
     ) {
         assert_eq!(height, SCREEN_HEIGHT);
-        assert_eq!(pitch, SCREEN_WIDTH as usize * std::mem::size_of::<u32>());
+        assert_eq!(pitch, SCREEN_WIDTH as usize * std::mem::size_of::<u16>());
         VIDEO_WIDTH.store(width, Ordering::SeqCst);
     }
 
@@ -833,7 +832,7 @@ mod tests {
         assert!(retro_load_game(&info));
         assert_eq!(
             PIXEL_FORMAT.load(Ordering::SeqCst),
-            RETRO_PIXEL_FORMAT_XRGB8888
+            RETRO_PIXEL_FORMAT_RGB565
         );
         assert!(INPUT_DESCRIPTORS_SET.load(Ordering::SeqCst));
         assert!(MEMORY_MAPS_SET.load(Ordering::SeqCst));
