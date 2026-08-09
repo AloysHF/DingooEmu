@@ -127,8 +127,20 @@ impl Cpu {
 
     /// Execute an instruction that was fetched by the runtime.
     pub(crate) fn step_fetched(&mut self, instr: u32, memory: &mut Memory) -> Result<()> {
+        if self.step_fetched_unaccounted(instr, memory)? {
+            self.instruction_count += 1;
+        }
+        Ok(())
+    }
+
+    /// Execute a fetched instruction without updating the profiling counter.
+    pub(crate) fn step_fetched_unaccounted(
+        &mut self,
+        instr: u32,
+        memory: &mut Memory,
+    ) -> Result<bool> {
         if !self.running {
-            return Ok(());
+            return Ok(false);
         }
         // If we have a pending branch (from previous instruction),
         // the delay slot is the NEXT instruction to execute
@@ -142,8 +154,7 @@ impl Cpu {
             self.branch_delay = false;
             self.regs.pc = self.branch_target;
             self.regs.gpr[0] = 0;
-            self.instruction_count += 1;
-            return Ok(());
+            return Ok(true);
         }
 
         // Normal instruction execution
@@ -153,8 +164,11 @@ impl Cpu {
         // R0 is always zero
         self.regs.gpr[0] = 0;
 
-        self.instruction_count += 1;
-        Ok(())
+        Ok(true)
+    }
+
+    pub(crate) fn account_instructions(&mut self, count: u64) {
+        self.instruction_count += count;
     }
 
     /// Take a branch (sets delay slot)

@@ -808,19 +808,25 @@ impl Emulator {
             .take(instruction_limit)
         {
             let current_pc = self.cpu.regs.pc;
-            let step_result = self.cpu.step_fetched(instruction, &mut self.memory);
+            let step_result = self
+                .cpu
+                .step_fetched_unaccounted(instruction, &mut self.memory);
             if step_result.is_err() {
+                self.cpu.account_instructions(completed);
                 self.cycle_count = self
                     .cycle_count
                     .wrapping_add(completed * CPU_CYCLES_PER_INSTRUCTION);
             }
-            step_result?;
+            if !step_result? {
+                break;
+            }
             completed += 1;
             if !self.cpu.is_running() || self.cpu.regs.pc != current_pc.wrapping_add(4) {
                 break;
             }
         }
 
+        self.cpu.account_instructions(completed);
         Ok(completed)
     }
 
