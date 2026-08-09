@@ -58,17 +58,23 @@ fn hook_filter_location(address: u32) -> (usize, u64) {
 
 struct CachedInstructionBlock {
     start: u32,
-    instructions: Box<[u32]>,
+    len: u8,
+    instructions: [u32; MAX_INSTRUCTION_BLOCK_LEN],
 }
 
 fn instruction_block_cache_index(address: u32) -> usize {
     (address as usize >> 2) & (INSTRUCTION_BLOCK_CACHE_SLOTS - 1)
 }
 
-fn empty_instruction_block_cache() -> Vec<Option<CachedInstructionBlock>> {
-    std::iter::repeat_with(|| None)
-        .take(INSTRUCTION_BLOCK_CACHE_SLOTS)
-        .collect()
+fn empty_instruction_block_cache() -> Box<[CachedInstructionBlock]> {
+    std::iter::repeat_with(|| CachedInstructionBlock {
+        start: 0,
+        len: 0,
+        instructions: [0; MAX_INSTRUCTION_BLOCK_LEN],
+    })
+    .take(INSTRUCTION_BLOCK_CACHE_SLOTS)
+    .collect::<Vec<_>>()
+    .into_boxed_slice()
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -252,7 +258,7 @@ pub struct Emulator {
     /// Fast rejection filter for non-hook instruction addresses
     hook_filter: Box<[u64]>,
     /// Direct-mapped cache of sequential guest instruction blocks
-    instruction_blocks: Vec<Option<CachedInstructionBlock>>,
+    instruction_blocks: Box<[CachedInstructionBlock]>,
     /// Open guest resource files
     open_files: HashMap<u32, OpenFile>,
     /// Host directory used for persistent guest-created files
@@ -794,12 +800,13 @@ impl Emulator {
         self.ensure_instruction_block(start)?;
         let instruction_limit = (remaining_cycles / CPU_CYCLES_PER_INSTRUCTION) as usize;
         let cache_index = instruction_block_cache_index(start);
-        let block = self.instruction_blocks[cache_index]
-            .as_ref()
-            .expect("instruction block was cached");
+        let block = &self.instruction_blocks[cache_index];
         let mut completed = 0u64;
 
-        for &instruction in block.instructions.iter().take(instruction_limit) {
+        for &instruction in block.instructions[..block.len as usize]
+            .iter()
+            .take(instruction_limit)
+        {
             let current_pc = self.cpu.regs.pc;
             let step_result = self.cpu.step_fetched(instruction, &mut self.memory);
             if step_result.is_err() {
@@ -819,26 +826,28 @@ impl Emulator {
 
     fn ensure_instruction_block(&mut self, start: u32) -> Result<()> {
         let cache_index = instruction_block_cache_index(start);
-        if self.instruction_blocks[cache_index]
-            .as_ref()
-            .is_some_and(|block| block.start == start)
+        if self.instruction_blocks[cache_index].len != 0
+            && self.instruction_blocks[cache_index].start == start
         {
             return Ok(());
         }
 
-        let mut instructions = Vec::with_capacity(MAX_INSTRUCTION_BLOCK_LEN);
+        let mut instructions = [0; MAX_INSTRUCTION_BLOCK_LEN];
+        let mut instruction_count = 0usize;
         let mut address = start;
-        while instructions.len() < MAX_INSTRUCTION_BLOCK_LEN {
+        while instruction_count < MAX_INSTRUCTION_BLOCK_LEN {
             if address != start && self.is_instruction_block_boundary(address) {
                 break;
             }
-            instructions.push(self.memory.fetch_instruction(address)?);
+            instructions[instruction_count] = self.memory.fetch_instruction(address)?;
+            instruction_count += 1;
             address = address.wrapping_add(4);
         }
-        self.instruction_blocks[cache_index] = Some(CachedInstructionBlock {
+        self.instruction_blocks[cache_index] = CachedInstructionBlock {
             start,
-            instructions: instructions.into_boxed_slice(),
-        });
+            len: instruction_count as u8,
+            instructions,
+        };
         Ok(())
     }
 
@@ -855,7 +864,7 @@ impl Emulator {
 
     pub(crate) fn clear_instruction_cache(&mut self) {
         for block in &mut self.instruction_blocks {
-            *block = None;
+            block.len = 0;
         }
     }
 
@@ -2074,28 +2083,22 @@ mod tests {
         emu.ensure_instruction_block(0x1000).unwrap();
 
         let cache_index = instruction_block_cache_index(0x1000);
-        assert_eq!(
-            emu.instruction_blocks[cache_index]
-                .as_ref()
-                .unwrap()
-                .instructions
-                .len(),
-            8
-        );
+        assert_eq!(emu.instruction_blocks[cache_index].len, 8);
     }
 
     #[test]
     fn test_instruction_cache_is_cleared_by_guest_invalidation() {
         let mut emu = Emulator::default();
         let cache_index = instruction_block_cache_index(0x1000);
-        emu.instruction_blocks[cache_index] = Some(CachedInstructionBlock {
+        emu.instruction_blocks[cache_index] = CachedInstructionBlock {
             start: 0x1000,
-            instructions: vec![0].into_boxed_slice(),
-        });
+            len: 1,
+            instructions: [0; MAX_INSTRUCTION_BLOCK_LEN],
+        };
 
         invoke_sdk_import(&mut emu, 0x2000, "__icache_invalidate_all");
 
-        assert!(emu.instruction_blocks.iter().all(Option::is_none));
+        assert!(emu.instruction_blocks.iter().all(|block| block.len == 0));
     }
 
     #[test]
