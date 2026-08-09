@@ -126,7 +126,7 @@ impl Cpu {
         if self.branch_delay {
             // The delay slot is at PC (which is already pointing to the delay slot)
             // Execute it first
-            let delay_instr = memory.read_u32(self.regs.pc)?;
+            let delay_instr = memory.fetch_instruction(self.regs.pc)?;
             self.regs.pc = self.regs.pc.wrapping_add(4);
             self.execute_instruction(delay_instr, memory)?;
 
@@ -139,7 +139,7 @@ impl Cpu {
         }
 
         // Normal instruction execution
-        let instr = memory.read_u32(self.regs.pc)?;
+        let instr = memory.fetch_instruction(self.regs.pc)?;
         self.regs.pc = self.regs.pc.wrapping_add(4);
         self.execute_instruction(instr, memory)?;
 
