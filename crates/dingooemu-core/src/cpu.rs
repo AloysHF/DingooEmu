@@ -183,6 +183,9 @@ impl Cpu {
 
     /// Execute a single instruction
     fn execute_instruction(&mut self, instr: u32, memory: &mut Memory) -> Result<()> {
+        if instr == 0 {
+            return Ok(());
+        }
         // Extract opcode (bits 31-26)
         let opcode = (instr >> 26) & 0x3F;
 
@@ -884,6 +887,18 @@ mod tests {
         cpu.start();
         cpu.step(&mut mem).unwrap();
         assert_eq!(cpu.regs.read(8), 0x1234);
+    }
+
+    #[test]
+    fn test_nop_advances_pc_and_instruction_count() {
+        let mut cpu = Cpu::new(0);
+        let mut mem = Memory::new();
+        cpu.start();
+
+        cpu.step(&mut mem).unwrap();
+
+        assert_eq!(cpu.regs.pc, 4);
+        assert_eq!(cpu.instruction_count, 1);
     }
 
     #[test]
