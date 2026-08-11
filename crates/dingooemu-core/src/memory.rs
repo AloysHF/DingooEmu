@@ -3,13 +3,13 @@ use crate::video::FRAMEBUFFER_MAP_SIZE;
 
 /// Dingoo A320 memory regions
 const RAM_BASE: u32 = 0x0000_0000;
-const RAM_SIZE: u32 = 32 * 1024 * 1024; // 32 MB
+pub(crate) const RAM_SIZE: u32 = 32 * 1024 * 1024; // 32 MB
 
 /// MIPS KSEG0 mask (strip top 3 bits for cached segment)
 const KSEG0_MASK: u32 = 0x1FFF_FFFF;
 
 /// Guest-visible aliases for the LCD framebuffer mapping.
-const LCD_FRAMEBUFFER_ALIASES: [u32; 4] = [
+pub(crate) const LCD_FRAMEBUFFER_ALIASES: [u32; 4] = [
     crate::video::VM_LCD_FB_ADDRESS,
     0x1400_0000,
     0x9000_0000,
@@ -68,6 +68,18 @@ impl Memory {
             free_blocks: Vec::new(),
             write_log: Vec::new(),
         }
+    }
+
+    #[cfg(feature = "jit")]
+    #[inline(always)]
+    pub(crate) fn jit_ram_ptr(&mut self) -> *mut u8 {
+        self.ram.as_mut_ptr()
+    }
+
+    #[cfg(feature = "jit")]
+    #[inline(always)]
+    pub(crate) fn jit_framebuffer_ptr(&mut self) -> *mut u8 {
+        self.framebuffer.as_mut_ptr()
     }
 
     /// Get a copy of the write log and clear it

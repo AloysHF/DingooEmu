@@ -17,6 +17,10 @@ lz4_flex.workspace = true
 byteorder = "1"
 image.workspace = true
 rodio = { workspace = true, optional = true }
+cranelift = { workspace = true, optional = true }
+cranelift-jit = { workspace = true, optional = true }
+cranelift-module = { workspace = true, optional = true }
+cranelift-native = { workspace = true, optional = true }
 
 [dev-dependencies]
 env_logger.workspace = true
@@ -24,3 +28,9 @@ cargo-husky = { version = "=1.5.0", default-features = false, features = ["preco
 
 [features]
 standalone = ["dep:rodio"]
+jit = [
+    "dep:cranelift",
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+]

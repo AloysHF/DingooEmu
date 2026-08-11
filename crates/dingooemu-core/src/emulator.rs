@@ -4,6 +4,8 @@ use crate::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::cpu::Cpu;
 use crate::error::{Result, SimulatorError};
 use crate::input::Input;
+#[cfg(feature = "jit")]
+use crate::jit::JitEngine;
 use crate::memory::Memory;
 use crate::video::Video;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -259,6 +261,9 @@ pub struct Emulator {
     hook_filter: Box<[u64]>,
     /// Direct-mapped cache of sequential guest instruction blocks
     instruction_blocks: Box<[CachedInstructionBlock]>,
+    /// Native code cache for hot MIPS instruction blocks
+    #[cfg(feature = "jit")]
+    jit: JitEngine,
     /// Open guest resource files
     open_files: HashMap<u32, OpenFile>,
     /// Host directory used for persistent guest-created files
@@ -404,6 +409,8 @@ impl Emulator {
             unknown_hle_calls: BTreeMap::new(),
             hook_filter,
             instruction_blocks: empty_instruction_block_cache(),
+            #[cfg(feature = "jit")]
+            jit: JitEngine::new(),
             open_files: HashMap::new(),
             save_directory,
             next_file_handle: 1,
@@ -686,6 +693,8 @@ impl Emulator {
 
     /// Run one frame of emulation
     pub fn tick(&mut self) -> Result<()> {
+        #[cfg(feature = "jit")]
+        self.jit.begin_frame();
         self.framebuffer_submitted = false;
         self.cheats.apply(&mut self.memory, &mut self.cpu);
 
@@ -800,6 +809,25 @@ impl Emulator {
         self.ensure_instruction_block(start)?;
         let instruction_limit = (remaining_cycles / CPU_CYCLES_PER_INSTRUCTION) as usize;
         let cache_index = instruction_block_cache_index(start);
+
+        #[cfg(feature = "jit")]
+        if !self.cpu.branch_delay {
+            let block = &self.instruction_blocks[cache_index];
+            let ram = self.memory.jit_ram_ptr();
+            let framebuffer = self.memory.jit_framebuffer_ptr();
+            if let Some(completed) = self.jit.execute(
+                start,
+                &block.instructions[..block.len as usize],
+                instruction_limit,
+                &mut self.cpu.regs,
+                ram,
+                framebuffer,
+            ) {
+                self.cpu.account_instructions(completed);
+                return Ok(completed);
+            }
+        }
+
         let block = &self.instruction_blocks[cache_index];
         let mut completed = 0u64;
 
@@ -872,6 +900,16 @@ impl Emulator {
         for block in &mut self.instruction_blocks {
             block.len = 0;
         }
+        #[cfg(feature = "jit")]
+        self.jit.clear();
+    }
+
+    /// Enable or disable native translation of hot CPU blocks.
+    pub fn set_jit_enabled(&mut self, enabled: bool) {
+        #[cfg(feature = "jit")]
+        self.jit.set_enabled(enabled);
+        #[cfg(not(feature = "jit"))]
+        let _ = enabled;
     }
 
     fn active_context_waiting(&mut self) -> bool {
@@ -1868,6 +1906,8 @@ impl Default for Emulator {
             unknown_hle_calls: BTreeMap::new(),
             hook_filter: vec![0; HOOK_FILTER_WORDS].into_boxed_slice(),
             instruction_blocks: empty_instruction_block_cache(),
+            #[cfg(feature = "jit")]
+            jit: JitEngine::new(),
             open_files: HashMap::new(),
             save_directory: None,
             next_file_handle: 1,
@@ -2054,6 +2094,71 @@ mod tests {
             CYCLES_PER_FRAME / CPU_CYCLES_PER_INSTRUCTION
         );
         assert_eq!(emu.cycle_count, CYCLES_PER_FRAME);
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    #[ignore = "manual JIT throughput benchmark"]
+    fn benchmark_jit_hot_integer_loop() {
+        fn make_emulator(jit_enabled: bool, block_count: u32) -> Emulator {
+            let mut emu = Emulator::default();
+            for block_index in 0..block_count {
+                let block_address = 0x8000_0000 + block_index * 64;
+                let next_address = 0x8000_0000 + ((block_index + 1) % block_count) * 64;
+                let instructions = [
+                    (0x09 << 26) | (8 << 21) | (8 << 16) | 1,
+                    (9 << 21) | (8 << 16) | (9 << 11) | 0x21,
+                    (9 << 21) | (8 << 16) | (10 << 11) | 0x26,
+                    (10 << 21) | (8 << 16) | (11 << 11) | 0x25,
+                    (11 << 16) | (12 << 11) | (3 << 6),
+                    (12 << 16) | (13 << 11) | (2 << 6) | 0x02,
+                    (13 << 21) | (8 << 16) | (14 << 11) | 0x24,
+                    (0x2b << 26) | (14 << 16) | 0x0200,
+                    (0x23 << 26) | (15 << 16) | 0x0200,
+                    (15 << 21) | (8 << 16) | (16 << 11) | 0x23,
+                    (0x0d << 26) | (16 << 21) | (17 << 16) | 0x55aa,
+                    (0x0e << 26) | (17 << 21) | (18 << 16) | 0xa55a,
+                    (18 << 21) | (8 << 16) | (19 << 11) | 0x2b,
+                    (19 << 21) | (9 << 16) | (20 << 11) | 0x21,
+                    (0x02 << 26) | ((next_address >> 2) & 0x03ff_ffff),
+                    0,
+                ];
+                for (index, instruction) in instructions.into_iter().enumerate() {
+                    emu.memory
+                        .write_u32(block_address + (index as u32) * 4, instruction)
+                        .unwrap();
+                }
+            }
+            emu.set_jit_enabled(jit_enabled);
+            emu.start();
+            emu
+        }
+
+        fn measure(mut emu: Emulator) -> (std::time::Duration, std::time::Duration) {
+            let cold_start = std::time::Instant::now();
+            emu.tick().unwrap();
+            let cold = cold_start.elapsed();
+            let warm_start = std::time::Instant::now();
+            for _ in 0..5 {
+                emu.tick().unwrap();
+            }
+            (cold, warm_start.elapsed())
+        }
+
+        let (interpreter_cold, interpreter_warm) = measure(make_emulator(false, 1));
+        let (jit_cold, jit_warm) = measure(make_emulator(true, 1));
+        eprintln!(
+            "cold: interpreter={interpreter_cold:?} jit={jit_cold:?} ratio={:.2}x; warm: interpreter={interpreter_warm:?} jit={jit_warm:?} speedup={:.2}x",
+            jit_cold.as_secs_f64() / interpreter_cold.as_secs_f64(),
+            interpreter_warm.as_secs_f64() / jit_warm.as_secs_f64()
+        );
+        let (many_interpreter_cold, many_interpreter_warm) = measure(make_emulator(false, 64));
+        let (many_jit_cold, many_jit_warm) = measure(make_emulator(true, 64));
+        eprintln!(
+            "64 blocks cold: interpreter={many_interpreter_cold:?} jit={many_jit_cold:?} ratio={:.2}x; warm: interpreter={many_interpreter_warm:?} jit={many_jit_warm:?} ratio={:.2}x",
+            many_jit_cold.as_secs_f64() / many_interpreter_cold.as_secs_f64(),
+            many_jit_warm.as_secs_f64() / many_interpreter_warm.as_secs_f64()
+        );
     }
 
     #[test]
