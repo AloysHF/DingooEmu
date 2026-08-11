@@ -15,5 +15,10 @@ name = "dingooemu"
 crate-type = ["cdylib"]
 
 [dependencies]
-dingooemu-core.workspace = true
 log.workspace = true
+
+[target.'cfg(all(target_os = "android", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))'.dependencies]
+dingooemu-core = { workspace = true, features = ["jit"] }
+
+[target.'cfg(not(all(target_os = "android", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))'.dependencies]
+dingooemu-core.workspace = true

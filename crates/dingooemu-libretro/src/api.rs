@@ -382,6 +382,7 @@ struct CoreOptions {
     swap_ab: bool,
     debug_logging: bool,
     unknown_instruction_policy: UnknownInstructionPolicy,
+    jit_enabled: bool,
 }
 
 impl Default for CoreOptions {
@@ -393,12 +394,13 @@ impl Default for CoreOptions {
             swap_ab: false,
             debug_logging: false,
             unknown_instruction_policy: UnknownInstructionPolicy::Skip,
+            jit_enabled: true,
         }
     }
 }
 
 fn core_option_variables() -> Vec<RetroVariable> {
-    vec![
+    let mut variables = vec![
         RetroVariable {
             key: c"dingooemu_volume".as_ptr(),
             value: c"Audio Volume (%); 100|90|80|70|60|50|40|30|20|10|0".as_ptr(),
@@ -423,11 +425,21 @@ fn core_option_variables() -> Vec<RetroVariable> {
             key: c"dingooemu_unknown_instruction".as_ptr(),
             value: c"Unknown MIPS Instruction Policy; skip|stop".as_ptr(),
         },
-        RetroVariable {
-            key: ptr::null(),
-            value: ptr::null(),
-        },
-    ]
+    ];
+    #[cfg(all(
+        target_os = "android",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    variables.push(RetroVariable {
+        key: c"dingooemu_cpu_engine".as_ptr(),
+        value: c"CPU Execution Engine; jit|interpreter".as_ptr(),
+    });
+    variables.push(RetroVariable {
+        key: ptr::null(),
+        value: ptr::null(),
+    });
+    variables
 }
 
 fn set_core_options() {
@@ -494,6 +506,9 @@ fn read_core_options(mut get: impl FnMut(&CStr) -> Option<String>) -> CoreOption
             UnknownInstructionPolicy::Skip
         };
     }
+    if let Some(engine) = get(c"dingooemu_cpu_engine") {
+        options.jit_enabled = engine != "interpreter";
+    }
     options
 }
 
@@ -508,14 +523,16 @@ fn apply_core_options(emulator: &mut Emulator) {
     emulator
         .cpu
         .set_unknown_instruction_policy(options.unknown_instruction_policy);
+    emulator.set_jit_enabled(options.jit_enabled);
     log::info!(
-        "Core options applied: volume={} repeat_delay={} repeat_period={} swap_ab={} debug_logging={} unknown_instruction={:?}",
+        "Core options applied: volume={} repeat_delay={} repeat_period={} swap_ab={} debug_logging={} unknown_instruction={:?} cpu_engine={}",
         options.volume,
         options.repeat_delay,
         options.repeat_period,
         options.swap_ab,
         options.debug_logging,
-        options.unknown_instruction_policy
+        options.unknown_instruction_policy,
+        if options.jit_enabled { "jit" } else { "interpreter" }
     );
 }
 
@@ -795,6 +812,27 @@ mod tests {
             })
             .unknown_instruction_policy,
             UnknownInstructionPolicy::Stop
+        );
+    }
+
+    #[test]
+    #[cfg(all(
+        target_os = "android",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    fn cpu_engine_option_defaults_to_jit_and_allows_interpreter() {
+        let variables = core_option_variables();
+        assert_eq!(
+            unsafe { CStr::from_ptr(variables[6].key) },
+            c"dingooemu_cpu_engine"
+        );
+        assert!(read_core_options(|_| None).jit_enabled);
+        assert!(
+            !read_core_options(|key| {
+                (key == c"dingooemu_cpu_engine").then(|| "interpreter".to_string())
+            })
+            .jit_enabled
         );
     }
 

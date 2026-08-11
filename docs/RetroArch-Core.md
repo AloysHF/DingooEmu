@@ -123,9 +123,14 @@ loads while content remains loaded.
 | Swap A/B Buttons | `disabled`, `enabled` | `disabled` | Exchanges the emulated A and B button meanings. |
 | CPU/HLE Debug Logging | `disabled`, `enabled` | `disabled` | Enables detailed interpreter and HLE records in the frontend log. |
 | Unknown MIPS Instruction Policy | `skip`, `stop` | `skip` | Logs and skips unsupported instructions or stops with an execution error. |
+| CPU Execution Engine (64-bit Android) | `jit`, `interpreter` | `jit` | Uses native translation for hot CPU blocks on arm64-v8a and x86_64 Android. Other targets and unsupported instructions use the interpreter. Select `interpreter` for compatibility testing. |
 
 Core option changes are applied while content is running and restored after a
 RetroArch reset.
+
+The JIT waits until a block has executed 256 times and rate-limits native
+compilation to one block every four frames. Short blocks and repeatedly
+unsupported memory paths remain on the interpreter to avoid runtime stutter.
 
 ## RetroPad Button Mapping
 
