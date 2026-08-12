@@ -34,6 +34,17 @@ If the Online Updater is not available, you can install the core manually:
    and copy `dingooemu_libretro.info` into RetroArch's `info/` directory.
 3. **Load** the core and content the same way as on desktop.
 
+## CPU execution engines
+
+The `arm64-v8a` and `x86_64` cores use a tiered JIT by default. Frequently
+executed MIPS32 blocks are translated to native code, while unsupported or
+low-frequency paths continue through the cached interpreter. Compilation is
+rate-limited to avoid introducing frame-time spikes while a game warms up.
+
+Use **Quick Menu → Core Options → CPU Execution Engine** to switch to
+`interpreter` for compatibility testing. The `armeabi-v7a` and `x86` cores
+always use the interpreter and do not expose this option.
+
 ## Building the Android core locally
 
 Building for Android requires the [Android NDK](https://developer.android.com/ndk)

@@ -56,7 +56,7 @@
     zh: {
       // meta
       'meta-title': 'DingooEmu — Dingoo A320 掌机模拟器',
-      'meta-desc': '用 Rust 编写的 Dingoo A320 掌机模拟器，支持 MIPS32 CPU 模拟、Dingoo SDK HLE、RetroArch 核心',
+      'meta-desc': '用 Rust 编写的 Dingoo A320 掌机模拟器，支持 MIPS32 CPU 模拟、64 位 Android JIT 加速、Dingoo SDK HLE 和 RetroArch 核心',
       // nav
       'nav-features': '核心特性',
       'nav-games': '游戏库',
@@ -89,8 +89,8 @@
       // features
       'feat-title': '核心特性',
       'feat-subtitle': '从 MIPS CPU 到 Dingoo SDK，全栈 Rust 实现',
-      'feat-mips-title': 'MIPS32 CPU 模拟',
-      'feat-mips-desc': '带直接映射指令块缓存的 MIPS32 XBurst 解释器，支持寄存器、内存管理、COP0 协处理器和异常处理。',
+      'feat-mips-title': 'MIPS32 CPU 与 JIT',
+      'feat-mips-desc': '全平台使用缓存解释器，64 位 Android 还可将高频 MIPS32 指令块动态翻译为本机代码，并对不支持的路径精确回退。',
       'feat-sdk-title': 'Dingoo SDK HLE',
       'feat-sdk-desc': '高层模拟 Dingoo 原生 SDK，包括图形渲染、输入处理、音频播放、文件系统和多任务调度。',
       'feat-dual-title': '双前端架构',
@@ -114,6 +114,7 @@
       'arch-libretro-sub': 'libretro cdylib<br>RetroArch 核心',
       'arch-core': '核心引擎',
       'arch-core-sub': '平台无关的库',
+      'arch-cpu': 'MIPS CPU / JIT',
       'arch-platforms': '目标平台',
       // quickstart
       'qs-title': '快速开始',
@@ -147,7 +148,7 @@
     en: {
       // meta
       'meta-title': 'DingooEmu — Dingoo A320 Handheld Emulator',
-      'meta-desc': 'A Dingoo A320 handheld emulator written in Rust, supporting MIPS32 CPU emulation, Dingoo SDK HLE, and RetroArch core',
+      'meta-desc': 'A Dingoo A320 handheld emulator written in Rust with MIPS32 CPU emulation, 64-bit Android JIT acceleration, Dingoo SDK HLE, and a RetroArch core',
       // nav
       'nav-features': 'Features',
       'nav-games': 'Games',
@@ -180,8 +181,8 @@
       // features
       'feat-title': 'Core Features',
       'feat-subtitle': 'From MIPS CPU to Dingoo SDK — full-stack Rust implementation',
-      'feat-mips-title': 'MIPS32 CPU Emulation',
-      'feat-mips-desc': 'MIPS32 XBurst interpreter with a direct-mapped instruction block cache, register management, memory handling, COP0 coprocessor, and exception processing.',
+      'feat-mips-title': 'MIPS32 CPU & JIT',
+      'feat-mips-desc': 'A cached interpreter runs on every platform, while 64-bit Android can translate hot MIPS32 blocks to native code with precise fallback for unsupported paths.',
       'feat-sdk-title': 'Dingoo SDK HLE',
       'feat-sdk-desc': 'High-level emulation of Dingoo native SDK including graphics rendering, input handling, audio playback, filesystem, and multi-task scheduling.',
       'feat-dual-title': 'Dual Frontend',
@@ -205,6 +206,7 @@
       'arch-libretro-sub': 'libretro cdylib · RetroArch core',
       'arch-core': 'Core Engine',
       'arch-core-sub': 'Platform-independent library',
+      'arch-cpu': 'MIPS CPU / JIT',
       'arch-platforms': 'Platforms',
       // quickstart
       'qs-title': 'Quick Start',
