@@ -56,8 +56,7 @@ dingooemu [OPTIONS] <PATH>
 | `--unknown-instruction-policy <MODE>` | `stop`, `skip` | `skip` | Stop on or log and skip an unimplemented MIPS instruction. |
 | `--unknown-hle-policy <MODE>` | `report`, `stop` | `report` | Aggregate unknown SDK calls and continue with zero, or stop at the first non-allowlisted call. |
 | `--allow-unknown-hle <NAME>` | exact function name | — | Preserve compatibility-stub behavior for one function in strict HLE mode; may be repeated. |
-| `--hle-report <PATH>` | path | — | Write stable JSON diagnostics with run, framebuffer, guest PCM, and aggregated unknown-HLE evidence. |
-| `--input-script <PATH>` | path | — | Replay a versioned per-frame input script and record exact framebuffer checkpoints; requires headless or screenshot mode. |
+| `--hle-report <PATH>` | path | — | Write stable JSON diagnostics with an `unknown_hle` list, including counts and first-call context. |
 | `--headless` | flag | off | Run in headless mode (no window). Runs for 300 frames and exits. |
 | `--frames <N>` | integer | `300` | Number of frames to run in headless mode. |
 | `-S, --screenshot <PATH>` | path | — | Render some frames, save a PNG screenshot, then exit. |
@@ -126,6 +125,21 @@ For compatibility testing, `--unknown-instruction-policy stop` turns the first
 unimplemented MIPS instruction into an execution error. The default `skip`
 behavior logs the instruction and continues, matching previous releases.
 
+Unknown SDK calls are always aggregated by exact function name. The default
+`--unknown-hle-policy report` returns zero for compatibility and logs only the
+first occurrence plus an end-of-run summary. Each entry records the total call
+count, import address, first guest call site, and the first `a0` through `a3`
+arguments. `--unknown-hle-policy stop` turns the first unknown call into an
+execution error after recording it. Use `--allow-unknown-hle NAME` only for a
+reviewed compatibility exception; matching is case-sensitive and exact.
+
+The JSON report is written even when strict mode stops emulation:
+
+```bash
+dingooemu game.app --headless --frames 300 --unknown-hle-policy stop \
+  --hle-report hle-report.json
+```
+
 ## Audio Output
 
 The standalone emulator sends Dingoo PCM audio to the default system output
@@ -163,19 +177,34 @@ dingooemu path/to/game.app --screenshot preview.png
 dingooemu path/to/game.app --screenshot preview.png --screenshot-frames 60
 ```
 
-## Compatibility Testing
+## Batch Screenshot Mode
 
-The diagnostic and input options above support strict instruction/HLE checks,
-machine-readable reports, and deterministic input replay. To run the
-repository's complete compatibility suite against locally supplied games:
+Build the standalone emulator and capture every `.app` file under
+`tmp/dingoo_game` recursively:
 
 ```powershell
 pwsh -NoProfile -File scripts/batch-screenshots.ps1
 ```
 
-For level definitions, report artifacts, strict-mode usage, scenario formats,
-authoring workflows, negative validation, and determinism rules, see
-[Compatibility Testing](Compatibility-Testing.md).
+Screenshots are written to `docs/images`, and per-game JSON diagnostics are
+written to `tmp/hle-reports`. Every report contains an `unknown_hle` array,
+including an empty array when no gaps were observed. The default capture point
+is 60 frames, with per-game overrides for slow-starting or
+performance-sensitive titles. Explicit parameters apply the requested values
+to every game:
+
+```powershell
+pwsh -NoProfile -File scripts/batch-screenshots.ps1 -Frames 60 -TimeoutSeconds 30
+```
+
+Run the same set in strict mode, optionally with reviewed exceptions:
+
+```powershell
+pwsh -NoProfile -File scripts/batch-screenshots.ps1 `
+  -UnknownHlePolicy stop `
+  -AllowUnknownHle legacy_function `
+  -ReportDirectory tmp/hle-reports-strict
+```
 
 ## Examples
 

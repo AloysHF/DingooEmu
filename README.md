@@ -23,7 +23,7 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 - **Tiered MIPS32 CPU execution** — Cached interpreter on every platform, plus native translation of hot blocks on 64-bit Android
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
 - **HLE (High-Level Emulation)** — Dingoo SDK functions for graphics, focused-window key callbacks, audio, timing, files, and companion-content discovery implemented in Rust
-- **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and produce machine-graded L0/L1/L2/L3 JSON and CSV reports with deterministic input and PCM checkpoints
+- **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and emit per-game JSON reports for review
 - **`.app` file support** — Parse and load Dingoo A320 game container format
 - **Frame rendering** — Native 320×240 RGB565 framebuffer output
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
@@ -125,7 +125,6 @@ crates/
 │       └── error.rs             # Error types
 ├── dingooemu/                   # Standalone binary (-> dingooemu)
 │   └── src/
-│       ├── input_script.rs      # Deterministic input replay and checkpoints
 │       └── main.rs              # Window loop and CLI front-end
 └── dingooemu-libretro/          # libretro cdylib (-> dingooemu_libretro.{dll,so,dylib})
     ├── dingooemu_libretro.info  # RetroArch core metadata
@@ -139,9 +138,9 @@ crates/
 
 ## Game Compatibility
 
-Compatibility results are experimental and cover only explicitly tested
-scenarios. See [Game Compatibility](docs/Game-Compatibility.md) for the current
-36-build L0–L3 results, screenshots, and scope of each result.
+Compatibility results are experimental and cover startup and initial rendering
+only. See [Game Compatibility](docs/Game-Compatibility.md) for the current
+36-build results and screenshots.
 
 ## Keyboard Controls
 

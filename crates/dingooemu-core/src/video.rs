@@ -9,19 +9,6 @@ pub const FRAMEBUFFER_MAP_SIZE: usize = 0x0002_6000;
 /// Fixed framebuffer address returned by the SDK.
 pub const VM_LCD_FB_ADDRESS: u32 = 0x9400_0000;
 
-/// Deterministic framebuffer metrics used by compatibility reports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct FramebufferStats {
-    pub width: u32,
-    pub height: u32,
-    pub total_pixels: u32,
-    pub non_black_pixels: u32,
-    pub unique_colors: u32,
-    pub dominant_color_rgb565: u16,
-    pub dominant_color_pixels: u32,
-    pub crc32_rgb565: u32,
-}
-
 /// Video subsystem
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Video {
@@ -104,42 +91,6 @@ impl Video {
         pixels
     }
 
-    /// Measure the current RGB565 framebuffer without changing video state.
-    pub fn framebuffer_stats(&self) -> FramebufferStats {
-        let mut counts = vec![0u32; u16::MAX as usize + 1];
-        let mut non_black_pixels = 0;
-        let mut unique_colors = 0;
-        let mut dominant_color_rgb565 = 0;
-        let mut dominant_color_pixels = 0;
-
-        for pixel in self.framebuffer.chunks_exact(2) {
-            let color = u16::from_le_bytes([pixel[0], pixel[1]]);
-            if color != 0 {
-                non_black_pixels += 1;
-            }
-            let count = &mut counts[color as usize];
-            if *count == 0 {
-                unique_colors += 1;
-            }
-            *count += 1;
-            if *count > dominant_color_pixels {
-                dominant_color_rgb565 = color;
-                dominant_color_pixels = *count;
-            }
-        }
-
-        FramebufferStats {
-            width: SCREEN_WIDTH,
-            height: SCREEN_HEIGHT,
-            total_pixels: SCREEN_WIDTH * SCREEN_HEIGHT,
-            non_black_pixels,
-            unique_colors,
-            dominant_color_rgb565,
-            dominant_color_pixels,
-            crc32_rgb565: self.framebuffer_crc32(),
-        }
-    }
-
     /// Calculate a deterministic CRC32 over the raw RGB565 framebuffer.
     pub fn framebuffer_crc32(&self) -> u32 {
         crc32fast::hash(&self.framebuffer)
@@ -204,27 +155,6 @@ mod tests {
 
         let xrgb = video.to_xrgb8888();
         assert_eq!(xrgb[0], 0xFFFF_FFFF); // White
-    }
-
-    #[test]
-    fn framebuffer_stats_count_colors_and_dominant_pixels() {
-        let mut video = Video::new();
-        video.framebuffer_mut()[0..2].copy_from_slice(&0xffff_u16.to_le_bytes());
-        video.framebuffer_mut()[2..4].copy_from_slice(&0xf800_u16.to_le_bytes());
-
-        assert_eq!(
-            video.framebuffer_stats(),
-            FramebufferStats {
-                width: 320,
-                height: 240,
-                total_pixels: 76_800,
-                non_black_pixels: 2,
-                unique_colors: 3,
-                dominant_color_rgb565: 0,
-                dominant_color_pixels: 76_798,
-                crc32_rgb565: video.framebuffer_crc32(),
-            }
-        );
     }
 
     #[test]
