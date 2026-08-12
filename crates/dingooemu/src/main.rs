@@ -1,5 +1,4 @@
 mod gamepad_overlay;
-mod input_script;
 mod keyboard;
 mod scaler;
 
@@ -10,7 +9,6 @@ use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator, Unknow
 use minifb::{Key, Window, WindowOptions};
 use std::path::{Path, PathBuf};
 
-use input_script::InputPlayback;
 use keyboard::{KeyboardMapper, RemapSpec};
 use scaler::{DisplayScaler, ScaleFilter};
 
@@ -187,10 +185,6 @@ struct Args {
     #[arg(long = "hle-report", value_name = "PATH")]
     hle_report: Option<PathBuf>,
 
-    /// Replay deterministic per-frame input and record framebuffer checkpoints
-    #[arg(long = "input-script", value_name = "PATH")]
-    input_script: Option<PathBuf>,
-
     /// Run in headless mode (no window)
     #[arg(long)]
     headless: bool,
@@ -231,30 +225,14 @@ fn main() -> anyhow::Result<()> {
         emu.set_parsed_cheat(index as u32, true, cheat)?;
     }
 
-    let requested_frames = if args.screenshot.is_some() {
-        Some(args.screenshot_frames)
-    } else if args.headless {
-        Some(args.frames)
-    } else {
-        None
-    };
     emu.audio
-        .set_host_output_enabled(requested_frames.is_none());
-    let content_name = Path::new(&args.path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(&args.path);
-    let mut input_playback = match (&args.input_script, requested_frames) {
-        (Some(path), Some(frames)) => Some(InputPlayback::load(path, content_name, frames)?),
-        (Some(_), None) => anyhow::bail!("--input-script requires --headless or --screenshot"),
-        (None, _) => None,
-    };
+        .set_host_output_enabled(args.screenshot.is_none() && !args.headless);
 
     emu.start();
 
-    let emulation_result = run_emulation(&args, &mut emu, input_playback.as_mut());
+    let emulation_result = run_emulation(&args, &mut emu);
     log_unknown_hle_summary(&emu);
-    let report_result = write_unknown_hle_report(&args, &emu, input_playback.as_ref());
+    let report_result = write_unknown_hle_report(&args, &emu);
     if let Err(error) = &report_result {
         log::error!("Failed to write HLE diagnostics: {error}");
     }
@@ -263,17 +241,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_emulation(
-    args: &Args,
-    emu: &mut Emulator,
-    mut input_playback: Option<&mut InputPlayback>,
-) -> anyhow::Result<()> {
+fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
     // Screenshot mode: run headless for N frames, save PNG, and exit
     if let Some(ref screenshot_path) = args.screenshot {
         for frame in 0..args.screenshot_frames {
-            apply_scripted_input(input_playback.as_deref_mut(), emu, frame);
             emu.tick()?;
-            record_input_checkpoint(input_playback.as_deref_mut(), emu, frame + 1);
             if frame % 60 == 0 {
                 log::info!("Frame {}", frame);
             }
@@ -287,9 +259,7 @@ fn run_emulation(
         // Headless mode: run for the requested number of frames
         log::info!("Running in headless mode");
         for frame in 0..args.frames {
-            apply_scripted_input(input_playback.as_deref_mut(), emu, frame);
             emu.tick()?;
-            record_input_checkpoint(input_playback.as_deref_mut(), emu, frame + 1);
             if frame % 60 == 0 {
                 log::info!("Frame {}", frame);
             }
@@ -364,26 +334,6 @@ fn run_emulation(
     Ok(())
 }
 
-fn apply_scripted_input(
-    input_playback: Option<&mut InputPlayback>,
-    emu: &mut Emulator,
-    frame: u32,
-) {
-    if let Some(playback) = input_playback {
-        emu.set_buttons(playback.buttons_for_frame(frame));
-    }
-}
-
-fn record_input_checkpoint(
-    input_playback: Option<&mut InputPlayback>,
-    emu: &Emulator,
-    completed_frame: u32,
-) {
-    if let Some(playback) = input_playback {
-        playback.record_checkpoint(completed_frame, &emu.video);
-    }
-}
-
 fn log_unknown_hle_summary(emu: &Emulator) {
     let calls: Vec<_> = emu.unknown_hle_calls().collect();
     if calls.is_empty() {
@@ -407,46 +357,22 @@ fn log_unknown_hle_summary(emu: &Emulator) {
     }
 }
 
-fn unknown_hle_report(
-    args: &Args,
-    emu: &Emulator,
-    input_playback: Option<&InputPlayback>,
-) -> serde_json::Value {
+fn unknown_hle_report(args: &Args, emu: &Emulator) -> serde_json::Value {
     let content = Path::new(&args.path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(&args.path);
     let unknown_hle: Vec<_> = emu.unknown_hle_calls().collect();
-    let (mode, requested_frames) = if args.screenshot.is_some() {
-        ("screenshot", Some(args.screenshot_frames))
-    } else if args.headless {
-        ("headless", Some(args.frames))
-    } else {
-        ("windowed", None)
-    };
     serde_json::json!({
-        "schema_version": 3,
+        "schema_version": 1,
         "content": content,
         "policy": args.unknown_hle_policy.as_str(),
         "allowlist": args.allowed_unknown_hle,
-        "run": {
-            "mode": mode,
-            "requested_frames": requested_frames,
-            "executed_frames": emu.frame_count(),
-            "executed_instructions": emu.cpu.instruction_count,
-        },
-        "framebuffer": emu.video.framebuffer_stats(),
-        "input": input_playback.map(InputPlayback::diagnostics),
-        "audio": emu.audio.diagnostics(),
         "unknown_hle": unknown_hle,
     })
 }
 
-fn write_unknown_hle_report(
-    args: &Args,
-    emu: &Emulator,
-    input_playback: Option<&InputPlayback>,
-) -> anyhow::Result<()> {
+fn write_unknown_hle_report(args: &Args, emu: &Emulator) -> anyhow::Result<()> {
     let Some(path) = args.hle_report.as_ref() else {
         return Ok(());
     };
@@ -456,7 +382,7 @@ fn write_unknown_hle_report(
     {
         std::fs::create_dir_all(parent)?;
     }
-    let output = serde_json::to_vec_pretty(&unknown_hle_report(args, emu, input_playback))?;
+    let output = serde_json::to_vec_pretty(&unknown_hle_report(args, emu))?;
     std::fs::write(path, output)?;
     log::info!("HLE diagnostics saved to: {}", path.display());
     Ok(())
@@ -672,65 +598,14 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(
-            unknown_hle_report(&args, &Emulator::default(), None),
+            unknown_hle_report(&args, &Emulator::default()),
             serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 1,
                 "content": "game.app",
                 "policy": "report",
                 "allowlist": [],
-                "run": {
-                    "mode": "windowed",
-                    "requested_frames": null,
-                    "executed_frames": 0,
-                    "executed_instructions": 0,
-                },
-                "framebuffer": {
-                    "width": 320,
-                    "height": 240,
-                    "total_pixels": 76800,
-                    "non_black_pixels": 0,
-                    "unique_colors": 1,
-                    "dominant_color_rgb565": 0,
-                    "dominant_color_pixels": 76800,
-                    "crc32_rgb565": 107898017,
-                },
-                "input": null,
-                "audio": {
-                    "schema_version": 1,
-                    "configurations": [],
-                    "open_count": 0,
-                    "close_count": 0,
-                    "write_calls": 0,
-                    "successful_write_calls": 0,
-                    "rejected_write_calls": 0,
-                    "silenced_write_calls": 0,
-                    "queue_full_events": 0,
-                    "submitted_bytes": 0,
-                    "decoded_frames": 0,
-                    "decoded_samples": 0,
-                    "nonzero_samples": 0,
-                    "clipped_samples": 0,
-                    "peak_amplitude": 0,
-                    "rms_amplitude": 0.0,
-                    "pcm_crc32": null,
-                    "observed_video_frames": 0,
-                    "active_audio_frames": 0,
-                    "underflow_frames": 0,
-                    "max_consecutive_underflow_frames": 0,
-                    "max_buffered_frames": 0,
-                    "buffered_frames_at_end": 0,
-                },
                 "unknown_hle": [],
             })
         );
-    }
-
-    #[test]
-    fn input_script_option_is_parsed() {
-        let args = Args::try_parse_from(["dingoo-emu", "--input-script", "input.json", "game.app"])
-            .unwrap();
-        assert_eq!(args.input_script, Some(PathBuf::from("input.json")));
-        assert!(!args.headless);
-        assert!(args.screenshot.is_none());
     }
 }

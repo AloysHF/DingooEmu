@@ -43,167 +43,6 @@ pub struct AudioConfig {
     pub volume: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
-pub struct AudioDiagnostics {
-    pub schema_version: u32,
-    pub configurations: Vec<AudioConfig>,
-    pub open_count: u64,
-    pub close_count: u64,
-    pub write_calls: u64,
-    pub successful_write_calls: u64,
-    pub rejected_write_calls: u64,
-    pub silenced_write_calls: u64,
-    pub queue_full_events: u64,
-    pub submitted_bytes: u64,
-    pub decoded_frames: u64,
-    pub decoded_samples: u64,
-    pub nonzero_samples: u64,
-    pub clipped_samples: u64,
-    pub peak_amplitude: u16,
-    pub rms_amplitude: f64,
-    pub pcm_crc32: Option<String>,
-    pub observed_video_frames: u64,
-    pub active_audio_frames: u64,
-    pub underflow_frames: u64,
-    pub max_consecutive_underflow_frames: u64,
-    pub max_buffered_frames: u64,
-    pub buffered_frames_at_end: u64,
-}
-
-#[derive(Clone, Default)]
-struct AudioDiagnosticsTracker {
-    configurations: Vec<AudioConfig>,
-    open_count: u64,
-    close_count: u64,
-    write_calls: u64,
-    successful_write_calls: u64,
-    rejected_write_calls: u64,
-    silenced_write_calls: u64,
-    queue_full_events: u64,
-    submitted_bytes: u64,
-    decoded_frames: u64,
-    decoded_samples: u64,
-    nonzero_samples: u64,
-    clipped_samples: u64,
-    peak_amplitude: u16,
-    sum_squares: f64,
-    pcm_crc32: crc32fast::Hasher,
-    observed_video_frames: u64,
-    active_audio_frames: u64,
-    underflow_frames: u64,
-    consecutive_underflow_frames: u64,
-    max_consecutive_underflow_frames: u64,
-    buffered_frame_units: u64,
-    max_buffered_frames: u64,
-    stream_started: bool,
-}
-
-impl AudioDiagnosticsTracker {
-    #[cfg(feature = "standalone")]
-    fn can_accept_half_second(&self, sample_rate: u32) -> bool {
-        self.buffered_frame_units < u64::from(sample_rate) * 30
-    }
-
-    fn record_open(&mut self, config: AudioConfig) {
-        self.open_count += 1;
-        self.configurations.push(config);
-        self.buffered_frame_units = 0;
-        self.consecutive_underflow_frames = 0;
-        self.stream_started = false;
-    }
-
-    fn record_close(&mut self) {
-        self.close_count += 1;
-        self.buffered_frame_units = 0;
-        self.consecutive_underflow_frames = 0;
-        self.stream_started = false;
-    }
-
-    fn record_write(&mut self, data: &[u8], samples: &[f32], channels: usize) {
-        self.successful_write_calls += 1;
-        self.submitted_bytes += data.len() as u64;
-        self.decoded_samples += samples.len() as u64;
-        let frames = (samples.len() / channels) as u64;
-        self.decoded_frames += frames;
-        self.buffered_frame_units = self
-            .buffered_frame_units
-            .saturating_add(frames.saturating_mul(60));
-        self.max_buffered_frames = self
-            .max_buffered_frames
-            .max(self.buffered_frame_units.div_ceil(60));
-        self.stream_started = true;
-        self.pcm_crc32.update(data);
-
-        for sample in samples {
-            let amplitude = sample.abs();
-            if *sample != 0.0 {
-                self.nonzero_samples += 1;
-            }
-            if amplitude >= 1.0 {
-                self.clipped_samples += 1;
-            }
-            self.peak_amplitude = self
-                .peak_amplitude
-                .max((amplitude * 32768.0).round().min(32768.0) as u16);
-            self.sum_squares += f64::from(*sample) * f64::from(*sample);
-        }
-    }
-
-    fn advance_frame(&mut self, config: Option<AudioConfig>) {
-        self.observed_video_frames += 1;
-        let Some(config) = config.filter(|_| self.stream_started) else {
-            return;
-        };
-
-        self.active_audio_frames += 1;
-        if self.buffered_frame_units >= u64::from(config.sample_rate) {
-            self.buffered_frame_units -= u64::from(config.sample_rate);
-            self.consecutive_underflow_frames = 0;
-        } else {
-            self.buffered_frame_units = 0;
-            self.underflow_frames += 1;
-            self.consecutive_underflow_frames += 1;
-            self.max_consecutive_underflow_frames = self
-                .max_consecutive_underflow_frames
-                .max(self.consecutive_underflow_frames);
-        }
-    }
-
-    fn snapshot(&self) -> AudioDiagnostics {
-        let rms_amplitude = if self.decoded_samples == 0 {
-            0.0
-        } else {
-            (self.sum_squares / self.decoded_samples as f64).sqrt()
-        };
-        AudioDiagnostics {
-            schema_version: 1,
-            configurations: self.configurations.clone(),
-            open_count: self.open_count,
-            close_count: self.close_count,
-            write_calls: self.write_calls,
-            successful_write_calls: self.successful_write_calls,
-            rejected_write_calls: self.rejected_write_calls,
-            silenced_write_calls: self.silenced_write_calls,
-            queue_full_events: self.queue_full_events,
-            submitted_bytes: self.submitted_bytes,
-            decoded_frames: self.decoded_frames,
-            decoded_samples: self.decoded_samples,
-            nonzero_samples: self.nonzero_samples,
-            clipped_samples: self.clipped_samples,
-            peak_amplitude: self.peak_amplitude,
-            rms_amplitude,
-            pcm_crc32: (self.successful_write_calls > 0)
-                .then(|| format!("{:08x}", self.pcm_crc32.clone().finalize())),
-            observed_video_frames: self.observed_video_frames,
-            active_audio_frames: self.active_audio_frames,
-            underflow_frames: self.underflow_frames,
-            max_consecutive_underflow_frames: self.max_consecutive_underflow_frames,
-            max_buffered_frames: self.max_buffered_frames,
-            buffered_frames_at_end: self.buffered_frame_units.div_ceil(60),
-        }
-    }
-}
-
 impl AudioConfig {
     pub fn new(sample_rate: u32, format: u16, channels: u8, volume: u8) -> Option<Self> {
         if sample_rate == 0 || !(1..=2).contains(&channels) {
@@ -236,14 +75,15 @@ pub struct Audio {
     #[cfg(feature = "standalone")]
     #[serde(skip, default = "host_output_enabled_default")]
     host_output_enabled: bool,
+    #[cfg(feature = "standalone")]
+    #[serde(skip)]
+    virtual_buffered_frame_units: u64,
     #[cfg(not(feature = "standalone"))]
     pending_samples: VecDeque<i16>,
     #[cfg(not(feature = "standalone"))]
     output_frame_remainder: u32,
     #[cfg(not(feature = "standalone"))]
     resampler: StreamingResampler,
-    #[serde(skip)]
-    diagnostics: AudioDiagnosticsTracker,
 }
 
 impl Audio {
@@ -261,13 +101,14 @@ impl Audio {
             player: None,
             #[cfg(feature = "standalone")]
             host_output_enabled: true,
+            #[cfg(feature = "standalone")]
+            virtual_buffered_frame_units: 0,
             #[cfg(not(feature = "standalone"))]
             pending_samples: VecDeque::new(),
             #[cfg(not(feature = "standalone"))]
             output_frame_remainder: 0,
             #[cfg(not(feature = "standalone"))]
             resampler: StreamingResampler::default(),
-            diagnostics: AudioDiagnosticsTracker::default(),
         }
     }
 
@@ -275,7 +116,10 @@ impl Audio {
         self.close();
         self.volume = config.volume;
         self.config = Some(config);
-        self.diagnostics.record_open(config);
+        #[cfg(feature = "standalone")]
+        {
+            self.virtual_buffered_frame_units = 0;
+        }
 
         #[cfg(feature = "standalone")]
         {
@@ -315,10 +159,12 @@ impl Audio {
     }
 
     pub fn close(&mut self) -> bool {
-        let was_open = self.config.is_some();
         #[cfg(feature = "standalone")]
-        if let Some(player) = self.player.take() {
-            player.stop();
+        {
+            if let Some(player) = self.player.take() {
+                player.stop();
+            }
+            self.virtual_buffered_frame_units = 0;
         }
 
         #[cfg(not(feature = "standalone"))]
@@ -329,9 +175,6 @@ impl Audio {
         }
 
         self.config = None;
-        if was_open {
-            self.diagnostics.record_close();
-        }
         true
     }
 
@@ -348,7 +191,7 @@ impl Audio {
                     .is_none_or(|player| player.len() < MAX_QUEUED_AUDIO_BUFFERS)
             } else {
                 self.config.is_some_and(|config| {
-                    self.diagnostics.can_accept_half_second(config.sample_rate)
+                    self.virtual_buffered_frame_units < u64::from(config.sample_rate) * 30
                 })
             }
         }
@@ -360,37 +203,36 @@ impl Audio {
     }
 
     pub fn write(&mut self, data: &[u8]) -> bool {
-        self.diagnostics.write_calls += 1;
         let Some(config) = self.config else {
-            self.diagnostics.rejected_write_calls += 1;
             return false;
         };
         if data.is_empty() {
-            self.diagnostics.rejected_write_calls += 1;
             return false;
         }
         if self.muted || self.volume == 0 {
-            self.diagnostics.silenced_write_calls += 1;
             return true;
         }
         if !self.can_write() {
-            self.diagnostics.rejected_write_calls += 1;
             return false;
         }
 
         let samples = decode_pcm(data, config.format, config.channels);
         if samples.is_empty() {
-            self.diagnostics.rejected_write_calls += 1;
             return false;
         }
-        self.diagnostics
-            .record_write(data, &samples, config.channels as usize);
         let peak = samples
             .iter()
             .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
 
         #[cfg(feature = "standalone")]
         {
+            if !self.host_output_enabled {
+                let frames = (samples.len() / config.channels as usize) as u64;
+                self.virtual_buffered_frame_units = self
+                    .virtual_buffered_frame_units
+                    .saturating_add(frames.saturating_mul(60));
+                return true;
+            }
             let Some(player) = self.player.as_ref() else {
                 return true;
             };
@@ -448,6 +290,7 @@ impl Audio {
             }
             self.mixer = None;
             self.mixer_device = None;
+            self.virtual_buffered_frame_units = 0;
         }
     }
 
@@ -493,16 +336,15 @@ impl Audio {
         self.config
     }
 
-    pub fn diagnostics(&self) -> AudioDiagnostics {
-        self.diagnostics.snapshot()
-    }
-
-    pub fn record_queue_full(&mut self) {
-        self.diagnostics.queue_full_events += 1;
-    }
-
     pub fn advance_frame(&mut self) {
-        self.diagnostics.advance_frame(self.config);
+        #[cfg(feature = "standalone")]
+        if !self.host_output_enabled {
+            if let Some(config) = self.config {
+                self.virtual_buffered_frame_units = self
+                    .virtual_buffered_frame_units
+                    .saturating_sub(u64::from(config.sample_rate));
+            }
+        }
     }
 
     pub(crate) fn resume_after_state_load(&mut self) {
@@ -628,34 +470,6 @@ mod tests {
         assert_eq!(audio.master_volume(), 35);
         audio.set_master_volume(255);
         assert_eq!(audio.master_volume(), 100);
-    }
-
-    #[test]
-    fn diagnostics_measure_guest_pcm_and_virtual_underflow() {
-        let mut audio = Audio::new();
-        let config = AudioConfig::new(600, 8, 1, 100).unwrap();
-        assert!(audio.open(config));
-        assert!(audio.write(&[128, 255, 0, 128, 192, 64]));
-        audio.record_queue_full();
-        audio.advance_frame();
-
-        let diagnostics = audio.diagnostics();
-        assert_eq!(diagnostics.configurations, [config]);
-        assert_eq!(diagnostics.open_count, 1);
-        assert_eq!(diagnostics.write_calls, 1);
-        assert_eq!(diagnostics.successful_write_calls, 1);
-        assert_eq!(diagnostics.submitted_bytes, 6);
-        assert_eq!(diagnostics.decoded_frames, 6);
-        assert_eq!(diagnostics.decoded_samples, 6);
-        assert_eq!(diagnostics.nonzero_samples, 4);
-        assert_eq!(diagnostics.clipped_samples, 1);
-        assert_eq!(diagnostics.peak_amplitude, 32768);
-        assert!(diagnostics.rms_amplitude > 0.0);
-        assert!(diagnostics.pcm_crc32.is_some());
-        assert_eq!(diagnostics.queue_full_events, 1);
-        assert_eq!(diagnostics.active_audio_frames, 1);
-        assert_eq!(diagnostics.underflow_frames, 1);
-        assert_eq!(diagnostics.max_consecutive_underflow_frames, 1);
     }
 
     #[cfg(feature = "standalone")]

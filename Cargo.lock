@@ -717,7 +717,6 @@ dependencies = [
  "env_logger",
  "log",
  "minifb",
- "serde",
  "serde_json",
 ]
 
