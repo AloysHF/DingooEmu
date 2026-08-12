@@ -114,6 +114,22 @@ impl JitEngine {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.fast_entries.fill(FastJitCacheEntry::default());
+        if self.compiled_block_count != 0 {
+            // Discard every function pointer before dropping the module that owns it.
+            if let Some(compiler) = self.compiler.take() {
+                drop(compiler);
+                self.compiler = match Compiler::new() {
+                    Ok(compiler) => Some(compiler),
+                    Err(error) => {
+                        log::warn!(
+                            "MIPS JIT backend unavailable after cache invalidation: {error}"
+                        );
+                        None
+                    }
+                };
+            }
+            self.compiled_block_count = 0;
+        }
         self.compile_budget = 1;
         self.compile_cooldown = 0;
     }
@@ -1282,6 +1298,45 @@ mod tests {
             .is_some());
         assert!(engine.entries[&first_start].block.is_some());
         assert!(engine.entries[&second_start].block.is_some());
+    }
+
+    #[test]
+    fn clearing_cache_recreates_compiler_after_native_code_generation() {
+        let instructions = [
+            (0x09 << 26) | (8 << 16) | 1,
+            (0x09 << 26) | (8 << 21) | (8 << 16) | 1,
+            (8 << 21) | (8 << 16) | (9 << 11) | 0x21,
+            (9 << 21) | (8 << 16) | (10 << 11) | 0x26,
+        ];
+        let start = 0x1000;
+        let mut engine = JitEngine::new();
+        let mut registers = Registers::new(start);
+        let mut memory = Memory::new();
+        let ram = memory.jit_ram_ptr();
+        let framebuffer = memory.jit_framebuffer_ptr();
+
+        for _ in 0..HOT_BLOCK_THRESHOLD {
+            let _ = engine.execute(
+                start,
+                &instructions,
+                instructions.len(),
+                &mut registers,
+                ram,
+                framebuffer,
+            );
+        }
+        assert_eq!(engine.compiled_block_count, 1);
+        assert_eq!(engine.compiler.as_ref().unwrap().next_function_id, 1);
+
+        engine.clear();
+
+        assert!(engine.entries.is_empty());
+        assert!(engine
+            .fast_entries
+            .iter()
+            .all(|entry| entry.block.is_none()));
+        assert_eq!(engine.compiled_block_count, 0);
+        assert_eq!(engine.compiler.as_ref().unwrap().next_function_id, 0);
     }
 
     #[test]
