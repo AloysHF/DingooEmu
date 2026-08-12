@@ -168,3 +168,5 @@ Contributions are welcome! Whether you're interested in fixing bugs, adding feat
 ## License
 
 This project is licensed under the [BSD 3-Clause License](LICENSE).
+JIT-enabled Android binaries also contain compatible third-party components;
+their complete terms are included in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

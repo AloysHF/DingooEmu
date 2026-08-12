@@ -159,6 +159,7 @@ jobs:
           cp target/i686-linux-android/release/libdingooemu.so "$out/x86/dingooemu_libretro_android.so"
           cp target/x86_64-linux-android/release/libdingooemu.so "$out/x86_64/dingooemu_libretro_android.so"
           cp crates/dingooemu-libretro/dingooemu_libretro.info "$out/"
+          cp LICENSE THIRD_PARTY_LICENSES.md "$out/"
           ls -laR "$out"
 
       - name: Package libretro
