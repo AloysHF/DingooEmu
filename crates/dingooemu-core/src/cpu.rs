@@ -9,6 +9,7 @@ pub enum UnknownInstructionPolicy {
 }
 
 /// MIPS32 register file
+#[repr(C)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Registers {
     /// General purpose registers (R0-R31)

@@ -11,6 +11,8 @@ pub mod cpu;
 pub mod emulator;
 pub mod error;
 pub mod input;
+#[cfg(feature = "jit")]
+mod jit;
 pub mod memory;
 mod save_state;
 pub mod video;

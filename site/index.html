@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DingooEmu — Dingoo A320 掌机模拟器</title>
-  <meta name="description" content="用 Rust 编写的 Dingoo A320 掌机模拟器，支持 MIPS32 CPU 模拟、Dingoo SDK HLE、RetroArch 核心">
+  <meta name="description" content="用 Rust 编写的 Dingoo A320 掌机模拟器，支持 MIPS32 CPU 模拟、64 位 Android JIT 加速、Dingoo SDK HLE 和 RetroArch 核心">
   <link rel="icon" type="image/png" href="res/logo-banner.png">
   <link rel="stylesheet" href="css/style.css">
 </head>
@@ -140,8 +140,8 @@
           <div class="feature-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9l3 3-3 3"/><path d="M15 15l-3-3 3-3"/></svg>
           </div>
-          <h3 data-i18n="feat-mips-title">MIPS32 CPU 模拟</h3>
-          <p data-i18n="feat-mips-desc">带直接映射指令块缓存的 MIPS32 XBurst 解释器，支持寄存器、内存管理、COP0 协处理器和异常处理。</p>
+          <h3 data-i18n="feat-mips-title">MIPS32 CPU 与 JIT</h3>
+          <p data-i18n="feat-mips-desc">全平台使用缓存解释器，64 位 Android 还可将高频 MIPS32 指令块动态翻译为本机代码，并对不支持的路径精确回退。</p>
         </div>
         <div class="feature-card fade-in-up">
           <div class="feature-icon">
@@ -223,7 +223,7 @@
               <strong>dingooemu-core</strong>
               <small data-i18n="arch-core-sub">平台无关的库</small>
               <div class="core-modules">
-                <span>MIPS CPU</span>
+                <span data-i18n="arch-cpu">MIPS CPU / JIT</span>
                 <span>Memory</span>
                 <span>Graphics</span>
                 <span>Audio</span>
