@@ -121,33 +121,54 @@ impl Cpu {
             return Ok(());
         }
 
+        let instr = memory.fetch_instruction(self.regs.pc)?;
+        self.step_fetched(instr, memory)
+    }
+
+    /// Execute an instruction that was fetched by the runtime.
+    pub(crate) fn step_fetched(&mut self, instr: u32, memory: &mut Memory) -> Result<()> {
+        if self.step_fetched_unaccounted(instr, memory)? {
+            self.instruction_count += 1;
+        }
+        Ok(())
+    }
+
+    /// Execute a fetched instruction without updating the profiling counter.
+    pub(crate) fn step_fetched_unaccounted(
+        &mut self,
+        instr: u32,
+        memory: &mut Memory,
+    ) -> Result<bool> {
+        if !self.running {
+            return Ok(false);
+        }
         // If we have a pending branch (from previous instruction),
         // the delay slot is the NEXT instruction to execute
         if self.branch_delay {
             // The delay slot is at PC (which is already pointing to the delay slot)
             // Execute it first
-            let delay_instr = memory.read_u32(self.regs.pc)?;
             self.regs.pc = self.regs.pc.wrapping_add(4);
-            self.execute_instruction(delay_instr, memory)?;
+            self.execute_instruction(instr, memory)?;
 
             // After delay slot executes, apply the branch target
             self.branch_delay = false;
             self.regs.pc = self.branch_target;
             self.regs.gpr[0] = 0;
-            self.instruction_count += 1;
-            return Ok(());
+            return Ok(true);
         }
 
         // Normal instruction execution
-        let instr = memory.read_u32(self.regs.pc)?;
         self.regs.pc = self.regs.pc.wrapping_add(4);
         self.execute_instruction(instr, memory)?;
 
         // R0 is always zero
         self.regs.gpr[0] = 0;
 
-        self.instruction_count += 1;
-        Ok(())
+        Ok(true)
+    }
+
+    pub(crate) fn account_instructions(&mut self, count: u64) {
+        self.instruction_count += count;
     }
 
     /// Take a branch (sets delay slot)
@@ -162,6 +183,9 @@ impl Cpu {
 
     /// Execute a single instruction
     fn execute_instruction(&mut self, instr: u32, memory: &mut Memory) -> Result<()> {
+        if instr == 0 {
+            return Ok(());
+        }
         // Extract opcode (bits 31-26)
         let opcode = (instr >> 26) & 0x3F;
 
@@ -863,6 +887,18 @@ mod tests {
         cpu.start();
         cpu.step(&mut mem).unwrap();
         assert_eq!(cpu.regs.read(8), 0x1234);
+    }
+
+    #[test]
+    fn test_nop_advances_pc_and_instruction_count() {
+        let mut cpu = Cpu::new(0);
+        let mut mem = Memory::new();
+        cpu.start();
+
+        cpu.step(&mut mem).unwrap();
+
+        assert_eq!(cpu.regs.pc, 4);
+        assert_eq!(cpu.instruction_count, 1);
     }
 
     #[test]

@@ -66,7 +66,7 @@ platform-specific installation requirements:
 
 ## Supported Features
 
-- Video output using the XRGB8888 pixel format
+- Video output using the native RGB565 pixel format
 - PCM audio output resampled to 22050 Hz stereo
 - RetroPad input handling
 - `.app` content loading

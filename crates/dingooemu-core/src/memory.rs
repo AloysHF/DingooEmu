@@ -160,6 +160,7 @@ impl Memory {
 
     /// Translate MIPS virtual address to physical address
     /// Handles KSEG0 (0x80000000-0x9FFFFFFF) and KSEG1 (0xA0000000-0xBFFFFFFF)
+    #[inline(always)]
     fn translate_address(&self, addr: u32) -> u32 {
         match addr {
             // KSEG0: Cached, maps to 0x00000000-0x1FFFFFFF
@@ -169,6 +170,19 @@ impl Memory {
             // KSEG2/KSEG3: Not commonly used, pass through
             _ => addr,
         }
+    }
+
+    /// Fetch an instruction through the common RAM path.
+    #[inline(always)]
+    pub(crate) fn fetch_instruction(&self, addr: u32) -> Result<u32> {
+        let physical = self.translate_address(addr) as usize;
+        if physical <= self.ram.len() - std::mem::size_of::<u32>() {
+            let bytes: [u8; 4] = self.ram[physical..physical + 4]
+                .try_into()
+                .expect("instruction slice has a fixed length");
+            return Ok(u32::from_le_bytes(bytes));
+        }
+        self.read_u32(addr)
     }
 
     /// Read a byte from memory
@@ -239,16 +253,12 @@ impl Memory {
         let phys_addr = self.translate_address(addr);
         if phys_addr < RAM_SIZE {
             self.ram[phys_addr as usize] = value;
-            if self.write_log.len() < 1000 {
-                self.write_log.push(phys_addr);
-            }
+            self.track_writes(phys_addr, 1);
             return Ok(());
         }
         if let Some(offset) = self.framebuffer_offset(addr) {
             self.framebuffer[offset] = value;
-            if self.write_log.len() < 1000 {
-                self.write_log.push(addr);
-            }
+            self.track_writes(addr, 1);
             return Ok(());
         }
         if let Some(offset) = self.ipu_register_offset(addr) {
@@ -397,10 +407,16 @@ impl Memory {
             && self.ipu_registers.len() == IPU_REGISTER_SIZE
     }
 
+    #[inline(always)]
     fn track_writes(&mut self, addr: u32, count: usize) {
-        let count = count.min(1000usize.saturating_sub(self.write_log.len()));
-        self.write_log
-            .extend((0..count).map(|offset| addr.wrapping_add(offset as u32)));
+        #[cfg(debug_assertions)]
+        {
+            let count = count.min(1000usize.saturating_sub(self.write_log.len()));
+            self.write_log
+                .extend((0..count).map(|offset| addr.wrapping_add(offset as u32)));
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = (addr, count);
     }
 
     /// Allocate memory from the heap
@@ -587,6 +603,26 @@ mod tests {
         let mut mem = Memory::new();
         mem.write_u32(0x0000_0000, 0x1234_5678).unwrap();
         assert_eq!(mem.read_u32(0x0000_0000).unwrap(), 0x1234_5678);
+    }
+
+    #[test]
+    fn test_instruction_fetch_uses_cached_ram_alias() {
+        let mut mem = Memory::new();
+        mem.write_u32(0x1000, 0x1234_5678).unwrap();
+
+        assert_eq!(mem.fetch_instruction(0x8000_1000).unwrap(), 0x1234_5678);
+    }
+
+    #[test]
+    fn test_write_tracking_is_limited_to_debug_builds() {
+        let mut mem = Memory::new();
+        mem.write_u32(0x1000, 0x1234_5678).unwrap();
+        let writes = mem.consume_write_log();
+
+        #[cfg(debug_assertions)]
+        assert_eq!(writes, [0x1000, 0x1001, 0x1002, 0x1003]);
+        #[cfg(not(debug_assertions))]
+        assert!(writes.is_empty());
     }
 
     #[test]
