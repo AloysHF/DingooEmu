@@ -1,7 +1,5 @@
 use crate::cpu::Registers;
-use cranelift::codegen::ir::{
-    types, AbiParam, Function, InstBuilder, MemFlagsData, Signature, Value,
-};
+use cranelift::codegen::ir::{types, AbiParam, Function, InstBuilder, MemFlags, Signature, Value};
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift::prelude::IntCC;
@@ -364,7 +362,7 @@ impl Compiler {
             let mut state = LoweringState::new(registers, ram, framebuffer);
             let count = lower_block(&mut builder, &mut state, start, instructions);
             if count != 0 {
-                builder.finalize(target_config);
+                builder.finalize();
             }
             count
         };
@@ -540,20 +538,20 @@ fn lower_register_instruction(
         0 => match instruction & 0x3f {
             0x00 => {
                 let value = read_register(builder, state, rt);
-                Some((rd, builder.ins().ishl_imm_u(value, i64::from(shamt))))
+                Some((rd, builder.ins().ishl_imm(value, i64::from(shamt))))
             }
             0x02 => {
                 let value = read_register(builder, state, rt);
-                Some((rd, builder.ins().ushr_imm_u(value, i64::from(shamt))))
+                Some((rd, builder.ins().ushr_imm(value, i64::from(shamt))))
             }
             0x03 => {
                 let value = read_register(builder, state, rt);
-                Some((rd, builder.ins().sshr_imm_u(value, i64::from(shamt))))
+                Some((rd, builder.ins().sshr_imm(value, i64::from(shamt))))
             }
             0x04 | 0x06 | 0x07 => {
                 let value = read_register(builder, state, rt);
                 let shift = read_register(builder, state, rs);
-                let shift = builder.ins().band_imm_u(shift, 0x1f);
+                let shift = builder.ins().band_imm(shift, 0x1f);
                 let shifted = match instruction & 0x3f {
                     0x04 => builder.ins().ishl(value, shift),
                     0x06 => builder.ins().ushr(value, shift),
@@ -565,7 +563,7 @@ fn lower_register_instruction(
                 let source = read_register(builder, state, rs);
                 let condition_value = read_register(builder, state, rt);
                 let current = read_register(builder, state, rd);
-                let condition = builder.ins().icmp_imm_u(
+                let condition = builder.ins().icmp_imm(
                     if instruction & 0x3f == 0x0a {
                         IntCC::Equal
                     } else {
@@ -610,7 +608,7 @@ fn lower_register_instruction(
             0x1a | 0x1b => {
                 let numerator = read_register(builder, state, rs);
                 let denominator = read_register(builder, state, rt);
-                let zero = builder.ins().icmp_imm_u(IntCC::Equal, denominator, 0);
+                let zero = builder.ins().icmp_imm(IntCC::Equal, denominator, 0);
                 let invalid = if instruction & 0x3f == 0x1a {
                     let minimum = iconst_u32(builder, i32::MIN as u32);
                     let negative_one = iconst_u32(builder, u32::MAX);
@@ -715,16 +713,14 @@ fn lower_register_instruction(
                 rt,
                 builder
                     .ins()
-                    .band_imm_u(source, i64::from(instruction as u16)),
+                    .band_imm(source, i64::from(instruction as u16)),
             ))
         }
         0x0d => {
             let source = read_register(builder, state, rs);
             Some((
                 rt,
-                builder
-                    .ins()
-                    .bor_imm_u(source, i64::from(instruction as u16)),
+                builder.ins().bor_imm(source, i64::from(instruction as u16)),
             ))
         }
         0x0e => {
@@ -733,7 +729,7 @@ fn lower_register_instruction(
                 rt,
                 builder
                     .ins()
-                    .bxor_imm_u(source, i64::from(instruction as u16)),
+                    .bxor_imm(source, i64::from(instruction as u16)),
             ))
         }
         0x0f => Some((rt, iconst_u32(builder, u32::from(instruction as u16) << 16))),
@@ -773,7 +769,7 @@ fn lower_special2(
             let hi = read_special_register(builder, state, HI_INDEX);
             let lo = read_special_register(builder, state, LO_INDEX);
             let hi = builder.ins().uextend(types::I64, hi);
-            let hi = builder.ins().ishl_imm_u(hi, 32);
+            let hi = builder.ins().ishl_imm(hi, 32);
             let lo = builder.ins().uextend(types::I64, lo);
             let accumulator = builder.ins().bor(hi, lo);
             let result = if matches!(instruction & 0x3f, 0x00 | 0x01) {
@@ -839,10 +835,10 @@ fn lower_branch(
             }
             let source = read_register(builder, state, rs);
             let condition = match kind {
-                0x00 | 0x10 => builder.ins().icmp_imm_s(IntCC::SignedLessThan, source, 0),
+                0x00 | 0x10 => builder.ins().icmp_imm(IntCC::SignedLessThan, source, 0),
                 0x01 | 0x11 => builder
                     .ins()
-                    .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, source, 0),
+                    .icmp_imm(IntCC::SignedGreaterThanOrEqual, source, 0),
                 _ => return None,
             };
             Some(select_branch_target(
@@ -883,7 +879,7 @@ fn lower_branch(
         }
         0x06 | 0x07 => {
             let source = read_register(builder, state, rs);
-            let condition = builder.ins().icmp_imm_s(
+            let condition = builder.ins().icmp_imm(
                 if opcode == 0x06 {
                     IntCC::SignedLessThanOrEqual
                 } else {
@@ -935,12 +931,12 @@ fn lower_memory_instruction(
     let address = builder.ins().iadd(base, offset);
     let unaligned = matches!(opcode, 0x22 | 0x26 | 0x2a | 0x2e);
     let access_address = if unaligned {
-        builder.ins().band_imm_u(address, i64::from(!3u32))
+        builder.ins().band_imm(address, i64::from(!3u32))
     } else {
         address
     };
     let physical = translate_address(builder, access_address);
-    let ram_in_bounds = builder.ins().icmp_imm_u(
+    let ram_in_bounds = builder.ins().icmp_imm(
         IntCC::UnsignedLessThanOrEqual,
         physical,
         i64::from(crate::memory::RAM_SIZE - width),
@@ -961,8 +957,8 @@ fn lower_memory_instruction(
     let mut framebuffer_address = state.framebuffer;
     let mut mapped = None;
     for base in crate::memory::LCD_FRAMEBUFFER_ALIASES {
-        let alias_offset = builder.ins().iadd_imm_s(access_address, -i64::from(base));
-        let alias_in_bounds = builder.ins().icmp_imm_u(
+        let alias_offset = builder.ins().iadd_imm(access_address, -i64::from(base));
+        let alias_in_bounds = builder.ins().icmp_imm(
             IntCC::UnsignedLessThanOrEqual,
             alias_offset,
             (crate::video::FRAMEBUFFER_MAP_SIZE as u32 - width) as i64,
@@ -995,7 +991,7 @@ fn lower_memory_instruction(
     builder.switch_to_block(fast);
     builder.seal_block(fast);
     let host_address = builder.block_params(fast)[0];
-    let flags = MemFlagsData::new();
+    let flags = MemFlags::new();
 
     match opcode {
         0x20 | 0x21 | 0x23 | 0x24 | 0x25 | 0x30 => {
@@ -1015,7 +1011,7 @@ fn lower_memory_instruction(
         0x22 | 0x26 => {
             let memory = builder.ins().load(types::I32, flags, host_address, 0);
             let current = read_register(builder, state, rt);
-            let byte = builder.ins().band_imm_u(address, 3);
+            let byte = builder.ins().band_imm(address, 3);
             let cases = if opcode == 0x22 {
                 [
                     merge_shift_left(builder, memory, 24, current, 0x00ff_ffff),
@@ -1050,7 +1046,7 @@ fn lower_memory_instruction(
         0x2a | 0x2e => {
             let memory = builder.ins().load(types::I32, flags, host_address, 0);
             let value = read_register(builder, state, rt);
-            let byte = builder.ins().band_imm_u(address, 3);
+            let byte = builder.ins().band_imm(address, 3);
             let cases = if opcode == 0x2a {
                 [
                     merge_store_right(builder, memory, 0xffff_ff00, value, 24),
@@ -1081,8 +1077,8 @@ fn merge_shift_left(
     current: Value,
     mask: u32,
 ) -> Value {
-    let memory = builder.ins().ishl_imm_u(memory, shift);
-    let current = builder.ins().band_imm_u(current, i64::from(mask));
+    let memory = builder.ins().ishl_imm(memory, shift);
+    let current = builder.ins().band_imm(current, i64::from(mask));
     builder.ins().bor(memory, current)
 }
 
@@ -1093,8 +1089,8 @@ fn merge_shift_right(
     current: Value,
     mask: u32,
 ) -> Value {
-    let memory = builder.ins().ushr_imm_u(memory, shift);
-    let current = builder.ins().band_imm_u(current, i64::from(mask));
+    let memory = builder.ins().ushr_imm(memory, shift);
+    let current = builder.ins().band_imm(current, i64::from(mask));
     builder.ins().bor(memory, current)
 }
 
@@ -1105,8 +1101,8 @@ fn merge_store_right(
     value: Value,
     shift: i64,
 ) -> Value {
-    let memory = builder.ins().band_imm_u(memory, i64::from(mask));
-    let value = builder.ins().ushr_imm_u(value, shift);
+    let memory = builder.ins().band_imm(memory, i64::from(mask));
+    let value = builder.ins().ushr_imm(value, shift);
     builder.ins().bor(memory, value)
 }
 
@@ -1117,29 +1113,27 @@ fn merge_store_left(
     value: Value,
     shift: i64,
 ) -> Value {
-    let memory = builder.ins().band_imm_u(memory, i64::from(mask));
-    let value = builder.ins().ishl_imm_u(value, shift);
+    let memory = builder.ins().band_imm(memory, i64::from(mask));
+    let value = builder.ins().ishl_imm(value, shift);
     builder.ins().bor(memory, value)
 }
 
 fn select_byte_case(builder: &mut FunctionBuilder<'_>, byte: Value, cases: [Value; 4]) -> Value {
     let mut result = cases[3];
     for index in (0..3).rev() {
-        let matches = builder.ins().icmp_imm_u(IntCC::Equal, byte, index as i64);
+        let matches = builder.ins().icmp_imm(IntCC::Equal, byte, index as i64);
         result = builder.ins().select(matches, cases[index], result);
     }
     result
 }
 
 fn translate_address(builder: &mut FunctionBuilder<'_>, address: Value) -> Value {
-    let segment = builder
-        .ins()
-        .band_imm_u(address, i64::from(0xe000_0000_u32));
+    let segment = builder.ins().band_imm(address, i64::from(0xe000_0000_u32));
     let kseg0 = iconst_u32(builder, 0x8000_0000);
     let kseg1 = iconst_u32(builder, 0xa000_0000);
     let is_kseg0 = builder.ins().icmp(IntCC::Equal, segment, kseg0);
     let is_kseg1 = builder.ins().icmp(IntCC::Equal, segment, kseg1);
-    let masked = builder.ins().band_imm_u(address, i64::from(KSEG_MASK));
+    let masked = builder.ins().band_imm(address, i64::from(KSEG_MASK));
     let physical = builder.ins().select(is_kseg0, masked, address);
     builder.ins().select(is_kseg1, masked, physical)
 }
@@ -1171,7 +1165,7 @@ fn read_special_register(
     }
     let value = builder.ins().load(
         types::I32,
-        MemFlagsData::new(),
+        MemFlags::new(),
         state.registers,
         register_offset(register),
     );
@@ -1186,7 +1180,7 @@ fn write_special_register(state: &mut LoweringState, register: usize, value: Val
 
 fn write_i64_pair(builder: &mut FunctionBuilder<'_>, state: &mut LoweringState, value: Value) {
     let lo = builder.ins().ireduce(types::I32, value);
-    let hi = builder.ins().ushr_imm_u(value, 32);
+    let hi = builder.ins().ushr_imm(value, 32);
     let hi = builder.ins().ireduce(types::I32, hi);
     write_special_register(state, LO_INDEX, lo);
     write_special_register(state, HI_INDEX, hi);
@@ -1206,7 +1200,7 @@ fn emit_exit(builder: &mut FunctionBuilder<'_>, state: &LoweringState, pc: Value
     for register in 1..REGISTER_COUNT {
         if state.dirty[register] {
             builder.ins().store(
-                MemFlagsData::new(),
+                MemFlags::new(),
                 state.values[register].expect("dirty registers always have a value"),
                 state.registers,
                 register_offset(register),
@@ -1214,7 +1208,7 @@ fn emit_exit(builder: &mut FunctionBuilder<'_>, state: &LoweringState, pc: Value
         }
     }
     builder.ins().store(
-        MemFlagsData::new(),
+        MemFlags::new(),
         pc,
         state.registers,
         offset_of!(Registers, pc) as i32,
