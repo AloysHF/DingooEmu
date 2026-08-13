@@ -75,7 +75,7 @@ pub extern "C" fn retro_get_system_info(info: *mut RetroSystemInfo) {
     };
 
     info.library_name = c"DingooEmu".as_ptr();
-    info.library_version = c"0.1.0".as_ptr();
+    info.library_version = c"0.2.0".as_ptr();
     info.valid_extensions = c"app".as_ptr();
     info.need_fullpath = true;
     info.block_extract = false;

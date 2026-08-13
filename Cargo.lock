@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "dingooemu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "dingooemu-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "dingooemu-libretro"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dingooemu-core",
  "log",
