@@ -117,7 +117,8 @@ function Get-CaptureFrames {
         "仙剑奇侠传\仙剑奇侠传.APP" { return 1200 }
         "Decollation-Warrior.app" { return 30 }
         "GooPlayer\GooPlayer.app" { return 300 }
-        "Overlord-Fighter.app" { return 30 }
+        "Hell Striker II-20090122224048.app" { return 300 }
+        "Overlord-Fighter.app" { return 120 }
         "SameGoo\samegoo.app" { return 300 }
         "Snake.app" { return 30 }
         default { return $DefaultFrames }

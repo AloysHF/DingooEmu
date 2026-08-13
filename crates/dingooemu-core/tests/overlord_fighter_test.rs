@@ -17,7 +17,7 @@ fn run_menu(app_path: &PathBuf, with_input: bool) -> Emulator {
     let mut emu = Emulator::from_path(app_path).expect("Failed to load Overlord-Fighter.app");
     emu.start();
     for frame in 0..120 {
-        let pressed = with_input && (40..45).contains(&frame);
+        let pressed = with_input && (80..85).contains(&frame);
         emu.set_buttons(if pressed { BUTTON_A } else { 0 });
         emu.tick().expect("Overlord-Fighter.app tick failed");
     }
@@ -25,7 +25,7 @@ fn run_menu(app_path: &PathBuf, with_input: bool) -> Emulator {
 }
 
 #[test]
-fn test_overlord_fighter_window_messages_drive_menu_input() {
+fn test_overlord_fighter_accepts_title_screen_input() {
     let Some(app_path) = overlord_fighter_app_path() else {
         eprintln!("Skipping: set DINGOOEMU_OVERLORD_FIGHTER_APP to test Overlord-Fighter.app");
         return;
@@ -34,7 +34,7 @@ fn test_overlord_fighter_window_messages_drive_menu_input() {
     let control = run_menu(&app_path, false);
     let input = run_menu(&app_path, true);
     assert_eq!(control.video.framebuffer_crc32(), 0xd7d5_e307);
-    assert_eq!(input.video.framebuffer_crc32(), 0x74b7_1e8b);
+    assert_eq!(input.video.framebuffer_crc32(), 0x7999_d125);
 
     let unknown: Vec<_> = input
         .unknown_hle_calls()
@@ -45,6 +45,8 @@ fn test_overlord_fighter_window_messages_drive_menu_input() {
         "WM_CreateWindow",
         "WM_SetFocus",
         "GUI_Exec",
+        "U8TOX16",
+        "U8TOX32",
     ] {
         assert!(
             !unknown.contains(&implemented),

@@ -3,16 +3,17 @@
 Compatibility is still experimental. The results below cover startup and
 initial rendering only and do not imply complete gameplay support.
 
-The current sample set contains 36 distinct `.app` entries, including alternate
-builds of several games. On August 2, 2026, all 36 entries completed the release
-batch screenshot process and rendered a non-black frame. Sword and Fairy uses a
-1200-frame capture override because its startup sequence contains several timed
-splash screens. Input, audio, save data, extended gameplay, and full completion
-still require separate verification.
+The current sample set contains 39 distinct `.app` entries, including alternate
+builds of several games. On August 13, 2026, all 39 entries completed the release
+batch screenshot process and rendered a non-black frame. The newer Hell Striker
+II build and Overlord Fighter use 300-frame and 120-frame capture overrides,
+respectively; Sword and Fairy uses 1200 frames because its startup sequence
+contains several timed splash screens. Input, audio, save data, extended
+gameplay, and full completion still require separate verification.
 
-Overlord Fighter has a separate real-game regression test for its guest
-window-manager input path. A focused-window confirm-key transition leaves the
-title menu and reaches the character-selection screen.
+Overlord Fighter has a separate real-game regression test for its legacy
+resource-conversion imports, title-screen framebuffer output, and direct button
+polling. A scripted A-button press leaves the title menu and starts the game.
 
 GooPlayer's content-discovery check confirms that its startup scan finds the
 three companion tracker files in the game directory and opens the playlist
@@ -30,7 +31,8 @@ this check.
 | Decollation Warrior | 战神刑天 | `tmp/dingoo_game/Decollation-Warrior.app` | ![Decollation-Warrior](images/Decollation-Warrior.png) | ✅ Pass |
 | Formula One | F1赛车 | `tmp/dingoo_game/Fomula-One.app` | ![Fomula-One](images/Fomula-One.png) | ✅ Pass |
 | GooPlayer | Goo播放器 | `tmp/dingoo_game/GooPlayer/GooPlayer.app` | ![GooPlayer](images/GooPlayer__GooPlayer.png) | ✅ Pass |
-| Hell Striker II | 天地道 | `tmp/dingoo_game/Hell Striker II.app` | ![Hell-Striker-II](images/Hell_Striker_II.png) | ✅ Pass |
+| Hell Striker II (2008-12-29 build) | 天地道（2008-12-29 版本） | `tmp/dingoo_game/Hell Striker II-20081229173817.app` | ![Hell-Striker-II-2008-12-29-build](images/Hell_Striker_II-20081229173817.png) | ✅ Pass |
+| Hell Striker II (2009-01-22 build) | 天地道（2009-01-22 版本） | `tmp/dingoo_game/Hell Striker II-20090122224048.app` | ![Hell-Striker-II-2009-01-22-build](images/Hell_Striker_II-20090122224048.png) | ✅ Pass |
 | Hexa-Virus | 六角病毒(病毒感染) | `tmp/dingoo_game/Hexa-Virus.app` | ![Hexa-Virus](images/Hexa-Virus.png) | ✅ Pass |
 | Landlord | 斗地主 | `tmp/dingoo_game/Landlord.app` | ![Landlord](images/Landlord.png) | ✅ Pass |
 | Link'em Up | 连连看 | `tmp/dingoo_game/Link'em Up.app` | ![Link-em-Up](images/Link'em_Up.png) | ✅ Pass |
@@ -38,9 +40,10 @@ this check.
 | Mine Sweeper | 扫雷 | `tmp/dingoo_game/Mine Sweeper.app` | ![Mine-Sweeper](images/Mine_Sweeper.png) | ✅ Pass |
 | Mushroom Roulette | 蘑菇轮盘 | `tmp/dingoo_game/Mushroom Roulette.app` | ![Mushroom-Roulette](images/Mushroom_Roulette.png) | ✅ Pass |
 | Nose Breaker | 卢比卢比 | `tmp/dingoo_game/Nose Breaker.app` | ![Nose-Breaker](images/Nose_Breaker.png) | ✅ Pass |
+| Overlord Fighter (stub build) | 霸王战纪（桩版本） | `tmp/dingoo_game/Overlord-Fighter-Stub.app` | ![Overlord-Fighter-Stub](images/Overlord-Fighter-Stub.png) | ✅ Pass |
 | Overlord Fighter | 霸王战纪(Yi-chi King Fighter) | `tmp/dingoo_game/Overlord-Fighter.app` | ![Overlord-Fighter](images/Overlord-Fighter.png) | ✅ Pass |
 | Platinum Sudoku | 白金数独 | `tmp/dingoo_game/Platinum Sudoku.app` | ![Platinum-Sudoku](images/Platinum_Sudoku.png) | ✅ Pass |
-| PoPo Bash | 泡泡 | `tmp/dingoo_game/PoPo Bash.app` | ![PoPo-Bash](<images/PoPo Bash.png>) | ✅ Pass |
+| PoPo Bash | 泡泡 | `tmp/dingoo_game/PoPo Bash.app` | ![PoPo-Bash](images/PoPo_Bash.png) | ✅ Pass |
 | Rick Dangerous | 里克危险 | `tmp/dingoo_game/Rick-Dangerous.app` | ![Rick-Dangerous](images/Rick-Dangerous.png) | ✅ Pass |
 | Rubido (2009-05-12 build) | 鲁比多（2009-05-12 版本） | `tmp/dingoo_game/Rubido-20090512001427.app` | ![Rubido-2009-05-12-build](images/Rubido-20090512001427.png) | ✅ Pass |
 | Rubido (2009-05-16 build) | 鲁比多（2009-05-16 版本） | `tmp/dingoo_game/Rubido-20090516230856.app` | ![Rubido-2009-05-16-build](images/Rubido-20090516230856.png) | ✅ Pass |
@@ -58,7 +61,8 @@ this check.
 | Seven Nights (20081217192316) | 七夜（20081217192316） | `tmp/dingoo_game/7day-20081217192316.app` | ![Seven-Nights-20081217192316](images/7day-20081217192316.png) | ✅ Pass |
 | Seven Nights (20090715110443) | 七夜（20090715110443） | `tmp/dingoo_game/7day-20090715110443.app` | ![Seven-Nights-20090715110443](images/7day-20090715110443.png) | ✅ Pass |
 | Seven Nights (20090715111247) | 七夜（20090715111247） | `tmp/dingoo_game/7day-20090715111247.app` | ![Seven-Nights-20090715111247](images/7day-20090715111247.png) | ✅ Pass |
-| Sword and Fairy | 仙剑奇侠传 | `tmp/dingoo_game/仙剑奇侠传/仙剑奇侠传.APP` | ![仙剑奇侠传](images/仙剑奇侠传__仙剑奇侠传.png) | ✅ Pass |
+| Sword and Fairy (root build) | 仙剑奇侠传（根目录版本） | `tmp/dingoo_game/仙剑奇侠传.app` | ![仙剑奇侠传-root-build](images/仙剑奇侠传.png) | ✅ Pass |
+| Sword and Fairy (subdirectory build) | 仙剑奇侠传（子目录版本） | `tmp/dingoo_game/仙剑奇侠传/仙剑奇侠传.APP` | ![仙剑奇侠传-subdirectory-build](images/仙剑奇侠传__仙剑奇侠传.png) | ✅ Pass |
 
 ## Status Legend
 

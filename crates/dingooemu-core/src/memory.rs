@@ -31,6 +31,12 @@ const IPU_OUT_GS_OFFSET: usize = 0x28;
 const IPU_OUT_STRIDE_OFFSET: usize = 0x2C;
 const IPU_CTRL_RUN: u32 = 1 << 1;
 const IPU_STATUS_OUT_END: u8 = 1;
+const TCU_BASE: u32 = 0x1000_2000;
+const TCU_SIZE: u32 = 0xA0;
+const TCU_FULL_MATCH_FLAG_OFFSET: u32 = 0x20;
+const TCU_FULL_MATCH_TIMER2: u32 = 1 << 2;
+const GPIO_BASE: u32 = 0x1001_0000;
+const GPIO_SIZE: u32 = 0x400;
 
 /// Memory manager for the Dingoo A320
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -99,6 +105,30 @@ impl Memory {
         let physical = self.translate_address(addr);
         let offset = physical.wrapping_sub(IPU_BASE);
         (offset < IPU_REGISTER_SIZE as u32).then_some(offset as usize)
+    }
+
+    fn peripheral_offset(&self, addr: u32, base: u32, size: u32, access_size: u32) -> Option<u32> {
+        let offset = self.translate_address(addr).wrapping_sub(base);
+        (offset.checked_add(access_size)? <= size).then_some(offset)
+    }
+
+    fn stubbed_peripheral_read(&self, addr: u32, access_size: u32) -> Option<u32> {
+        if let Some(offset) = self.peripheral_offset(addr, TCU_BASE, TCU_SIZE, access_size) {
+            // Frame timing is driven by tick(), so report timer 2 as completed.
+            return Some(if offset == TCU_FULL_MATCH_FLAG_OFFSET {
+                TCU_FULL_MATCH_TIMER2
+            } else {
+                0
+            });
+        }
+        self.peripheral_offset(addr, GPIO_BASE, GPIO_SIZE, access_size)
+            .map(|_| 0)
+    }
+
+    fn is_stubbed_peripheral_write(&self, addr: u32, access_size: u32) -> bool {
+        self.peripheral_offset(addr, TCU_BASE, TCU_SIZE, access_size)
+            .or_else(|| self.peripheral_offset(addr, GPIO_BASE, GPIO_SIZE, access_size))
+            .is_some()
     }
 
     fn ipu_register_u32(&self, offset: usize) -> u32 {
@@ -209,6 +239,9 @@ impl Memory {
         if let Some(offset) = self.ipu_register_offset(addr) {
             return Ok(self.ipu_registers[offset]);
         }
+        if let Some(value) = self.stubbed_peripheral_read(addr, 1) {
+            return Ok(value as u8);
+        }
 
         Err(SimulatorError::MemoryError {
             addr,
@@ -232,6 +265,9 @@ impl Memory {
                 return Ok(u16::from_le_bytes([bytes[0], bytes[1]]));
             }
         }
+        if let Some(value) = self.stubbed_peripheral_read(addr, 2) {
+            return Ok(value as u16);
+        }
         Err(SimulatorError::MemoryError {
             addr,
             message: "out of bounds".to_string(),
@@ -254,6 +290,9 @@ impl Memory {
                 return Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
             }
         }
+        if let Some(value) = self.stubbed_peripheral_read(addr, 4) {
+            return Ok(value);
+        }
         Err(SimulatorError::MemoryError {
             addr,
             message: "out of bounds".to_string(),
@@ -275,6 +314,9 @@ impl Memory {
         }
         if let Some(offset) = self.ipu_register_offset(addr) {
             self.ipu_registers[offset] = value;
+            return Ok(());
+        }
+        if self.is_stubbed_peripheral_write(addr, 1) {
             return Ok(());
         }
 
@@ -309,6 +351,9 @@ impl Memory {
                 destination.copy_from_slice(&bytes);
                 return Ok(());
             }
+        }
+        if self.is_stubbed_peripheral_write(addr, 2) {
+            return Ok(());
         }
         Err(SimulatorError::MemoryError {
             addr,
@@ -345,6 +390,9 @@ impl Memory {
                 }
                 return Ok(());
             }
+        }
+        if self.is_stubbed_peripheral_write(addr, 4) {
+            return Ok(());
         }
         Err(SimulatorError::MemoryError {
             addr,
@@ -693,6 +741,22 @@ mod tests {
                 & u32::from(IPU_STATUS_OUT_END),
             u32::from(IPU_STATUS_OUT_END)
         );
+    }
+
+    #[test]
+    fn test_tcu_and_gpio_initialization_registers_are_available() {
+        let mut mem = Memory::new();
+
+        mem.write_u32(0xB000_203C, 4).unwrap();
+        mem.write_u16(0xB000_2068, 0).unwrap();
+        mem.write_u16(0xB000_206C, 4).unwrap();
+        mem.write_u32(0xB001_0334, u32::MAX).unwrap();
+
+        assert_eq!(mem.read_u32(0xB000_2020).unwrap(), 4);
+        assert_eq!(mem.read_u16(0xB000_206C).unwrap(), 0);
+        assert_eq!(mem.read_u32(0xB001_0334).unwrap(), 0);
+        assert!(mem.read_u8(0xB000_20A0).is_err());
+        assert!(mem.write_u32(0xB001_0400, 0).is_err());
     }
 
     #[test]

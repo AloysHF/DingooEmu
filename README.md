@@ -140,7 +140,7 @@ crates/
 
 Compatibility results are experimental and cover startup and initial rendering
 only. See [Game Compatibility](docs/Game-Compatibility.md) for the current
-36-build results and screenshots.
+39-build results and screenshots.
 
 ## Keyboard Controls
 
