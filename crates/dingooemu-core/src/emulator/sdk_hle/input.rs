@@ -14,36 +14,9 @@ pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResul
             );
         }
         "_kbd_get_key" | "kbd_get_key" => {
-            let buttons = emu.input.buttons();
-            let key = if buttons & crate::input::BUTTON_UP != 0 {
-                20
-            } else if buttons & crate::input::BUTTON_DOWN != 0 {
-                27
-            } else if buttons & crate::input::BUTTON_LEFT != 0 {
-                28
-            } else if buttons & crate::input::BUTTON_RIGHT != 0 {
-                18
-            } else if buttons & crate::input::BUTTON_A != 0 {
-                31
-            } else if buttons & crate::input::BUTTON_B != 0 {
-                21
-            } else if buttons & crate::input::BUTTON_X != 0 {
-                16
-            } else if buttons & crate::input::BUTTON_Y != 0 {
-                6
-            } else if buttons & crate::input::BUTTON_START != 0 {
-                11
-            } else if buttons & crate::input::BUTTON_SELECT != 0 {
-                10
-            } else if buttons & crate::input::BUTTON_L != 0 {
-                8
-            } else if buttons & crate::input::BUTTON_R != 0 {
-                29
-            } else {
-                0
-            };
-            emu.cpu.regs.write(2, key);
-            log::trace!("  kbd_get_key() = {key}");
+            let status = emu.input.buttons();
+            emu.cpu.regs.write(2, status);
+            log::trace!("  kbd_get_key() = {status:#010x}");
         }
         "_sys_judge_event" | "sys_judge_event" => {
             let pending = u32::from(emu.input.take_pending_event());

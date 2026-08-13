@@ -2229,7 +2229,7 @@ mod tests {
 
         emu.set_buttons(crate::input::BUTTON_A);
         invoke_sdk_import(&mut emu, 0x1008, "kbd_get_key");
-        assert_eq!(emu.cpu.regs.read(2), 31);
+        assert_eq!(emu.cpu.regs.read(2), crate::input::BUTTON_A);
 
         invoke_sdk_import(&mut emu, 0x100c, "pcm_ioctl");
         assert_eq!(emu.cpu.regs.read(2), 0);
@@ -2460,7 +2460,7 @@ mod tests {
     }
 
     #[test]
-    fn test_u8_to_u32_reads_little_endian_value() {
+    fn test_u8_conversion_aliases_read_little_endian_values() {
         let mut emu = Emulator::default();
         let ptr = 0x100;
         emu.memory
@@ -2468,9 +2468,15 @@ mod tests {
             .unwrap();
         emu.cpu.regs.write(4, ptr);
 
-        invoke_sdk_import(&mut emu, 0, "U8TOU32");
+        for name in ["U8TOU16", "U8TOX16"] {
+            invoke_sdk_import(&mut emu, 0, name);
+            assert_eq!(emu.cpu.regs.read(2), 0xC218);
+        }
 
-        assert_eq!(emu.cpu.regs.read(2), 0x0001_C218);
+        for name in ["U8TOU32", "U8TOX32"] {
+            invoke_sdk_import(&mut emu, 0, name);
+            assert_eq!(emu.cpu.regs.read(2), 0x0001_C218);
+        }
     }
 
     #[test]

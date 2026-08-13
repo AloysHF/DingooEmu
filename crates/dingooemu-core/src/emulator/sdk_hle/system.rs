@@ -62,11 +62,17 @@ pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResul
             emu.cpu.regs.write(2, 0);
             log::trace!("  cmGetSysModel({pointer:#010x}) = 0");
         }
-        "U8TOU32" => {
+        "U8TOU16" | "U8TOX16" => {
+            let pointer = emu.cpu.regs.read(4);
+            let value = emu.memory.read_u16(pointer)? as u32;
+            emu.cpu.regs.write(2, value);
+            log::trace!("  {func_name}({pointer:#010x}) = {value:#06x}");
+        }
+        "U8TOU32" | "U8TOX32" => {
             let pointer = emu.cpu.regs.read(4);
             let value = emu.memory.read_u32(pointer)?;
             emu.cpu.regs.write(2, value);
-            log::trace!("  U8TOU32({pointer:#010x}) = {value:#010x}");
+            log::trace!("  {func_name}({pointer:#010x}) = {value:#010x}");
         }
         "OSTimeGet" => {
             let ticks = emu
