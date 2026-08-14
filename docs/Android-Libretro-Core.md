@@ -39,13 +39,26 @@ If the Online Updater is not available, you can install the core manually:
 The `arm64-v8a` and `x86_64` cores use a tiered JIT by default. Frequently
 executed MIPS32 blocks are translated to native code, while unsupported or
 low-frequency paths continue through the cached interpreter. Compilation is
-rate-limited to avoid introducing frame-time spikes while a game warms up. The
-JIT uses dedicated anonymous mappings for generated code so it remains usable
-on Android devices whose SELinux policy prevents executable heap pages.
+rate-limited to avoid introducing frame-time spikes while a game warms up.
 
 Use **Quick Menu → Core Options → CPU Execution Engine** to switch to
 `interpreter` for compatibility testing. The `armeabi-v7a` and `x86` cores
 always use the interpreter and do not expose this option.
+
+## Sharing a performance diagnostic
+
+To collect a report without Android developer tools:
+
+1. Load the affected game, then open **Quick Menu → Core Options**.
+2. Set **Performance Diagnostic Log** to `enabled`.
+3. Resume the game and reproduce the slowdown for at least 30 seconds.
+4. Close the content so the final counters are written.
+5. Send `dingooemu-diagnostic.txt` from RetroArch's save directory, normally
+   `/storage/emulated/0/RetroArch/saves/`.
+
+The file is replaced for each session and contains timing and aggregated JIT
+counters, not game data. It is refreshed once per second while diagnostics are
+enabled, so it can still be copied if the frontend cannot close content cleanly.
 
 ## Building the Android core locally
 

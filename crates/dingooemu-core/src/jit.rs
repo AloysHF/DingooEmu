@@ -1,4 +1,5 @@
 use crate::cpu::Registers;
+use crate::emulator::JitDiagnostics;
 use cranelift::codegen::ir::{types, AbiParam, Function, InstBuilder, MemFlags, Signature, Value};
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -44,6 +45,20 @@ struct JitCacheEntry {
 }
 
 #[derive(Default)]
+struct JitCounters {
+    execute_requests: u64,
+    native_executions: u64,
+    native_instructions: u64,
+    compilation_attempts: u64,
+    compilation_failures: u64,
+    compilation_total_us: u64,
+    compilation_max_us: u64,
+    cold_fallbacks: u64,
+    instruction_limit_fallbacks: u64,
+    zero_exit_fallbacks: u64,
+}
+
+#[derive(Default)]
 struct GuestAddressHasher(u64);
 
 impl Hasher for GuestAddressHasher {
@@ -79,6 +94,8 @@ pub(crate) struct JitEngine {
     compile_budget: u8,
     compile_cooldown: u8,
     compiled_block_count: u64,
+    diagnostics_enabled: bool,
+    counters: JitCounters,
 }
 
 impl JitEngine {
@@ -102,11 +119,58 @@ impl JitEngine {
             compile_budget: 1,
             compile_cooldown: 0,
             compiled_block_count: 0,
+            diagnostics_enabled: false,
+            counters: JitCounters::default(),
         }
     }
 
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+    }
+
+    pub(crate) fn set_diagnostics_enabled(&mut self, enabled: bool) {
+        if enabled && !self.diagnostics_enabled {
+            self.counters = JitCounters::default();
+        }
+        self.diagnostics_enabled = enabled;
+    }
+
+    pub(crate) fn diagnostics(&self) -> JitDiagnostics {
+        JitDiagnostics {
+            feature_available: true,
+            enabled: self.enabled,
+            backend_available: self.compiler.is_some(),
+            tracked_blocks: self.entries.len(),
+            compiled_blocks: self
+                .entries
+                .values()
+                .filter(|entry| entry.block.is_some())
+                .count(),
+            failed_blocks: self.entries.values().filter(|entry| entry.failed).count(),
+            execute_requests: self.counters.execute_requests,
+            native_executions: self.counters.native_executions,
+            native_instructions: self.counters.native_instructions,
+            compilation_attempts: self.counters.compilation_attempts,
+            compilation_failures: self.counters.compilation_failures,
+            compilation_total_us: self.counters.compilation_total_us,
+            compilation_max_us: self.counters.compilation_max_us,
+            cold_fallbacks: self.counters.cold_fallbacks,
+            instruction_limit_fallbacks: self.counters.instruction_limit_fallbacks,
+            zero_exit_fallbacks: self.counters.zero_exit_fallbacks,
+        }
+    }
+
+    pub(crate) fn has_compiled_block(&self, start: u32) -> bool {
+        if !self.enabled || self.compiler.is_none() {
+            return false;
+        }
+        let fast_index = (start as usize >> 2) & (FAST_JIT_CACHE_SLOTS - 1);
+        let fast_entry = self.fast_entries[fast_index];
+        (fast_entry.start == start && fast_entry.block.is_some())
+            || self
+                .entries
+                .get(&start)
+                .is_some_and(|entry| entry.block.is_some())
     }
 
     pub(crate) fn clear(&mut self) {
@@ -150,7 +214,13 @@ impl JitEngine {
         ram: *mut u8,
         framebuffer: *mut u8,
     ) -> Option<u64> {
+        if self.diagnostics_enabled {
+            self.counters.execute_requests = self.counters.execute_requests.saturating_add(1);
+        }
         if !self.enabled || instruction_limit == 0 || self.compiler.is_none() {
+            if self.diagnostics_enabled {
+                self.counters.cold_fallbacks = self.counters.cold_fallbacks.saturating_add(1);
+            }
             return None;
         }
 
@@ -162,7 +232,17 @@ impl JitEngine {
                     execute_compiled_block(block, instruction_limit, registers, ram, framebuffer);
                 if let Some(completed) = completed {
                     if completed != 0 {
+                        if self.diagnostics_enabled {
+                            self.counters.native_executions =
+                                self.counters.native_executions.saturating_add(1);
+                            self.counters.native_instructions =
+                                self.counters.native_instructions.saturating_add(completed);
+                        }
                         return Some(completed);
+                    }
+                    if self.diagnostics_enabled {
+                        self.counters.zero_exit_fallbacks =
+                            self.counters.zero_exit_fallbacks.saturating_add(1);
                     }
                     if let Some(entry) = self.entries.get_mut(&start) {
                         entry.zero_instruction_exits =
@@ -173,6 +253,9 @@ impl JitEngine {
                             self.fast_entries[fast_index].block = None;
                         }
                     }
+                } else if self.diagnostics_enabled {
+                    self.counters.instruction_limit_fallbacks =
+                        self.counters.instruction_limit_fallbacks.saturating_add(1);
                 }
                 return None;
             }
@@ -183,6 +266,10 @@ impl JitEngine {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 if at_capacity {
+                    if self.diagnostics_enabled {
+                        self.counters.cold_fallbacks =
+                            self.counters.cold_fallbacks.saturating_add(1);
+                    }
                     return None;
                 }
                 entry.insert(JitCacheEntry::default())
@@ -198,6 +285,10 @@ impl JitEngine {
                 execute_compiled_block(block, instruction_limit, registers, ram, framebuffer);
             if let Some(completed) = completed {
                 if completed == 0 {
+                    if self.diagnostics_enabled {
+                        self.counters.zero_exit_fallbacks =
+                            self.counters.zero_exit_fallbacks.saturating_add(1);
+                    }
                     entry.zero_instruction_exits = entry.zero_instruction_exits.saturating_add(1);
                     if entry.zero_instruction_exits >= MAX_ZERO_INSTRUCTION_EXITS {
                         entry.block = None;
@@ -207,38 +298,69 @@ impl JitEngine {
                     return None;
                 }
                 entry.zero_instruction_exits = 0;
+                if self.diagnostics_enabled {
+                    self.counters.native_executions =
+                        self.counters.native_executions.saturating_add(1);
+                    self.counters.native_instructions =
+                        self.counters.native_instructions.saturating_add(completed);
+                }
                 return Some(completed);
+            }
+            if self.diagnostics_enabled {
+                self.counters.instruction_limit_fallbacks =
+                    self.counters.instruction_limit_fallbacks.saturating_add(1);
             }
             return None;
         }
         if entry.failed {
+            if self.diagnostics_enabled {
+                self.counters.cold_fallbacks = self.counters.cold_fallbacks.saturating_add(1);
+            }
             return None;
         }
 
         entry.hits = entry.hits.saturating_add(1);
         if entry.hits < HOT_BLOCK_THRESHOLD || self.compile_budget == 0 {
+            if self.diagnostics_enabled {
+                self.counters.cold_fallbacks = self.counters.cold_fallbacks.saturating_add(1);
+            }
             return None;
         }
         if candidate_instruction_count(instructions) < MIN_COMPILED_BLOCK_LEN {
             entry.failed = true;
+            if self.diagnostics_enabled {
+                self.counters.cold_fallbacks = self.counters.cold_fallbacks.saturating_add(1);
+            }
             return None;
         }
 
         self.compile_budget = 0;
         self.compile_cooldown = COMPILE_COOLDOWN_FRAMES;
+        if self.diagnostics_enabled {
+            self.counters.compilation_attempts =
+                self.counters.compilation_attempts.saturating_add(1);
+        }
         let compile_start = Instant::now();
         let compile_result = self
             .compiler
             .as_mut()
             .expect("compiler presence checked above")
             .compile(start, instructions);
+        let compilation_us = u64::try_from(compile_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        if self.diagnostics_enabled {
+            self.counters.compilation_total_us = self
+                .counters
+                .compilation_total_us
+                .saturating_add(compilation_us);
+            self.counters.compilation_max_us = self.counters.compilation_max_us.max(compilation_us);
+        }
         match compile_result {
             Ok(Some(block)) => {
                 self.compiled_block_count = self.compiled_block_count.wrapping_add(1);
                 log::debug!(
                     "JIT compiled block {start:#010x}: instructions={} elapsed_us={} total={}",
                     block.instruction_count,
-                    compile_start.elapsed().as_micros(),
+                    compilation_us,
                     self.compiled_block_count
                 );
                 entry.block = Some(block);
@@ -246,16 +368,34 @@ impl JitEngine {
                     start,
                     block: Some(block),
                 };
-                execute_compiled_block(block, instruction_limit, registers, ram, framebuffer)
-                    .filter(|&count| count != 0)
+                let completed =
+                    execute_compiled_block(block, instruction_limit, registers, ram, framebuffer)
+                        .filter(|&count| count != 0);
+                if self.diagnostics_enabled {
+                    if let Some(completed) = completed {
+                        self.counters.native_executions =
+                            self.counters.native_executions.saturating_add(1);
+                        self.counters.native_instructions =
+                            self.counters.native_instructions.saturating_add(completed);
+                    }
+                }
+                completed
             }
             Ok(None) => {
                 entry.failed = true;
+                if self.diagnostics_enabled {
+                    self.counters.compilation_failures =
+                        self.counters.compilation_failures.saturating_add(1);
+                }
                 None
             }
             Err(error) => {
                 log::warn!("Failed to compile MIPS block at {start:#010x}: {error}");
                 entry.failed = true;
+                if self.diagnostics_enabled {
+                    self.counters.compilation_failures =
+                        self.counters.compilation_failures.saturating_add(1);
+                }
                 None
             }
         }
