@@ -829,12 +829,34 @@ impl Emulator {
     }
 
     fn run_cached_instruction_block(&mut self, start: u32, remaining_cycles: u64) -> Result<u64> {
-        self.ensure_instruction_block(start)?;
         let instruction_limit = (remaining_cycles / CPU_CYCLES_PER_INSTRUCTION) as usize;
+
+        #[cfg(feature = "jit")]
+        let attempted_compiled_block =
+            if !self.cpu.branch_delay && self.jit.has_compiled_block(start) {
+                let ram = self.memory.jit_ram_ptr();
+                let framebuffer = self.memory.jit_framebuffer_ptr();
+                if let Some(completed) = self.jit.execute(
+                    start,
+                    &[],
+                    instruction_limit,
+                    &mut self.cpu.regs,
+                    ram,
+                    framebuffer,
+                ) {
+                    self.cpu.account_instructions(completed);
+                    return Ok(completed);
+                }
+                true
+            } else {
+                false
+            };
+
+        self.ensure_instruction_block(start)?;
         let cache_index = instruction_block_cache_index(start);
 
         #[cfg(feature = "jit")]
-        if !self.cpu.branch_delay {
+        if !self.cpu.branch_delay && !attempted_compiled_block {
             let block = &self.instruction_blocks[cache_index];
             let ram = self.memory.jit_ram_ptr();
             let framebuffer = self.memory.jit_framebuffer_ptr();
@@ -2204,6 +2226,52 @@ mod tests {
             many_jit_cold.as_secs_f64() / many_interpreter_cold.as_secs_f64(),
             many_jit_warm.as_secs_f64() / many_interpreter_warm.as_secs_f64()
         );
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn compiled_block_bypasses_colliding_interpreter_cache_entry() {
+        let mut emu = Emulator::default();
+        let start = 0x8000_1000;
+        let collision = start + (INSTRUCTION_BLOCK_CACHE_SLOTS as u32 * 4);
+        let instructions = [
+            (0x09 << 26) | (8 << 21) | (8 << 16) | 1,
+            (8 << 21) | (9 << 16) | (9 << 11) | 0x21,
+            (0x02 << 26) | ((start >> 2) & 0x03ff_ffff),
+            0,
+        ];
+        for (index, instruction) in instructions.into_iter().enumerate() {
+            emu.memory
+                .write_u32(start + (index as u32) * 4, instruction)
+                .unwrap();
+        }
+        emu.set_jit_diagnostics_enabled(true);
+        emu.start();
+
+        for _ in 0..300 {
+            emu.cpu.regs.pc = start;
+            assert_eq!(
+                emu.run_cached_instruction_block(start, 128).unwrap(),
+                instructions.len() as u64
+            );
+        }
+        assert!(emu.jit.has_compiled_block(start));
+
+        let cache_index = instruction_block_cache_index(start);
+        assert_eq!(cache_index, instruction_block_cache_index(collision));
+        emu.instruction_blocks[cache_index] = CachedInstructionBlock {
+            start: collision,
+            len: 1,
+            instructions: [0; MAX_INSTRUCTION_BLOCK_LEN],
+        };
+
+        emu.cpu.regs.pc = start;
+        assert_eq!(
+            emu.run_cached_instruction_block(start, 128).unwrap(),
+            instructions.len() as u64
+        );
+        assert_eq!(emu.instruction_blocks[cache_index].start, collision);
+        assert!(emu.jit_diagnostics().native_executions > 0);
     }
 
     #[test]

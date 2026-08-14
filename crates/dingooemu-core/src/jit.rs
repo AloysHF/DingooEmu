@@ -166,6 +166,19 @@ impl JitEngine {
         }
     }
 
+    pub(crate) fn has_compiled_block(&self, start: u32) -> bool {
+        if !self.enabled || self.compiler.is_none() {
+            return false;
+        }
+        let fast_index = (start as usize >> 2) & (FAST_JIT_CACHE_SLOTS - 1);
+        let fast_entry = self.fast_entries[fast_index];
+        (fast_entry.start == start && fast_entry.block.is_some())
+            || self
+                .entries
+                .get(&start)
+                .is_some_and(|entry| entry.block.is_some())
+    }
+
     pub(crate) fn record_interpreter_execution(&mut self, completed: u64) {
         if self.diagnostics_enabled && completed != 0 {
             self.record_interpreter_diagnostics(completed);
