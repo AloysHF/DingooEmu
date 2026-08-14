@@ -39,7 +39,9 @@ If the Online Updater is not available, you can install the core manually:
 The `arm64-v8a` and `x86_64` cores use a tiered JIT by default. Frequently
 executed MIPS32 blocks are translated to native code, while unsupported or
 low-frequency paths continue through the cached interpreter. Compilation is
-rate-limited to avoid introducing frame-time spikes while a game warms up.
+rate-limited to avoid introducing frame-time spikes while a game warms up. The
+JIT uses dedicated anonymous mappings for generated code so it remains usable
+on Android devices whose SELinux policy prevents executable heap pages.
 
 Use **Quick Menu → Core Options → CPU Execution Engine** to switch to
 `interpreter` for compatibility testing. The `armeabi-v7a` and `x86` cores

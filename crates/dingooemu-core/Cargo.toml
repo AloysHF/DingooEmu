@@ -18,7 +18,7 @@ byteorder = "1"
 image.workspace = true
 rodio = { workspace = true, optional = true }
 cranelift = { workspace = true, optional = true }
-cranelift-jit = { workspace = true, optional = true }
+cranelift-jit = { workspace = true, optional = true, features = ["selinux-fix"] }
 cranelift-module = { workspace = true, optional = true }
 cranelift-native = { workspace = true, optional = true }
 
