@@ -5,7 +5,7 @@ use crate::cpu::Cpu;
 use crate::error::{Result, SimulatorError};
 use crate::input::Input;
 #[cfg(feature = "jit")]
-use crate::jit::JitEngine;
+use crate::jit::{CompiledExecution, JitEngine};
 use crate::memory::Memory;
 use crate::video::Video;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -832,44 +832,48 @@ impl Emulator {
         let instruction_limit = (remaining_cycles / CPU_CYCLES_PER_INSTRUCTION) as usize;
 
         #[cfg(feature = "jit")]
-        let attempted_compiled_block =
-            if !self.cpu.branch_delay && self.jit.has_compiled_block(start) {
-                let ram = self.memory.jit_ram_ptr();
-                let framebuffer = self.memory.jit_framebuffer_ptr();
-                let mut completed_total = 0u64;
-                let mut block_start = start;
-                loop {
-                    let block_limit = instruction_limit.saturating_sub(completed_total as usize);
-                    let Some(completed) = self.jit.execute(
-                        block_start,
-                        &[],
-                        block_limit,
-                        &mut self.cpu.regs,
-                        ram,
-                        framebuffer,
-                    ) else {
-                        break;
-                    };
-                    self.cpu.account_instructions(completed);
-                    completed_total += completed;
-
-                    let next = self.cpu.regs.pc;
-                    if completed_total as usize >= instruction_limit
-                        || !self.cpu.is_running()
-                        || self.jit_chain_exit_required(next)
-                        || !self.jit.has_compiled_block(next)
-                    {
+        let attempted_compiled_block = if !self.cpu.branch_delay {
+            let ram = self.memory.jit_ram_ptr();
+            let framebuffer = self.memory.jit_framebuffer_ptr();
+            let mut completed_total = 0u64;
+            let mut block_start = start;
+            let mut attempted = false;
+            loop {
+                let block_limit = instruction_limit.saturating_sub(completed_total as usize);
+                let completed = match self.jit.execute_compiled(
+                    block_start,
+                    block_limit,
+                    &mut self.cpu.regs,
+                    ram,
+                    framebuffer,
+                ) {
+                    CompiledExecution::Missing => break,
+                    CompiledExecution::Fallback => {
+                        attempted = true;
                         break;
                     }
-                    block_start = next;
+                    CompiledExecution::Executed(completed) => completed,
+                };
+                attempted = true;
+                self.cpu.account_instructions(completed);
+                completed_total += completed;
+
+                let next = self.cpu.regs.pc;
+                if completed_total as usize >= instruction_limit
+                    || !self.cpu.is_running()
+                    || self.jit_chain_exit_required(next)
+                {
+                    break;
                 }
-                if completed_total != 0 {
-                    return Ok(completed_total);
-                }
-                true
-            } else {
-                false
-            };
+                block_start = next;
+            }
+            if completed_total != 0 {
+                return Ok(completed_total);
+            }
+            attempted
+        } else {
+            false
+        };
 
         self.ensure_instruction_block(start)?;
         let cache_index = instruction_block_cache_index(start);
@@ -2236,6 +2240,7 @@ mod tests {
         fn measure(
             mut emu: Emulator,
             warmup_frames: usize,
+            diagnostics_enabled: bool,
         ) -> (std::time::Duration, std::time::Duration, JitDiagnostics) {
             let cold_start = std::time::Instant::now();
             emu.tick().unwrap();
@@ -2243,6 +2248,7 @@ mod tests {
             for _ in 0..warmup_frames {
                 emu.tick().unwrap();
             }
+            emu.set_jit_diagnostics_enabled(diagnostics_enabled);
             let warm_start = std::time::Instant::now();
             for _ in 0..5 {
                 emu.tick().unwrap();
@@ -2250,22 +2256,27 @@ mod tests {
             (cold, warm_start.elapsed(), emu.jit_diagnostics())
         }
 
-        let (interpreter_cold, interpreter_warm, _) = measure(make_emulator(false, 1), 0);
-        let (jit_cold, jit_warm, _) = measure(make_emulator(true, 1), 0);
+        let (interpreter_cold, interpreter_warm, _) = measure(make_emulator(false, 1), 0, false);
+        let (jit_cold, jit_warm, _) = measure(make_emulator(true, 1), 0, false);
         eprintln!(
             "cold: interpreter={interpreter_cold:?} jit={jit_cold:?} ratio={:.2}x; warm: interpreter={interpreter_warm:?} jit={jit_warm:?} speedup={:.2}x",
             jit_cold.as_secs_f64() / interpreter_cold.as_secs_f64(),
             interpreter_warm.as_secs_f64() / jit_warm.as_secs_f64()
         );
         let (many_interpreter_cold, many_interpreter_warm, _) =
-            measure(make_emulator(false, 64), 64);
+            measure(make_emulator(false, 64), 64, false);
         let (many_jit_cold, many_jit_warm, many_jit_diagnostics) =
-            measure(make_emulator(true, 64), 64);
+            measure(make_emulator(true, 64), 64, false);
         eprintln!(
             "64 blocks cold: interpreter={many_interpreter_cold:?} jit={many_jit_cold:?} ratio={:.2}x; warm: interpreter={many_interpreter_warm:?} jit={many_jit_warm:?} ratio={:.2}x compiled={}",
             many_jit_cold.as_secs_f64() / many_interpreter_cold.as_secs_f64(),
             many_jit_warm.as_secs_f64() / many_interpreter_warm.as_secs_f64(),
             many_jit_diagnostics.compiled_blocks,
+        );
+        let (_, many_jit_diagnostic_warm, _) = measure(make_emulator(true, 64), 64, true);
+        eprintln!(
+            "64 blocks diagnostic overhead: normal={many_jit_warm:?} diagnostic={many_jit_diagnostic_warm:?} ratio={:.2}x",
+            many_jit_diagnostic_warm.as_secs_f64() / many_jit_warm.as_secs_f64(),
         );
     }
 
