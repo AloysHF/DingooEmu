@@ -1,6 +1,7 @@
 use std::ffi::{c_void, CStr};
 use std::os::raw::{c_char, c_uint};
 use std::ptr;
+use std::time::Instant;
 
 use dingooemu_core::cpu::UnknownInstructionPolicy;
 use dingooemu_core::input::{
@@ -59,6 +60,7 @@ pub extern "C" fn retro_init() {
 
 #[no_mangle]
 pub extern "C" fn retro_deinit() {
+    crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
     unsafe { EMULATOR = None };
     log::info!("Libretro core deinitialized");
 }
@@ -128,6 +130,7 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
             return false;
         }
     };
+    crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
     unsafe { EMULATOR = None };
 
     if !set_pixel_format() {
@@ -139,9 +142,14 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
 
     match Emulator::from_path(path) {
         Ok(mut emulator) => {
-            if let Some(save_directory) = frontend_directory(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY) {
+            let save_directory = frontend_directory(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY);
+            if let Some(save_directory) = save_directory.as_ref() {
                 emulator.set_save_directory(save_directory);
             }
+            let diagnostic_directory = save_directory
+                .as_deref()
+                .or_else(|| std::path::Path::new(path).parent());
+            crate::diagnostics::configure(diagnostic_directory, path);
             apply_core_options(&mut emulator);
             emulator.start();
             unsafe { EMULATOR = Some(emulator) };
@@ -152,6 +160,7 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
             true
         }
         Err(error) => {
+            crate::diagnostics::finish(None);
             log::error!("Failed to load content: {error}");
             false
         }
@@ -171,6 +180,9 @@ pub extern "C" fn retro_load_game_special(
 pub extern "C" fn retro_unload_game() {
     if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
         emulator.flush_save_files();
+        crate::diagnostics::finish(Some(emulator));
+    } else {
+        crate::diagnostics::finish(None);
     }
     unsafe { EMULATOR = None };
 }
@@ -191,22 +203,50 @@ pub extern "C" fn retro_run() {
         query_joypad_buttons(|id| callbacks::input_state(0, RETRO_DEVICE_JOYPAD, 0, id) != 0);
     emulator.set_buttons(buttons);
 
+    let diagnostic_timer = crate::diagnostics::frame_timer();
     if let Err(error) = emulator.tick() {
         log::error!("Frame execution failed: {error}");
     }
+    let diagnostic_tick_elapsed = diagnostic_timer.as_ref().map(Instant::elapsed);
 
+    let diagnostic_video_timer = diagnostic_timer.as_ref().map(|_| Instant::now());
     callbacks::video_refresh(
         emulator.video.framebuffer().as_ptr().cast(),
         SCREEN_WIDTH,
         SCREEN_HEIGHT,
         SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
     );
+    let diagnostic_video_elapsed = diagnostic_video_timer.map(|started| started.elapsed());
 
+    let diagnostic_audio_timer = diagnostic_timer.as_ref().map(|_| Instant::now());
     let samples = emulator.take_audio_samples();
-    if callbacks::audio_sample_batch(samples.as_ptr(), samples.len() / 2).is_none() {
-        for sample in samples.chunks_exact(2) {
-            callbacks::audio_sample(sample[0], sample[1]);
-        }
+    let audio_frames_requested = samples.len() / 2;
+    let audio_frames_accepted =
+        callbacks::audio_sample_batch(samples.as_ptr(), audio_frames_requested).map_or_else(
+            || {
+                for sample in samples.chunks_exact(2) {
+                    callbacks::audio_sample(sample[0], sample[1]);
+                }
+                audio_frames_requested
+            },
+            |accepted| accepted.min(audio_frames_requested),
+        );
+    let diagnostic_audio_elapsed = diagnostic_audio_timer.map(|started| started.elapsed());
+    if let (Some(started), Some(tick_elapsed), Some(video_elapsed), Some(audio_elapsed)) = (
+        diagnostic_timer,
+        diagnostic_tick_elapsed,
+        diagnostic_video_elapsed,
+        diagnostic_audio_elapsed,
+    ) {
+        crate::diagnostics::record_frame(
+            emulator,
+            tick_elapsed,
+            started.elapsed(),
+            video_elapsed,
+            audio_elapsed,
+            audio_frames_requested,
+            audio_frames_accepted,
+        );
     }
 }
 
@@ -419,7 +459,7 @@ fn core_option_variables() -> Vec<RetroVariable> {
         },
         RetroVariable {
             key: c"dingooemu_debug_logging".as_ptr(),
-            value: c"CPU/HLE Debug Logging; disabled|enabled".as_ptr(),
+            value: c"Performance Diagnostic Log; disabled|enabled".as_ptr(),
         },
         RetroVariable {
             key: c"dingooemu_unknown_instruction".as_ptr(),
@@ -519,11 +559,14 @@ fn apply_core_options(emulator: &mut Emulator) {
         .input
         .set_repeat_timing(options.repeat_delay, options.repeat_period);
     emulator.input.set_swap_ab(options.swap_ab);
-    crate::logger::set_debug_logging(options.debug_logging);
+    // Keep performance diagnostics independent of verbose frontend logging.
+    crate::logger::set_debug_logging(false);
     emulator
         .cpu
         .set_unknown_instruction_policy(options.unknown_instruction_policy);
     emulator.set_jit_enabled(options.jit_enabled);
+    emulator.set_jit_diagnostics_enabled(options.debug_logging);
+    crate::diagnostics::set_enabled(options.debug_logging, emulator);
     log::info!(
         "Core options applied: volume={} repeat_delay={} repeat_period={} swap_ab={} debug_logging={} unknown_instruction={:?} cpu_engine={}",
         options.volume,

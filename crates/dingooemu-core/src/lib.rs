@@ -18,5 +18,5 @@ mod save_state;
 pub mod video;
 
 // Re-export main types for convenience
-pub use emulator::{Emulator, UnknownHleCall, UnknownHlePolicy};
+pub use emulator::{Emulator, JitDiagnostics, UnknownHleCall, UnknownHlePolicy};
 pub use error::{Result, SimulatorError};

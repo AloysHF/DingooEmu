@@ -5,7 +5,7 @@ use crate::cpu::Cpu;
 use crate::error::{Result, SimulatorError};
 use crate::input::Input;
 #[cfg(feature = "jit")]
-use crate::jit::JitEngine;
+use crate::jit::{CompiledExecution, JitEngine};
 use crate::memory::Memory;
 use crate::video::Video;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -48,6 +48,29 @@ pub struct UnknownHleCall {
     pub import_address: u32,
     pub first_pc: u32,
     pub first_arguments: [u32; 4],
+}
+
+/// Aggregated native translation counters for performance diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JitDiagnostics {
+    pub feature_available: bool,
+    pub enabled: bool,
+    pub backend_available: bool,
+    pub tracked_blocks: usize,
+    pub compiled_blocks: usize,
+    pub failed_blocks: usize,
+    pub execute_requests: u64,
+    pub native_executions: u64,
+    pub native_instructions: u64,
+    pub interpreter_executions: u64,
+    pub interpreter_instructions: u64,
+    pub compilation_attempts: u64,
+    pub compilation_failures: u64,
+    pub compilation_total_us: u64,
+    pub compilation_max_us: u64,
+    pub cold_fallbacks: u64,
+    pub instruction_limit_fallbacks: u64,
+    pub zero_exit_fallbacks: u64,
 }
 
 fn hook_filter_location(address: u32) -> (usize, u64) {
@@ -806,12 +829,57 @@ impl Emulator {
     }
 
     fn run_cached_instruction_block(&mut self, start: u32, remaining_cycles: u64) -> Result<u64> {
-        self.ensure_instruction_block(start)?;
         let instruction_limit = (remaining_cycles / CPU_CYCLES_PER_INSTRUCTION) as usize;
+
+        #[cfg(feature = "jit")]
+        let attempted_compiled_block = if !self.cpu.branch_delay {
+            let ram = self.memory.jit_ram_ptr();
+            let framebuffer = self.memory.jit_framebuffer_ptr();
+            let mut completed_total = 0u64;
+            let mut block_start = start;
+            let mut attempted = false;
+            loop {
+                let block_limit = instruction_limit.saturating_sub(completed_total as usize);
+                let completed = match self.jit.execute_compiled(
+                    block_start,
+                    block_limit,
+                    &mut self.cpu.regs,
+                    ram,
+                    framebuffer,
+                ) {
+                    CompiledExecution::Missing => break,
+                    CompiledExecution::Fallback => {
+                        attempted = true;
+                        break;
+                    }
+                    CompiledExecution::Executed(completed) => completed,
+                };
+                attempted = true;
+                self.cpu.account_instructions(completed);
+                completed_total += completed;
+
+                let next = self.cpu.regs.pc;
+                if completed_total as usize >= instruction_limit
+                    || !self.cpu.is_running()
+                    || self.jit_chain_exit_required(next)
+                {
+                    break;
+                }
+                block_start = next;
+            }
+            if completed_total != 0 {
+                return Ok(completed_total);
+            }
+            attempted
+        } else {
+            false
+        };
+
+        self.ensure_instruction_block(start)?;
         let cache_index = instruction_block_cache_index(start);
 
         #[cfg(feature = "jit")]
-        if !self.cpu.branch_delay {
+        if !self.cpu.branch_delay && !attempted_compiled_block {
             let block = &self.instruction_blocks[cache_index];
             let ram = self.memory.jit_ram_ptr();
             let framebuffer = self.memory.jit_framebuffer_ptr();
@@ -855,7 +923,22 @@ impl Emulator {
         }
 
         self.cpu.account_instructions(completed);
+        #[cfg(feature = "jit")]
+        self.jit.record_interpreter_execution(completed);
         Ok(completed)
+    }
+
+    #[cfg(feature = "jit")]
+    fn jit_chain_exit_required(&self, pc: u32) -> bool {
+        if pc == TASK_RETURN_ADDRESS
+            || (self.active_task.is_none()
+                && ((Some(pc) == self.app_main_entry && !self.app_main_args_initialized)
+                    || Some(pc) == self.app_main_init_check_address))
+        {
+            return true;
+        }
+        let (hook_word, hook_mask) = hook_filter_location(pc);
+        self.hook_filter[hook_word] & hook_mask != 0 && self.hooked_addrs.contains_key(&pc)
     }
 
     fn ensure_instruction_block(&mut self, start: u32) -> Result<()> {
@@ -910,6 +993,26 @@ impl Emulator {
         self.jit.set_enabled(enabled);
         #[cfg(not(feature = "jit"))]
         let _ = enabled;
+    }
+
+    /// Enable or disable low-overhead JIT performance counters.
+    pub fn set_jit_diagnostics_enabled(&mut self, enabled: bool) {
+        #[cfg(feature = "jit")]
+        self.jit.set_diagnostics_enabled(enabled);
+        #[cfg(not(feature = "jit"))]
+        let _ = enabled;
+    }
+
+    /// Return a snapshot of native translation performance counters.
+    pub fn jit_diagnostics(&self) -> JitDiagnostics {
+        #[cfg(feature = "jit")]
+        {
+            self.jit.diagnostics()
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            JitDiagnostics::default()
+        }
     }
 
     fn active_context_waiting(&mut self) -> bool {
@@ -2134,31 +2237,133 @@ mod tests {
             emu
         }
 
-        fn measure(mut emu: Emulator) -> (std::time::Duration, std::time::Duration) {
+        fn measure(
+            mut emu: Emulator,
+            warmup_frames: usize,
+            diagnostics_enabled: bool,
+        ) -> (std::time::Duration, std::time::Duration, JitDiagnostics) {
             let cold_start = std::time::Instant::now();
             emu.tick().unwrap();
             let cold = cold_start.elapsed();
+            for _ in 0..warmup_frames {
+                emu.tick().unwrap();
+            }
+            emu.set_jit_diagnostics_enabled(diagnostics_enabled);
             let warm_start = std::time::Instant::now();
             for _ in 0..5 {
                 emu.tick().unwrap();
             }
-            (cold, warm_start.elapsed())
+            (cold, warm_start.elapsed(), emu.jit_diagnostics())
         }
 
-        let (interpreter_cold, interpreter_warm) = measure(make_emulator(false, 1));
-        let (jit_cold, jit_warm) = measure(make_emulator(true, 1));
+        let (interpreter_cold, interpreter_warm, _) = measure(make_emulator(false, 1), 0, false);
+        let (jit_cold, jit_warm, _) = measure(make_emulator(true, 1), 0, false);
         eprintln!(
             "cold: interpreter={interpreter_cold:?} jit={jit_cold:?} ratio={:.2}x; warm: interpreter={interpreter_warm:?} jit={jit_warm:?} speedup={:.2}x",
             jit_cold.as_secs_f64() / interpreter_cold.as_secs_f64(),
             interpreter_warm.as_secs_f64() / jit_warm.as_secs_f64()
         );
-        let (many_interpreter_cold, many_interpreter_warm) = measure(make_emulator(false, 64));
-        let (many_jit_cold, many_jit_warm) = measure(make_emulator(true, 64));
+        let (many_interpreter_cold, many_interpreter_warm, _) =
+            measure(make_emulator(false, 64), 64, false);
+        let (many_jit_cold, many_jit_warm, many_jit_diagnostics) =
+            measure(make_emulator(true, 64), 64, false);
         eprintln!(
-            "64 blocks cold: interpreter={many_interpreter_cold:?} jit={many_jit_cold:?} ratio={:.2}x; warm: interpreter={many_interpreter_warm:?} jit={many_jit_warm:?} ratio={:.2}x",
+            "64 blocks cold: interpreter={many_interpreter_cold:?} jit={many_jit_cold:?} ratio={:.2}x; warm: interpreter={many_interpreter_warm:?} jit={many_jit_warm:?} ratio={:.2}x compiled={}",
             many_jit_cold.as_secs_f64() / many_interpreter_cold.as_secs_f64(),
-            many_jit_warm.as_secs_f64() / many_interpreter_warm.as_secs_f64()
+            many_jit_warm.as_secs_f64() / many_interpreter_warm.as_secs_f64(),
+            many_jit_diagnostics.compiled_blocks,
         );
+        let (_, many_jit_diagnostic_warm, _) = measure(make_emulator(true, 64), 64, true);
+        eprintln!(
+            "64 blocks diagnostic overhead: normal={many_jit_warm:?} diagnostic={many_jit_diagnostic_warm:?} ratio={:.2}x",
+            many_jit_diagnostic_warm.as_secs_f64() / many_jit_warm.as_secs_f64(),
+        );
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn compiled_block_bypasses_colliding_interpreter_cache_entry() {
+        let mut emu = Emulator::default();
+        let start = 0x8000_1000;
+        let collision = start + (INSTRUCTION_BLOCK_CACHE_SLOTS as u32 * 4);
+        let instructions = [
+            (0x09 << 26) | (8 << 21) | (8 << 16) | 1,
+            (8 << 21) | (9 << 16) | (9 << 11) | 0x21,
+            (0x02 << 26) | ((start >> 2) & 0x03ff_ffff),
+            0,
+        ];
+        for (index, instruction) in instructions.into_iter().enumerate() {
+            emu.memory
+                .write_u32(start + (index as u32) * 4, instruction)
+                .unwrap();
+        }
+        emu.set_jit_diagnostics_enabled(true);
+        emu.start();
+        let one_block_cycles = instructions.len() as u64 * CPU_CYCLES_PER_INSTRUCTION;
+
+        for _ in 0..300 {
+            emu.cpu.regs.pc = start;
+            assert_eq!(
+                emu.run_cached_instruction_block(start, one_block_cycles)
+                    .unwrap(),
+                instructions.len() as u64
+            );
+        }
+        assert!(emu.jit.has_compiled_block(start));
+
+        let cache_index = instruction_block_cache_index(start);
+        assert_eq!(cache_index, instruction_block_cache_index(collision));
+        emu.instruction_blocks[cache_index] = CachedInstructionBlock {
+            start: collision,
+            len: 1,
+            instructions: [0; MAX_INSTRUCTION_BLOCK_LEN],
+        };
+
+        emu.cpu.regs.pc = start;
+        assert_eq!(
+            emu.run_cached_instruction_block(start, one_block_cycles)
+                .unwrap(),
+            instructions.len() as u64
+        );
+        assert_eq!(emu.instruction_blocks[cache_index].start, collision);
+        assert!(emu.jit_diagnostics().native_executions > 0);
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn consecutive_compiled_blocks_run_in_one_dispatch() {
+        let mut emu = Emulator::default();
+        let first = 0x8000_1000;
+        let second = 0x8000_1100;
+        for (start, next) in [(first, second), (second, first)] {
+            let instructions = [
+                (0x09 << 26) | (8 << 21) | (8 << 16) | 1,
+                (8 << 21) | (9 << 16) | (9 << 11) | 0x21,
+                (0x02 << 26) | ((next >> 2) & 0x03ff_ffff),
+                0,
+            ];
+            for (index, instruction) in instructions.into_iter().enumerate() {
+                emu.memory
+                    .write_u32(start + (index as u32) * 4, instruction)
+                    .unwrap();
+            }
+        }
+        emu.set_jit_diagnostics_enabled(true);
+        emu.start();
+
+        for start in [first, second] {
+            emu.jit.begin_frame();
+            for _ in 0..300 {
+                emu.cpu.regs.pc = start;
+                emu.run_cached_instruction_block(start, 128).unwrap();
+            }
+            assert!(emu.jit.has_compiled_block(start));
+        }
+
+        let native_before = emu.jit_diagnostics().native_executions;
+        emu.cpu.regs.pc = first;
+        assert_eq!(emu.run_cached_instruction_block(first, 64).unwrap(), 32);
+        assert_eq!(emu.jit_diagnostics().native_executions - native_before, 8);
     }
 
     #[test]
