@@ -209,21 +209,44 @@ pub extern "C" fn retro_run() {
     }
     let diagnostic_tick_elapsed = diagnostic_timer.as_ref().map(Instant::elapsed);
 
+    let diagnostic_video_timer = diagnostic_timer.as_ref().map(|_| Instant::now());
     callbacks::video_refresh(
         emulator.video.framebuffer().as_ptr().cast(),
         SCREEN_WIDTH,
         SCREEN_HEIGHT,
         SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
     );
+    let diagnostic_video_elapsed = diagnostic_video_timer.map(|started| started.elapsed());
 
+    let diagnostic_audio_timer = diagnostic_timer.as_ref().map(|_| Instant::now());
     let samples = emulator.take_audio_samples();
-    if callbacks::audio_sample_batch(samples.as_ptr(), samples.len() / 2).is_none() {
-        for sample in samples.chunks_exact(2) {
-            callbacks::audio_sample(sample[0], sample[1]);
-        }
-    }
-    if let (Some(started), Some(tick_elapsed)) = (diagnostic_timer, diagnostic_tick_elapsed) {
-        crate::diagnostics::record_frame(emulator, tick_elapsed, started.elapsed());
+    let audio_frames_requested = samples.len() / 2;
+    let audio_frames_accepted =
+        callbacks::audio_sample_batch(samples.as_ptr(), audio_frames_requested).map_or_else(
+            || {
+                for sample in samples.chunks_exact(2) {
+                    callbacks::audio_sample(sample[0], sample[1]);
+                }
+                audio_frames_requested
+            },
+            |accepted| accepted.min(audio_frames_requested),
+        );
+    let diagnostic_audio_elapsed = diagnostic_audio_timer.map(|started| started.elapsed());
+    if let (Some(started), Some(tick_elapsed), Some(video_elapsed), Some(audio_elapsed)) = (
+        diagnostic_timer,
+        diagnostic_tick_elapsed,
+        diagnostic_video_elapsed,
+        diagnostic_audio_elapsed,
+    ) {
+        crate::diagnostics::record_frame(
+            emulator,
+            tick_elapsed,
+            started.elapsed(),
+            video_elapsed,
+            audio_elapsed,
+            audio_frames_requested,
+            audio_frames_accepted,
+        );
     }
 }
 

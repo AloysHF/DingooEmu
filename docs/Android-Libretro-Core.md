@@ -59,6 +59,8 @@ To collect a report without Android developer tools:
 The file is replaced for each session and contains timing and aggregated JIT
 counters, not game data. It is refreshed once per second while diagnostics are
 enabled, so it can still be copied if the frontend cannot close content cleanly.
+Recent-frame, video callback, audio callback, and audio short-write measurements
+help distinguish emulation cost from frontend pacing problems.
 
 ## Building the Android core locally
 

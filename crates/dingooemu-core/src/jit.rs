@@ -13,7 +13,7 @@ use std::time::Instant;
 
 const HOT_BLOCK_THRESHOLD: u16 = 256;
 const MIN_COMPILED_BLOCK_LEN: usize = 4;
-const MAX_JIT_CACHE_ENTRIES: usize = 32_768;
+const MAX_JIT_CACHE_ENTRIES: usize = 65_536;
 const FAST_JIT_CACHE_SLOTS: usize = 4_096;
 const MAX_ZERO_INSTRUCTION_EXITS: u8 = 4;
 const MAX_COMPILES_PER_FRAME: u8 = 1;
@@ -99,6 +99,12 @@ pub(crate) struct JitEngine {
     counters: JitCounters,
 }
 
+pub(crate) enum CompiledExecution {
+    Missing,
+    Fallback,
+    Executed(u64),
+}
+
 impl JitEngine {
     pub(crate) fn new() -> Self {
         let compiler = match Compiler::new() {
@@ -162,6 +168,7 @@ impl JitEngine {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn has_compiled_block(&self, start: u32) -> bool {
         if !self.enabled || self.compiler.is_none() {
             return false;
@@ -173,6 +180,77 @@ impl JitEngine {
                 .entries
                 .get(&start)
                 .is_some_and(|entry| entry.block.is_some())
+    }
+
+    pub(crate) fn execute_compiled(
+        &mut self,
+        start: u32,
+        instruction_limit: usize,
+        registers: &mut Registers,
+        ram: *mut u8,
+        framebuffer: *mut u8,
+    ) -> CompiledExecution {
+        if !self.enabled || self.compiler.is_none() {
+            return CompiledExecution::Missing;
+        }
+
+        let fast_index = (start as usize >> 2) & (FAST_JIT_CACHE_SLOTS - 1);
+        let fast_entry = self.fast_entries[fast_index];
+        let block = if fast_entry.start == start {
+            fast_entry.block
+        } else {
+            let block = self.entries.get(&start).and_then(|entry| entry.block);
+            if let Some(block) = block {
+                self.fast_entries[fast_index] = FastJitCacheEntry {
+                    start,
+                    block: Some(block),
+                };
+            }
+            block
+        };
+        let Some(block) = block else {
+            return CompiledExecution::Missing;
+        };
+
+        if self.diagnostics_enabled {
+            self.counters.execute_requests = self.counters.execute_requests.saturating_add(1);
+        }
+        match execute_compiled_block(block, instruction_limit, registers, ram, framebuffer) {
+            Some(completed) if completed != 0 => {
+                if let Some(entry) = self.entries.get_mut(&start) {
+                    entry.zero_instruction_exits = 0;
+                }
+                if self.diagnostics_enabled {
+                    self.counters.native_executions =
+                        self.counters.native_executions.saturating_add(1);
+                    self.counters.native_instructions =
+                        self.counters.native_instructions.saturating_add(completed);
+                }
+                CompiledExecution::Executed(completed)
+            }
+            Some(_) => {
+                if self.diagnostics_enabled {
+                    self.counters.zero_exit_fallbacks =
+                        self.counters.zero_exit_fallbacks.saturating_add(1);
+                }
+                if let Some(entry) = self.entries.get_mut(&start) {
+                    entry.zero_instruction_exits = entry.zero_instruction_exits.saturating_add(1);
+                    if entry.zero_instruction_exits >= MAX_ZERO_INSTRUCTION_EXITS {
+                        entry.block = None;
+                        entry.failed = true;
+                        self.fast_entries[fast_index].block = None;
+                    }
+                }
+                CompiledExecution::Fallback
+            }
+            None => {
+                if self.diagnostics_enabled {
+                    self.counters.instruction_limit_fallbacks =
+                        self.counters.instruction_limit_fallbacks.saturating_add(1);
+                }
+                CompiledExecution::Fallback
+            }
+        }
     }
 
     pub(crate) fn record_interpreter_execution(&mut self, completed: u64) {

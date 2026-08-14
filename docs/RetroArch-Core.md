@@ -133,7 +133,8 @@ compilation to one block per frame. Short blocks and repeatedly
 unsupported memory paths remain on the interpreter to avoid runtime stutter.
 When diagnostics are enabled, the report is refreshed once per second and when
 content is unloaded, so it can be shared without collecting Android system
-logs.
+logs. It includes cumulative and recent 60-frame timing, separate video and
+audio callback costs, and audio short-write counts.
 
 ## RetroPad Button Mapping
 
