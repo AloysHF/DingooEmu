@@ -16,7 +16,7 @@ const MIN_COMPILED_BLOCK_LEN: usize = 4;
 const MAX_JIT_CACHE_ENTRIES: usize = 32_768;
 const FAST_JIT_CACHE_SLOTS: usize = 4_096;
 const MAX_ZERO_INSTRUCTION_EXITS: u8 = 4;
-const COMPILE_COOLDOWN_FRAMES: u8 = 3;
+const MAX_COMPILES_PER_FRAME: u8 = 1;
 const REGISTER_COUNT: usize = 34;
 const HI_INDEX: usize = 32;
 const LO_INDEX: usize = 33;
@@ -49,6 +49,8 @@ struct JitCounters {
     execute_requests: u64,
     native_executions: u64,
     native_instructions: u64,
+    interpreter_executions: u64,
+    interpreter_instructions: u64,
     compilation_attempts: u64,
     compilation_failures: u64,
     compilation_total_us: u64,
@@ -92,7 +94,6 @@ pub(crate) struct JitEngine {
     fast_entries: Box<[FastJitCacheEntry]>,
     enabled: bool,
     compile_budget: u8,
-    compile_cooldown: u8,
     compiled_block_count: u64,
     diagnostics_enabled: bool,
     counters: JitCounters,
@@ -116,8 +117,7 @@ impl JitEngine {
             fast_entries: vec![FastJitCacheEntry::default(); FAST_JIT_CACHE_SLOTS]
                 .into_boxed_slice(),
             enabled: true,
-            compile_budget: 1,
-            compile_cooldown: 0,
+            compile_budget: MAX_COMPILES_PER_FRAME,
             compiled_block_count: 0,
             diagnostics_enabled: false,
             counters: JitCounters::default(),
@@ -150,6 +150,8 @@ impl JitEngine {
             execute_requests: self.counters.execute_requests,
             native_executions: self.counters.native_executions,
             native_instructions: self.counters.native_instructions,
+            interpreter_executions: self.counters.interpreter_executions,
+            interpreter_instructions: self.counters.interpreter_instructions,
             compilation_attempts: self.counters.compilation_attempts,
             compilation_failures: self.counters.compilation_failures,
             compilation_total_us: self.counters.compilation_total_us,
@@ -173,6 +175,17 @@ impl JitEngine {
                 .is_some_and(|entry| entry.block.is_some())
     }
 
+    pub(crate) fn record_interpreter_execution(&mut self, completed: u64) {
+        if self.diagnostics_enabled && completed != 0 {
+            self.counters.interpreter_executions =
+                self.counters.interpreter_executions.saturating_add(1);
+            self.counters.interpreter_instructions = self
+                .counters
+                .interpreter_instructions
+                .saturating_add(completed);
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.fast_entries.fill(FastJitCacheEntry::default());
@@ -192,17 +205,11 @@ impl JitEngine {
             }
             self.compiled_block_count = 0;
         }
-        self.compile_budget = 1;
-        self.compile_cooldown = 0;
+        self.compile_budget = MAX_COMPILES_PER_FRAME;
     }
 
     pub(crate) fn begin_frame(&mut self) {
-        if self.compile_cooldown == 0 {
-            self.compile_budget = 1;
-        } else {
-            self.compile_cooldown -= 1;
-            self.compile_budget = 0;
-        }
+        self.compile_budget = MAX_COMPILES_PER_FRAME;
     }
 
     pub(crate) fn execute(
@@ -334,8 +341,7 @@ impl JitEngine {
             return None;
         }
 
-        self.compile_budget = 0;
-        self.compile_cooldown = COMPILE_COOLDOWN_FRAMES;
+        self.compile_budget = self.compile_budget.saturating_sub(1);
         if self.diagnostics_enabled {
             self.counters.compilation_attempts =
                 self.counters.compilation_attempts.saturating_add(1);
@@ -1417,9 +1423,7 @@ mod tests {
         }
         assert!(engine.entries[&second_start].block.is_none());
 
-        for _ in 0..=COMPILE_COOLDOWN_FRAMES {
-            engine.begin_frame();
-        }
+        engine.begin_frame();
         assert!(engine
             .execute(
                 second_start,

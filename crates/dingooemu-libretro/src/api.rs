@@ -1,6 +1,7 @@
 use std::ffi::{c_void, CStr};
 use std::os::raw::{c_char, c_uint};
 use std::ptr;
+use std::time::Instant;
 
 use dingooemu_core::cpu::UnknownInstructionPolicy;
 use dingooemu_core::input::{
@@ -206,9 +207,7 @@ pub extern "C" fn retro_run() {
     if let Err(error) = emulator.tick() {
         log::error!("Frame execution failed: {error}");
     }
-    if let Some(started) = diagnostic_timer {
-        crate::diagnostics::record_frame(emulator, started);
-    }
+    let diagnostic_tick_elapsed = diagnostic_timer.as_ref().map(Instant::elapsed);
 
     callbacks::video_refresh(
         emulator.video.framebuffer().as_ptr().cast(),
@@ -222,6 +221,9 @@ pub extern "C" fn retro_run() {
         for sample in samples.chunks_exact(2) {
             callbacks::audio_sample(sample[0], sample[1]);
         }
+    }
+    if let (Some(started), Some(tick_elapsed)) = (diagnostic_timer, diagnostic_tick_elapsed) {
+        crate::diagnostics::record_frame(emulator, tick_elapsed, started.elapsed());
     }
 }
 

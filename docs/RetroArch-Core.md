@@ -129,7 +129,7 @@ Core option changes are applied while content is running and restored after a
 RetroArch reset.
 
 The JIT waits until a block has executed 256 times and rate-limits native
-compilation to one block every four frames. Short blocks and repeatedly
+compilation to one block per frame. Short blocks and repeatedly
 unsupported memory paths remain on the interpreter to avoid runtime stutter.
 When diagnostics are enabled, the report is refreshed once per second and when
 content is unloaded, so it can be shared without collecting Android system
