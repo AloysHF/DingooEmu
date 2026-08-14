@@ -536,7 +536,8 @@ fn apply_core_options(emulator: &mut Emulator) {
         .input
         .set_repeat_timing(options.repeat_delay, options.repeat_period);
     emulator.input.set_swap_ab(options.swap_ab);
-    crate::logger::set_debug_logging(options.debug_logging);
+    // Keep performance diagnostics independent of verbose frontend logging.
+    crate::logger::set_debug_logging(false);
     emulator
         .cpu
         .set_unknown_instruction_policy(options.unknown_instruction_policy);

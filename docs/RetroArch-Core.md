@@ -121,7 +121,7 @@ loads while content remains loaded.
 | Key Auto-Repeat Delay | frame counts including `0` | `24` | Sets how long a held button waits before repeating; `0` disables repeat. |
 | Key Auto-Repeat Period | `1`–`30` frame choices | `6` | Sets the interval between repeat press events. |
 | Swap A/B Buttons | `disabled`, `enabled` | `disabled` | Exchanges the emulated A and B button meanings. |
-| Performance Diagnostic Log | `disabled`, `enabled` | `disabled` | Enables detailed frontend logging and writes a compact `dingooemu-diagnostic.txt` performance report to the frontend save directory. |
+| Performance Diagnostic Log | `disabled`, `enabled` | `disabled` | Writes a compact `dingooemu-diagnostic.txt` performance report to the frontend save directory without enabling verbose frontend logs. |
 | Unknown MIPS Instruction Policy | `skip`, `stop` | `skip` | Logs and skips unsupported instructions or stops with an execution error. |
 | CPU Execution Engine (64-bit Android) | `jit`, `interpreter` | `jit` | Uses native translation for hot CPU blocks on arm64-v8a and x86_64 Android. Other targets and unsupported instructions use the interpreter. Select `interpreter` for compatibility testing. |
 
