@@ -18,7 +18,7 @@ const MIN_COMPILED_BLOCK_LEN: usize = 4;
 const MAX_JIT_CACHE_ENTRIES: usize = 32_768;
 const FAST_JIT_CACHE_SLOTS: usize = 4_096;
 const MAX_ZERO_INSTRUCTION_EXITS: u8 = 4;
-const COMPILE_COOLDOWN_FRAMES: u8 = 3;
+const MAX_COMPILES_PER_FRAME: u8 = 1;
 const REGISTER_COUNT: usize = 34;
 const HI_INDEX: usize = 32;
 const LO_INDEX: usize = 33;
@@ -96,7 +96,6 @@ pub(crate) struct JitEngine {
     fast_entries: Box<[FastJitCacheEntry]>,
     enabled: bool,
     compile_budget: u8,
-    compile_cooldown: u8,
     compiled_block_count: u64,
     diagnostics_enabled: bool,
     counters: JitCounters,
@@ -120,8 +119,7 @@ impl JitEngine {
             fast_entries: vec![FastJitCacheEntry::default(); FAST_JIT_CACHE_SLOTS]
                 .into_boxed_slice(),
             enabled: true,
-            compile_budget: 1,
-            compile_cooldown: 0,
+            compile_budget: MAX_COMPILES_PER_FRAME,
             compiled_block_count: 0,
             diagnostics_enabled: false,
             counters: JitCounters::default(),
@@ -215,17 +213,11 @@ impl JitEngine {
             }
             self.compiled_block_count = 0;
         }
-        self.compile_budget = 1;
-        self.compile_cooldown = 0;
+        self.compile_budget = MAX_COMPILES_PER_FRAME;
     }
 
     pub(crate) fn begin_frame(&mut self) {
-        if self.compile_cooldown == 0 {
-            self.compile_budget = 1;
-        } else {
-            self.compile_cooldown -= 1;
-            self.compile_budget = 0;
-        }
+        self.compile_budget = MAX_COMPILES_PER_FRAME;
     }
 
     pub(crate) fn execute(
@@ -408,8 +400,7 @@ impl JitEngine {
             return None;
         }
 
-        self.compile_budget = 0;
-        self.compile_cooldown = COMPILE_COOLDOWN_FRAMES;
+        self.compile_budget = self.compile_budget.saturating_sub(1);
         let compile_start = Instant::now();
         let compile_result = self
             .compiler
@@ -1508,9 +1499,7 @@ mod tests {
         }
         assert!(engine.entries[&second_start].block.is_none());
 
-        for _ in 0..=COMPILE_COOLDOWN_FRAMES {
-            engine.begin_frame();
-        }
+        engine.begin_frame();
         assert!(engine
             .execute(
                 second_start,
