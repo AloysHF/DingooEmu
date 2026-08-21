@@ -30,8 +30,10 @@ fn test_sword_and_fairy_reaches_framebuffer() {
     let framebuffer = emu.video.framebuffer();
     let non_zero = framebuffer.iter().filter(|&&byte| byte != 0).count();
     let unique_colors = framebuffer
-        .chunks_exact(2)
-        .map(|pixel| u16::from_le_bytes([pixel[0], pixel[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pixel| u16::from_le_bytes(*pixel))
         .collect::<BTreeSet<_>>()
         .len();
 

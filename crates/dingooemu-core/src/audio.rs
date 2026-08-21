@@ -385,8 +385,10 @@ fn decode_pcm(data: &[u8], format: SampleFormat, channels: u8) -> Vec<f32> {
             .map(|&sample| (sample as f32 - 128.0) / 128.0)
             .collect::<Vec<_>>(),
         SampleFormat::S16Le => data
-            .chunks_exact(2)
-            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|sample| i16::from_le_bytes(*sample) as f32 / 32768.0)
             .collect::<Vec<_>>(),
     };
     samples.truncate(samples.len() / channels as usize * channels as usize);
@@ -507,6 +509,10 @@ mod tests {
         let output = audio.take_frame_samples();
         assert_eq!(output.len(), (OUTPUT_SAMPLE_RATE as usize / 60) * 2);
         assert!(output.iter().any(|&sample| sample != 0));
-        assert!(output.chunks_exact(2).all(|frame| frame[0] == frame[1]));
+        assert!(output
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .all(|frame| frame[0] == frame[1]));
     }
 }

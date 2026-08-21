@@ -204,7 +204,7 @@ pub extern "C" fn retro_run() {
 
     let samples = emulator.take_audio_samples();
     if callbacks::audio_sample_batch(samples.as_ptr(), samples.len() / 2).is_none() {
-        for sample in samples.chunks_exact(2) {
+        for sample in samples.as_chunks::<2>().0.iter() {
             callbacks::audio_sample(sample[0], sample[1]);
         }
     }

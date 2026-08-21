@@ -28,8 +28,10 @@ fn test_gooplayer_discovers_tracks_and_opens_playlist() {
     let highlighted_pixels = emu
         .video
         .framebuffer()
-        .chunks_exact(2)
-        .map(|pixel| u16::from_le_bytes([pixel[0], pixel[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pixel| u16::from_le_bytes(*pixel))
         .filter(|pixel| {
             let red = (pixel >> 11) & 0x1f;
             let green = (pixel >> 5) & 0x3f;
