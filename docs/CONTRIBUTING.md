@@ -42,8 +42,8 @@ We welcome contributions in the following areas:
 - **Bug reports** — Report issues with specific games or features
 - **RetroArch integration** — Improve the libretro core
 
-Check the [good first issue](https://github.com/jiangxincode/DingooEmu/labels/good%20first%20issue)
-and [help wanted](https://github.com/jiangxincode/DingooEmu/labels/help%20wanted)
+Check the [good first issue](https://github.com/AloysHF/DingooEmu/labels/good%20first%20issue)
+and [help wanted](https://github.com/AloysHF/DingooEmu/labels/help%20wanted)
 labels for beginner-friendly tasks.
 
 ## License

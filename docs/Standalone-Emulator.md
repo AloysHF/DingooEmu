@@ -7,7 +7,7 @@ command-line option.
 ## Installation
 
 Download the latest standalone binary for your platform from the
-[Releases](https://github.com/jiangxincode/DingooEmu/releases) page.
+[Releases](https://github.com/AloysHF/DingooEmu/releases) page.
 
 You can also build it from source:
 

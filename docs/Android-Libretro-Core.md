@@ -24,7 +24,7 @@ To update an installed core:
 If the Online Updater is not available, you can install the core manually:
 
 1. **Download** `dingoo-emu-android-libretro.tar.gz` from the
-   [Releases](https://github.com/jiangxincode/DingooEmu/releases) page. It
+   [Releases](https://github.com/AloysHF/DingooEmu/releases) page. It
    contains `dingooemu_libretro_android.so` for the `arm64-v8a`,
    `armeabi-v7a`, `x86` and `x86_64` ABIs.
 2. **Install the core**: copy the `dingooemu_libretro_android.so` matching

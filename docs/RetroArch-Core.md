@@ -17,7 +17,7 @@ supported frontend features, and controls.
 ### Manual Installation
 
 Download the core from the
-[Releases](https://github.com/jiangxincode/DingooEmu/releases) page and extract
+[Releases](https://github.com/AloysHF/DingooEmu/releases) page and extract
 the archive for your operating system and CPU architecture. Copy the core file
 to RetroArch's `cores/` directory, and copy `dingooemu_libretro.info` to its
 `info/` directory.

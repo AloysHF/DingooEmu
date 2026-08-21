@@ -11,7 +11,7 @@ DingooEmu runs as a libretro core on RetroArch, allowing you to play Dingoo A320
 - iPhone or iPad (arm64, iOS 15+)
 - RetroArch 1.17.0 IPA ([official download](https://buildbot.libretro.com/stable/1.17.0/apple/ios-arm64/RetroArch.ipa))
   - Version 1.17.0 is recommended; newer versions have a different folder structure that makes manual injection more complex
-- Download `dingoo-emu-ios-libretro.tar.gz` from the [Releases](https://github.com/jiangxincode/DingooEmu/releases) page. It contains:
+- Download `dingoo-emu-ios-libretro.tar.gz` from the [Releases](https://github.com/AloysHF/DingooEmu/releases) page. It contains:
   - `dingooemu_libretro_ios.dylib` — core binary (real devices: arm64 + x86_64 universal)
   - `dingooemu_libretro.info` — core metadata
 - A file manager and IPA signing app (e.g. ESign, SideStore, or AltStore)
