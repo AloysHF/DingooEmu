@@ -33,7 +33,7 @@ minifb = "=0.28.0"
 rodio = { version = "=0.22.2", features = ["mp3"] }
 env_logger = "=0.11.11"
 cranelift = "=0.131.3"
-cranelift-jit = "=0.131.3"
+cranelift-jit = "=0.135.0"
 cranelift-module = "=0.131.3"
 cranelift-native = "=0.131.3"
 
