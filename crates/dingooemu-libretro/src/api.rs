@@ -4,6 +4,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use dingooemu_core::audio::OUTPUT_SAMPLE_RATE;
 use dingooemu_core::cpu::UnknownInstructionPolicy;
 use dingooemu_core::input::{
     BUTTON_A, BUTTON_B, BUTTON_DOWN, BUTTON_L, BUTTON_LEFT, BUTTON_R, BUTTON_RIGHT, BUTTON_SELECT,
@@ -18,9 +19,11 @@ use crate::types::*;
 use crate::EMULATOR;
 
 const PERFORMANCE_LEVEL: u32 = 4;
-const AUDIO_SAMPLE_RATE: f64 = 22_050.0;
+const MINIMUM_AUDIO_LATENCY_MS: u32 = 128;
 const FRAMES_PER_SECOND: f64 = 60.0;
 static DIAGNOSTIC_AUDIO_BUFFER_REGISTERED: AtomicBool = AtomicBool::new(false);
+static AUDIO_CONFIGURATION_REQUEST_PENDING: AtomicBool = AtomicBool::new(true);
+static ASYNC_AUDIO_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
 pub extern "C" fn retro_set_environment(callback: RetroEnvironmentCallback) {
@@ -63,6 +66,7 @@ pub extern "C" fn retro_init() {
 #[no_mangle]
 pub extern "C" fn retro_deinit() {
     update_diagnostic_audio_buffer_status(false);
+    unregister_async_audio();
     crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
     unsafe { EMULATOR = None };
     log::info!("Libretro core deinitialized");
@@ -101,7 +105,7 @@ pub extern "C" fn retro_get_system_av_info(info: *mut RetroSystemAvInfo) {
     };
     info.timing = RetroSystemTiming {
         fps: FRAMES_PER_SECOND,
-        sample_rate: AUDIO_SAMPLE_RATE,
+        sample_rate: f64::from(OUTPUT_SAMPLE_RATE),
     };
 }
 
@@ -134,6 +138,7 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
         }
     };
     update_diagnostic_audio_buffer_status(false);
+    unregister_async_audio();
     crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
     unsafe { EMULATOR = None };
 
@@ -153,10 +158,17 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
             let diagnostic_directory = save_directory
                 .as_deref()
                 .or_else(|| std::path::Path::new(path).parent());
-            crate::diagnostics::configure(diagnostic_directory, path, AUDIO_SAMPLE_RATE as u32);
+            crate::diagnostics::configure(
+                diagnostic_directory,
+                path,
+                OUTPUT_SAMPLE_RATE,
+                MINIMUM_AUDIO_LATENCY_MS,
+            );
             apply_core_options(&mut emulator);
             emulator.start();
             unsafe { EMULATOR = Some(emulator) };
+            register_async_audio();
+            AUDIO_CONFIGURATION_REQUEST_PENDING.store(true, Ordering::Relaxed);
             if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
                 register_memory_maps(emulator);
             }
@@ -183,6 +195,7 @@ pub extern "C" fn retro_load_game_special(
 #[no_mangle]
 pub extern "C" fn retro_unload_game() {
     update_diagnostic_audio_buffer_status(false);
+    unregister_async_audio();
     if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
         emulator.flush_save_files();
         crate::diagnostics::finish(Some(emulator));
@@ -203,6 +216,8 @@ pub extern "C" fn retro_run() {
         return;
     };
 
+    request_audio_configuration();
+
     callbacks::input_poll();
     let buttons =
         query_joypad_buttons(|id| callbacks::input_state(0, RETRO_DEVICE_JOYPAD, 0, id) != 0);
@@ -222,7 +237,9 @@ pub extern "C" fn retro_run() {
         );
 
         let samples = emulator.take_audio_samples();
-        if callbacks::audio_sample_batch(samples.as_ptr(), samples.len() / 2).is_none() {
+        if crate::audio_output::enqueue(&samples).is_none()
+            && callbacks::audio_sample_batch(samples.as_ptr(), samples.len() / 2).is_none()
+        {
             for sample in samples.as_chunks::<2>().0.iter() {
                 callbacks::audio_sample(sample[0], sample[1]);
             }
@@ -243,7 +260,7 @@ pub extern "C" fn retro_run() {
     let audio_timer = Instant::now();
     let samples = emulator.take_audio_samples();
     let audio_frames_requested = samples.len() / 2;
-    let audio_frames_accepted =
+    let audio_frames_accepted = crate::audio_output::enqueue(&samples).unwrap_or_else(|| {
         callbacks::audio_sample_batch(samples.as_ptr(), audio_frames_requested).map_or_else(
             || {
                 for sample in samples.as_chunks::<2>().0.iter() {
@@ -252,7 +269,8 @@ pub extern "C" fn retro_run() {
                 audio_frames_requested
             },
             |accepted| accepted.min(audio_frames_requested),
-        );
+        )
+    });
     let audio_elapsed = audio_timer.elapsed();
     crate::diagnostics::record_frame(
         emulator,
@@ -291,6 +309,76 @@ unsafe extern "C" fn frontend_audio_buffer_status(
     underrun_likely: bool,
 ) {
     crate::diagnostics::record_audio_buffer_status(active, occupancy, underrun_likely);
+}
+
+fn register_async_audio() {
+    crate::audio_output::reset(true);
+    let mut audio_callback = RetroAudioCallback {
+        callback: Some(crate::audio_output::callback),
+        set_state: Some(frontend_async_audio_set_state),
+    };
+    let supported = callbacks::environment(
+        RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK,
+        (&mut audio_callback as *mut RetroAudioCallback).cast(),
+    );
+    ASYNC_AUDIO_REGISTERED.store(supported, Ordering::Release);
+    if !supported {
+        crate::audio_output::reset(false);
+    }
+    crate::diagnostics::set_async_audio_callback_status(supported);
+
+    if supported {
+        let mut frame_time_callback = RetroFrameTimeCallback {
+            callback: Some(frontend_frame_time),
+            reference: (1_000_000.0 / FRAMES_PER_SECOND) as i64,
+        };
+        callbacks::environment(
+            RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK,
+            (&mut frame_time_callback as *mut RetroFrameTimeCallback).cast(),
+        );
+        log::info!("Frontend asynchronous audio callback enabled");
+    } else {
+        log::debug!("Frontend does not support asynchronous audio callbacks");
+    }
+}
+
+fn unregister_async_audio() {
+    if ASYNC_AUDIO_REGISTERED.swap(false, Ordering::AcqRel) {
+        let mut audio_callback = RetroAudioCallback {
+            callback: None,
+            set_state: None,
+        };
+        callbacks::environment(
+            RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK,
+            (&mut audio_callback as *mut RetroAudioCallback).cast(),
+        );
+        crate::diagnostics::record_async_audio_state(false);
+    }
+    crate::audio_output::reset(false);
+}
+
+unsafe extern "C" fn frontend_async_audio_set_state(enabled: bool) {
+    crate::audio_output::set_enabled(enabled);
+}
+
+unsafe extern "C" fn frontend_frame_time(_usec: i64) {}
+
+fn request_audio_configuration() {
+    if !AUDIO_CONFIGURATION_REQUEST_PENDING.swap(false, Ordering::Relaxed) {
+        return;
+    }
+
+    let mut latency_ms = MINIMUM_AUDIO_LATENCY_MS;
+    let accepted = callbacks::environment(
+        RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY,
+        (&mut latency_ms as *mut u32).cast(),
+    );
+    crate::diagnostics::set_audio_latency_request_status(accepted);
+    if accepted {
+        log::info!("Requested minimum frontend audio latency: {latency_ms} ms");
+    } else {
+        log::debug!("Frontend does not support minimum audio latency requests");
+    }
 }
 
 #[no_mangle]
@@ -703,6 +791,8 @@ mod tests {
     static VIDEO_WIDTH: AtomicU32 = AtomicU32::new(0);
     static AUDIO_BATCH_CALLED: AtomicBool = AtomicBool::new(false);
     static AUDIO_BUFFER_STATUS_REGISTERED: AtomicBool = AtomicBool::new(false);
+    static ASYNC_AUDIO_CALLBACK: Mutex<RetroAudioCallbackFn> = Mutex::new(None);
+    static AUDIO_LATENCY_MS: AtomicU32 = AtomicU32::new(0);
     static MEMORY_MAPS_SET: AtomicBool = AtomicBool::new(false);
     static SAVE_DIRECTORY: Mutex<Option<CString>> = Mutex::new(None);
 
@@ -719,17 +809,33 @@ mod tests {
                 true
             }
             RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL => true,
+            RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK => {
+                let audio = &*data.cast::<RetroAudioCallback>();
+                *ASYNC_AUDIO_CALLBACK.lock().unwrap() = audio.callback;
+                if let Some(set_state) = audio.set_state {
+                    set_state(true);
+                }
+                true
+            }
+            RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK => true,
+            RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK => {
+                let status = &*data.cast::<RetroAudioBufferStatusCallback>();
+                AUDIO_BUFFER_STATUS_REGISTERED.store(status.callback.is_some(), Ordering::SeqCst);
+                if let Some(callback) = status.callback {
+                    callback(true, 75, false);
+                }
+                true
+            }
+            RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY => {
+                AUDIO_LATENCY_MS.store(*(data.cast::<u32>()), Ordering::SeqCst);
+                true
+            }
             RETRO_ENVIRONMENT_SET_MEMORY_MAPS => {
                 let memory_map = &*data.cast::<RetroMemoryMap>();
                 MEMORY_MAPS_SET.store(
                     memory_map.num_descriptors == 2 && !memory_map.descriptors.is_null(),
                     Ordering::SeqCst,
                 );
-                true
-            }
-            RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK => {
-                let status = &*data.cast::<RetroAudioBufferStatusCallback>();
-                AUDIO_BUFFER_STATUS_REGISTERED.store(status.callback.is_some(), Ordering::SeqCst);
                 true
             }
             RETRO_ENVIRONMENT_SET_VARIABLES => true,
@@ -943,6 +1049,8 @@ mod tests {
         AUDIO_BATCH_CALLED.store(false, Ordering::SeqCst);
         AUDIO_BUFFER_STATUS_REGISTERED.store(false, Ordering::SeqCst);
         DIAGNOSTIC_AUDIO_BUFFER_REGISTERED.store(false, Ordering::SeqCst);
+        *ASYNC_AUDIO_CALLBACK.lock().unwrap() = None;
+        AUDIO_LATENCY_MS.store(0, Ordering::SeqCst);
         MEMORY_MAPS_SET.store(false, Ordering::SeqCst);
 
         let test_directory = std::env::temp_dir().join(format!(
@@ -992,8 +1100,14 @@ mod tests {
         retro_run();
         assert!(!crate::diagnostics::is_enabled());
         assert!(!AUDIO_BUFFER_STATUS_REGISTERED.load(Ordering::SeqCst));
+        assert_eq!(
+            AUDIO_LATENCY_MS.load(Ordering::SeqCst),
+            MINIMUM_AUDIO_LATENCY_MS
+        );
         assert!(INPUT_POLLED.load(Ordering::SeqCst));
         assert_eq!(VIDEO_WIDTH.load(Ordering::SeqCst), SCREEN_WIDTH);
+        assert!(!AUDIO_BATCH_CALLED.load(Ordering::SeqCst));
+        unsafe { ASYNC_AUDIO_CALLBACK.lock().unwrap().unwrap()() };
         assert!(AUDIO_BATCH_CALLED.load(Ordering::SeqCst));
         let cheat = CString::new("mem32:0x1000=0xfeedbeef").unwrap();
         retro_cheat_set(0, true, cheat.as_ptr());

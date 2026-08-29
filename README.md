@@ -29,7 +29,7 @@ Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. T
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
 - **Screenshot mode** — Headless frame capture for automated testing and preview generation
 - **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`
-- **RetroArch integration** — libretro core with video, audio, RetroPad input, reset, and persistent game saves
+- **RetroArch integration** — libretro core with video, asynchronous audio delivery, RetroPad input, reset, and persistent game saves
 - **Cross-platform** — Windows, Linux, macOS
 
 ## Usage

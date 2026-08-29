@@ -18,7 +18,7 @@ const MIN_COMPILED_BLOCK_LEN: usize = 4;
 const MAX_JIT_CACHE_ENTRIES: usize = 65_536;
 const FAST_JIT_CACHE_SLOTS: usize = 4_096;
 const MAX_ZERO_INSTRUCTION_EXITS: u8 = 4;
-const MAX_COMPILES_PER_FRAME: u8 = 1;
+const MAX_COMPILES_PER_FRAME: u8 = 4;
 const REGISTER_COUNT: usize = 34;
 const HI_INDEX: usize = 32;
 const LO_INDEX: usize = 33;
@@ -201,13 +201,7 @@ impl JitEngine {
                 framebuffer,
             );
         }
-        self.execute_compiled_inner::<false>(
-            start,
-            instruction_limit,
-            registers,
-            ram,
-            framebuffer,
-        )
+        self.execute_compiled_inner::<false>(start, instruction_limit, registers, ram, framebuffer)
     }
 
     #[cold]
@@ -220,13 +214,7 @@ impl JitEngine {
         ram: *mut u8,
         framebuffer: *mut u8,
     ) -> CompiledExecution {
-        self.execute_compiled_inner::<true>(
-            start,
-            instruction_limit,
-            registers,
-            ram,
-            framebuffer,
-        )
+        self.execute_compiled_inner::<true>(start, instruction_limit, registers, ram, framebuffer)
     }
 
     #[inline(always)]

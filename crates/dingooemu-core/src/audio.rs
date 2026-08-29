@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 #[cfg(feature = "standalone")]
 use std::num::NonZero;
 
-pub const OUTPUT_SAMPLE_RATE: u32 = 22_050;
+pub const OUTPUT_SAMPLE_RATE: u32 = 48_000;
 
 #[cfg(not(feature = "standalone"))]
 const VIDEO_FRAMES_PER_SECOND: u32 = 60;

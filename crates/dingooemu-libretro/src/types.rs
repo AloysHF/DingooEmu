@@ -6,6 +6,9 @@ pub type RetroVideoRefreshCallback =
     Option<unsafe extern "C" fn(*const c_void, c_uint, c_uint, usize)>;
 pub type RetroAudioSampleCallback = Option<unsafe extern "C" fn(i16, i16)>;
 pub type RetroAudioSampleBatchCallback = Option<unsafe extern "C" fn(*const i16, usize) -> usize>;
+pub type RetroAudioCallbackFn = Option<unsafe extern "C" fn()>;
+pub type RetroAudioSetStateCallbackFn = Option<unsafe extern "C" fn(bool)>;
+pub type RetroFrameTimeCallbackFn = Option<unsafe extern "C" fn(i64)>;
 pub type RetroAudioBufferStatusCallbackFn = Option<unsafe extern "C" fn(bool, c_uint, bool)>;
 pub type RetroInputPollCallback = Option<unsafe extern "C" fn()>;
 pub type RetroInputStateCallback =
@@ -68,6 +71,18 @@ pub struct RetroLogCallback {
 #[repr(C)]
 pub struct RetroAudioBufferStatusCallback {
     pub callback: RetroAudioBufferStatusCallbackFn,
+}
+
+#[repr(C)]
+pub struct RetroAudioCallback {
+    pub callback: RetroAudioCallbackFn,
+    pub set_state: RetroAudioSetStateCallbackFn,
+}
+
+#[repr(C)]
+pub struct RetroFrameTimeCallback {
+    pub callback: RetroFrameTimeCallbackFn,
+    pub reference: i64,
 }
 
 #[repr(C)]

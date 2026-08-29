@@ -595,6 +595,7 @@ dependencies = [
  "cranelift-native",
  "libc",
  "log",
+ "memmap2",
  "region",
  "target-lexicon",
  "wasmtime-internal-jit-icache-coherence",

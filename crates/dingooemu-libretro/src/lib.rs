@@ -5,6 +5,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod api;
+mod audio_output;
 mod callbacks;
 mod constants;
 mod diagnostics;

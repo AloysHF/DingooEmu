@@ -60,10 +60,9 @@ Diagnostics are disabled by default. The file is replaced for each session and
 contains timing and aggregate counters, not game data. It is refreshed once per
 second while enabled, so it can still be copied if the frontend cannot close
 content cleanly. The report includes cumulative and recent frame timing, video
-and audio callback costs, audio short writes, frontend buffer status, and JIT
-execution and fallback counters. Fields for unavailable delivery modes are kept
-in the report with explicit unsupported or zero values so reports from different
-core versions remain directly comparable.
+and audio callback costs, audio short writes, frontend buffer status,
+asynchronous queue statistics, the 48 kHz host output rate, acceptance of the
+128 ms minimum latency request, and JIT execution and fallback counters.
 
 ## Building the Android core locally
 

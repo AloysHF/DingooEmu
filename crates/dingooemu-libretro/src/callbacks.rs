@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::sync::RwLock;
 
 use crate::constants::RETRO_ENVIRONMENT_GET_LOG_INTERFACE;
 use crate::types::*;
@@ -27,95 +28,82 @@ impl Callbacks {
     }
 }
 
-static mut CALLBACKS: Callbacks = Callbacks::new();
+static CALLBACKS: RwLock<Callbacks> = RwLock::new(Callbacks::new());
 
 pub fn set_environment(callback: RetroEnvironmentCallback) {
-    unsafe { CALLBACKS.environment = callback };
+    CALLBACKS.write().unwrap().environment = callback;
 }
 
 pub fn set_video_refresh(callback: RetroVideoRefreshCallback) {
-    unsafe { CALLBACKS.video_refresh = callback };
+    CALLBACKS.write().unwrap().video_refresh = callback;
 }
 
 pub fn set_audio_sample(callback: RetroAudioSampleCallback) {
-    unsafe { CALLBACKS.audio_sample = callback };
+    CALLBACKS.write().unwrap().audio_sample = callback;
 }
 
 pub fn set_audio_sample_batch(callback: RetroAudioSampleBatchCallback) {
-    unsafe { CALLBACKS.audio_sample_batch = callback };
+    CALLBACKS.write().unwrap().audio_sample_batch = callback;
 }
 
 pub fn set_input_poll(callback: RetroInputPollCallback) {
-    unsafe { CALLBACKS.input_poll = callback };
+    CALLBACKS.write().unwrap().input_poll = callback;
 }
 
 pub fn set_input_state(callback: RetroInputStateCallback) {
-    unsafe { CALLBACKS.input_state = callback };
+    CALLBACKS.write().unwrap().input_state = callback;
 }
 
 pub fn initialize_log_interface() {
-    unsafe { CALLBACKS.log = None };
+    CALLBACKS.write().unwrap().log = None;
     let mut interface = RetroLogCallback { log: None };
     if environment(
         RETRO_ENVIRONMENT_GET_LOG_INTERFACE,
         &mut interface as *mut RetroLogCallback as *mut c_void,
     ) {
-        unsafe { CALLBACKS.log = interface.log };
+        CALLBACKS.write().unwrap().log = interface.log;
     }
 }
 
 pub fn environment(command: u32, data: *mut c_void) -> bool {
-    unsafe {
-        CALLBACKS
-            .environment
-            .is_some_and(|callback| callback(command, data))
-    }
+    let callback = CALLBACKS.read().unwrap().environment;
+    unsafe { callback.is_some_and(|callback| callback(command, data)) }
 }
 
 pub fn video_refresh(data: *const c_void, width: u32, height: u32, pitch: usize) {
-    unsafe {
-        if let Some(callback) = CALLBACKS.video_refresh {
-            callback(data, width, height, pitch);
-        }
+    let callback = CALLBACKS.read().unwrap().video_refresh;
+    if let Some(callback) = callback {
+        unsafe { callback(data, width, height, pitch) };
     }
 }
 
 pub fn audio_sample(left: i16, right: i16) {
-    unsafe {
-        if let Some(callback) = CALLBACKS.audio_sample {
-            callback(left, right);
-        }
+    let callback = CALLBACKS.read().unwrap().audio_sample;
+    if let Some(callback) = callback {
+        unsafe { callback(left, right) };
     }
 }
 
 pub fn audio_sample_batch(data: *const i16, frames: usize) -> Option<usize> {
-    unsafe {
-        CALLBACKS
-            .audio_sample_batch
-            .map(|callback| callback(data, frames))
-    }
+    let callback = CALLBACKS.read().unwrap().audio_sample_batch;
+    unsafe { callback.map(|callback| callback(data, frames)) }
 }
 
 pub fn input_poll() {
-    unsafe {
-        if let Some(callback) = CALLBACKS.input_poll {
-            callback();
-        }
+    let callback = CALLBACKS.read().unwrap().input_poll;
+    if let Some(callback) = callback {
+        unsafe { callback() };
     }
 }
 
 pub fn input_state(port: u32, device: u32, index: u32, id: u32) -> i16 {
-    unsafe {
-        CALLBACKS
-            .input_state
-            .map_or(0, |callback| callback(port, device, index, id))
-    }
+    let callback = CALLBACKS.read().unwrap().input_state;
+    unsafe { callback.map_or(0, |callback| callback(port, device, index, id)) }
 }
 
 pub fn log(level: u32, message: *const std::os::raw::c_char) {
-    unsafe {
-        if let Some(callback) = CALLBACKS.log {
-            callback(level, message);
-        }
+    let callback = CALLBACKS.read().unwrap().log;
+    if let Some(callback) = callback {
+        unsafe { callback(level, message) };
     }
 }
