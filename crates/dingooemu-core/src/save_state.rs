@@ -6,7 +6,7 @@ use serde::Serialize;
 const MAGIC: &[u8; 8] = b"DINGSTAT";
 const VERSION: u32 = 3;
 const HEADER_SIZE: usize = 32;
-const MAX_DECODED_SIZE: usize = 64 * 1024 * 1024;
+const MAX_DECODED_SIZE: usize = 128 * 1024 * 1024;
 
 /// Fixed capacity required by the libretro serialization API.
 pub const SERIALIZED_SIZE: usize = 48 * 1024 * 1024;
