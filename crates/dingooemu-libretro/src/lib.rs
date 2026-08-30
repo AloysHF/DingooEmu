@@ -7,6 +7,7 @@
 mod api;
 mod callbacks;
 mod constants;
+mod diagnostics;
 mod logger;
 mod types;
 

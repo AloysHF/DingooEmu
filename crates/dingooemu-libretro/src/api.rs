@@ -1,6 +1,8 @@
 use std::ffi::{c_void, CStr};
 use std::os::raw::{c_char, c_uint};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use dingooemu_core::cpu::UnknownInstructionPolicy;
 use dingooemu_core::input::{
@@ -18,6 +20,7 @@ use crate::EMULATOR;
 const PERFORMANCE_LEVEL: u32 = 4;
 const AUDIO_SAMPLE_RATE: f64 = 22_050.0;
 const FRAMES_PER_SECOND: f64 = 60.0;
+static DIAGNOSTIC_AUDIO_BUFFER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
 pub extern "C" fn retro_set_environment(callback: RetroEnvironmentCallback) {
@@ -59,6 +62,8 @@ pub extern "C" fn retro_init() {
 
 #[no_mangle]
 pub extern "C" fn retro_deinit() {
+    update_diagnostic_audio_buffer_status(false);
+    crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
     unsafe { EMULATOR = None };
     log::info!("Libretro core deinitialized");
 }
@@ -128,6 +133,8 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
             return false;
         }
     };
+    update_diagnostic_audio_buffer_status(false);
+    crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
     unsafe { EMULATOR = None };
 
     if !set_pixel_format() {
@@ -139,9 +146,14 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
 
     match Emulator::from_path(path) {
         Ok(mut emulator) => {
-            if let Some(save_directory) = frontend_directory(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY) {
+            let save_directory = frontend_directory(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY);
+            if let Some(save_directory) = save_directory.as_ref() {
                 emulator.set_save_directory(save_directory);
             }
+            let diagnostic_directory = save_directory
+                .as_deref()
+                .or_else(|| std::path::Path::new(path).parent());
+            crate::diagnostics::configure(diagnostic_directory, path, AUDIO_SAMPLE_RATE as u32);
             apply_core_options(&mut emulator);
             emulator.start();
             unsafe { EMULATOR = Some(emulator) };
@@ -152,6 +164,7 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
             true
         }
         Err(error) => {
+            crate::diagnostics::finish(None);
             log::error!("Failed to load content: {error}");
             false
         }
@@ -169,8 +182,12 @@ pub extern "C" fn retro_load_game_special(
 
 #[no_mangle]
 pub extern "C" fn retro_unload_game() {
+    update_diagnostic_audio_buffer_status(false);
     if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
         emulator.flush_save_files();
+        crate::diagnostics::finish(Some(emulator));
+    } else {
+        crate::diagnostics::finish(None);
     }
     unsafe { EMULATOR = None };
 }
@@ -191,23 +208,89 @@ pub extern "C" fn retro_run() {
         query_joypad_buttons(|id| callbacks::input_state(0, RETRO_DEVICE_JOYPAD, 0, id) != 0);
     emulator.set_buttons(buttons);
 
+    let diagnostic_timer = crate::diagnostics::frame_timer();
     if let Err(error) = emulator.tick() {
         log::error!("Frame execution failed: {error}");
     }
 
+    let Some(diagnostic_timer) = diagnostic_timer else {
+        callbacks::video_refresh(
+            emulator.video.framebuffer().as_ptr().cast(),
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
+            SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
+        );
+
+        let samples = emulator.take_audio_samples();
+        if callbacks::audio_sample_batch(samples.as_ptr(), samples.len() / 2).is_none() {
+            for sample in samples.as_chunks::<2>().0.iter() {
+                callbacks::audio_sample(sample[0], sample[1]);
+            }
+        }
+        return;
+    };
+    let tick_elapsed = diagnostic_timer.elapsed();
+
+    let video_timer = Instant::now();
     callbacks::video_refresh(
         emulator.video.framebuffer().as_ptr().cast(),
         SCREEN_WIDTH,
         SCREEN_HEIGHT,
         SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
     );
+    let video_elapsed = video_timer.elapsed();
 
+    let audio_timer = Instant::now();
     let samples = emulator.take_audio_samples();
-    if callbacks::audio_sample_batch(samples.as_ptr(), samples.len() / 2).is_none() {
-        for sample in samples.as_chunks::<2>().0.iter() {
-            callbacks::audio_sample(sample[0], sample[1]);
-        }
+    let audio_frames_requested = samples.len() / 2;
+    let audio_frames_accepted =
+        callbacks::audio_sample_batch(samples.as_ptr(), audio_frames_requested).map_or_else(
+            || {
+                for sample in samples.as_chunks::<2>().0.iter() {
+                    callbacks::audio_sample(sample[0], sample[1]);
+                }
+                audio_frames_requested
+            },
+            |accepted| accepted.min(audio_frames_requested),
+        );
+    let audio_elapsed = audio_timer.elapsed();
+    crate::diagnostics::record_frame(
+        emulator,
+        tick_elapsed,
+        diagnostic_timer.elapsed(),
+        video_elapsed,
+        audio_elapsed,
+        audio_frames_requested,
+        audio_frames_accepted,
+    );
+}
+
+fn update_diagnostic_audio_buffer_status(enabled: bool) {
+    let registered = DIAGNOSTIC_AUDIO_BUFFER_REGISTERED.load(Ordering::Acquire);
+    if enabled == registered {
+        return;
     }
+
+    let mut callback = RetroAudioBufferStatusCallback {
+        callback: enabled.then_some(frontend_audio_buffer_status),
+    };
+    let accepted = callbacks::environment(
+        RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK,
+        (&mut callback as *mut RetroAudioBufferStatusCallback).cast(),
+    );
+    let active = enabled && accepted;
+    DIAGNOSTIC_AUDIO_BUFFER_REGISTERED.store(active, Ordering::Release);
+    if enabled {
+        crate::diagnostics::set_audio_buffer_status_callback_status(accepted);
+    }
+}
+
+unsafe extern "C" fn frontend_audio_buffer_status(
+    active: bool,
+    occupancy: c_uint,
+    underrun_likely: bool,
+) {
+    crate::diagnostics::record_audio_buffer_status(active, occupancy, underrun_likely);
 }
 
 #[no_mangle]
@@ -380,7 +463,7 @@ struct CoreOptions {
     repeat_delay: u32,
     repeat_period: u32,
     swap_ab: bool,
-    debug_logging: bool,
+    diagnostics_enabled: bool,
     unknown_instruction_policy: UnknownInstructionPolicy,
     jit_enabled: bool,
 }
@@ -392,7 +475,7 @@ impl Default for CoreOptions {
             repeat_delay: 24,
             repeat_period: 6,
             swap_ab: false,
-            debug_logging: false,
+            diagnostics_enabled: false,
             unknown_instruction_policy: UnknownInstructionPolicy::Skip,
             jit_enabled: true,
         }
@@ -419,7 +502,7 @@ fn core_option_variables() -> Vec<RetroVariable> {
         },
         RetroVariable {
             key: c"dingooemu_debug_logging".as_ptr(),
-            value: c"CPU/HLE Debug Logging; disabled|enabled".as_ptr(),
+            value: c"Performance Diagnostic Log; disabled|enabled".as_ptr(),
         },
         RetroVariable {
             key: c"dingooemu_unknown_instruction".as_ptr(),
@@ -497,7 +580,7 @@ fn read_core_options(mut get: impl FnMut(&CStr) -> Option<String>) -> CoreOption
         options.swap_ab = swap == "enabled";
     }
     if let Some(debug) = get(c"dingooemu_debug_logging") {
-        options.debug_logging = debug == "enabled";
+        options.diagnostics_enabled = debug == "enabled";
     }
     if let Some(policy) = get(c"dingooemu_unknown_instruction") {
         options.unknown_instruction_policy = if policy == "stop" {
@@ -519,18 +602,22 @@ fn apply_core_options(emulator: &mut Emulator) {
         .input
         .set_repeat_timing(options.repeat_delay, options.repeat_period);
     emulator.input.set_swap_ab(options.swap_ab);
-    crate::logger::set_debug_logging(options.debug_logging);
+    // Keep performance diagnostics independent of verbose frontend logging.
+    crate::logger::set_debug_logging(false);
     emulator
         .cpu
         .set_unknown_instruction_policy(options.unknown_instruction_policy);
     emulator.set_jit_enabled(options.jit_enabled);
+    emulator.set_jit_diagnostics_enabled(options.diagnostics_enabled);
+    crate::diagnostics::set_enabled(options.diagnostics_enabled, emulator);
+    update_diagnostic_audio_buffer_status(crate::diagnostics::is_enabled());
     log::info!(
-        "Core options applied: volume={} repeat_delay={} repeat_period={} swap_ab={} debug_logging={} unknown_instruction={:?} cpu_engine={}",
+        "Core options applied: volume={} repeat_delay={} repeat_period={} swap_ab={} diagnostics={} unknown_instruction={:?} cpu_engine={}",
         options.volume,
         options.repeat_delay,
         options.repeat_period,
         options.swap_ab,
-        options.debug_logging,
+        options.diagnostics_enabled,
         options.unknown_instruction_policy,
         if options.jit_enabled { "jit" } else { "interpreter" }
     );
@@ -615,6 +702,7 @@ mod tests {
     static INPUT_POLLED: AtomicBool = AtomicBool::new(false);
     static VIDEO_WIDTH: AtomicU32 = AtomicU32::new(0);
     static AUDIO_BATCH_CALLED: AtomicBool = AtomicBool::new(false);
+    static AUDIO_BUFFER_STATUS_REGISTERED: AtomicBool = AtomicBool::new(false);
     static MEMORY_MAPS_SET: AtomicBool = AtomicBool::new(false);
     static SAVE_DIRECTORY: Mutex<Option<CString>> = Mutex::new(None);
 
@@ -637,6 +725,11 @@ mod tests {
                     memory_map.num_descriptors == 2 && !memory_map.descriptors.is_null(),
                     Ordering::SeqCst,
                 );
+                true
+            }
+            RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK => {
+                let status = &*data.cast::<RetroAudioBufferStatusCallback>();
+                AUDIO_BUFFER_STATUS_REGISTERED.store(status.callback.is_some(), Ordering::SeqCst);
                 true
             }
             RETRO_ENVIRONMENT_SET_VARIABLES => true,
@@ -780,18 +873,22 @@ mod tests {
     }
 
     #[test]
-    fn debug_logging_option_defaults_to_disabled() {
+    fn performance_diagnostics_option_defaults_to_disabled() {
         let variables = core_option_variables();
         assert_eq!(
             unsafe { CStr::from_ptr(variables[4].key) },
             c"dingooemu_debug_logging"
         );
-        assert!(!read_core_options(|_| None).debug_logging);
+        assert!(unsafe { CStr::from_ptr(variables[4].value) }
+            .to_str()
+            .unwrap()
+            .starts_with("Performance Diagnostic Log; disabled"));
+        assert!(!read_core_options(|_| None).diagnostics_enabled);
         assert!(
             read_core_options(|key| {
                 (key == c"dingooemu_debug_logging").then(|| "enabled".to_string())
             })
-            .debug_logging
+            .diagnostics_enabled
         );
     }
 
@@ -844,16 +941,24 @@ mod tests {
         INPUT_POLLED.store(false, Ordering::SeqCst);
         VIDEO_WIDTH.store(0, Ordering::SeqCst);
         AUDIO_BATCH_CALLED.store(false, Ordering::SeqCst);
+        AUDIO_BUFFER_STATUS_REGISTERED.store(false, Ordering::SeqCst);
+        DIAGNOSTIC_AUDIO_BUFFER_REGISTERED.store(false, Ordering::SeqCst);
         MEMORY_MAPS_SET.store(false, Ordering::SeqCst);
 
-        let path = std::env::temp_dir().join(format!(
-            "dingooemu-libretro-test-{}.app",
-            std::process::id()
+        let test_directory = std::env::temp_dir().join(format!(
+            "dingooemu-libretro-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
+        std::fs::create_dir_all(&test_directory).unwrap();
+        let path = test_directory.join("content.app");
         std::fs::write(&path, minimal_app_bytes()).unwrap();
         let path_string = CString::new(path.to_string_lossy().as_bytes()).unwrap();
         *SAVE_DIRECTORY.lock().unwrap() =
-            Some(CString::new(path.parent().unwrap().to_string_lossy().as_bytes()).unwrap());
+            Some(CString::new(test_directory.to_string_lossy().as_bytes()).unwrap());
         let info = RetroGameInfo {
             path: path_string.as_ptr(),
             data: ptr::null(),
@@ -885,6 +990,8 @@ mod tests {
         assert!(!video_ram.is_null());
 
         retro_run();
+        assert!(!crate::diagnostics::is_enabled());
+        assert!(!AUDIO_BUFFER_STATUS_REGISTERED.load(Ordering::SeqCst));
         assert!(INPUT_POLLED.load(Ordering::SeqCst));
         assert_eq!(VIDEO_WIDTH.load(Ordering::SeqCst), SCREEN_WIDTH);
         assert!(AUDIO_BATCH_CALLED.load(Ordering::SeqCst));
@@ -949,7 +1056,9 @@ mod tests {
         assert_eq!(retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM), 0);
         unsafe { assert!(EMULATOR.is_none()) };
         retro_deinit();
+        assert!(!test_directory.join("dingooemu-diagnostic.txt").exists());
         *SAVE_DIRECTORY.lock().unwrap() = None;
         std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(test_directory).unwrap();
     }
 }
