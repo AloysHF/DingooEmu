@@ -62,6 +62,11 @@ pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResul
             emu.cpu.regs.write(2, 0);
             log::trace!("  cmGetSysModel({pointer:#010x}) = 0");
         }
+        "get_current_language" => {
+            // Dingoo SDK locale.h: LANG_CHINESE_SIMPLIFIED = 0.
+            emu.cpu.regs.write(2, 0);
+            log::trace!("  get_current_language() = 0 (Simplified Chinese)");
+        }
         "U8TOU16" | "U8TOX16" => {
             let pointer = emu.cpu.regs.read(4);
             let value = emu.memory.read_u16(pointer)? as u32;
