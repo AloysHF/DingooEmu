@@ -50,6 +50,29 @@ pub struct UnknownHleCall {
     pub first_arguments: [u32; 4],
 }
 
+/// Aggregated native translation counters for performance diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JitDiagnostics {
+    pub feature_available: bool,
+    pub enabled: bool,
+    pub backend_available: bool,
+    pub tracked_blocks: usize,
+    pub compiled_blocks: usize,
+    pub failed_blocks: usize,
+    pub execute_requests: u64,
+    pub native_executions: u64,
+    pub native_instructions: u64,
+    pub interpreter_executions: u64,
+    pub interpreter_instructions: u64,
+    pub compilation_attempts: u64,
+    pub compilation_failures: u64,
+    pub compilation_total_us: u64,
+    pub compilation_max_us: u64,
+    pub cold_fallbacks: u64,
+    pub instruction_limit_fallbacks: u64,
+    pub zero_exit_fallbacks: u64,
+}
+
 fn hook_filter_location(address: u32) -> (usize, u64) {
     let bit_index = (address as usize >> 2) & (HOOK_FILTER_WORDS * u64::BITS as usize - 1);
     (
@@ -855,6 +878,8 @@ impl Emulator {
         }
 
         self.cpu.account_instructions(completed);
+        #[cfg(feature = "jit")]
+        self.jit.record_interpreter_execution(completed);
         Ok(completed)
     }
 
@@ -910,6 +935,26 @@ impl Emulator {
         self.jit.set_enabled(enabled);
         #[cfg(not(feature = "jit"))]
         let _ = enabled;
+    }
+
+    /// Enable or disable low-overhead JIT performance counters.
+    pub fn set_jit_diagnostics_enabled(&mut self, enabled: bool) {
+        #[cfg(feature = "jit")]
+        self.jit.set_diagnostics_enabled(enabled);
+        #[cfg(not(feature = "jit"))]
+        let _ = enabled;
+    }
+
+    /// Return a snapshot of native translation performance counters.
+    pub fn jit_diagnostics(&self) -> JitDiagnostics {
+        #[cfg(feature = "jit")]
+        {
+            self.jit.diagnostics()
+        }
+        #[cfg(not(feature = "jit"))]
+        {
+            JitDiagnostics::default()
+        }
     }
 
     fn active_context_waiting(&mut self) -> bool {

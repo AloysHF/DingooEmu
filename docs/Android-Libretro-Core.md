@@ -45,6 +45,26 @@ Use **Quick Menu → Core Options → CPU Execution Engine** to switch to
 `interpreter` for compatibility testing. The `armeabi-v7a` and `x86` cores
 always use the interpreter and do not expose this option.
 
+## Sharing a performance diagnostic
+
+To collect a report without Android developer tools:
+
+1. Load the affected game, then open **Quick Menu → Core Options**.
+2. Set **Performance Diagnostic Log** to `enabled`.
+3. Resume the game and reproduce the slowdown for at least 30 seconds.
+4. Close the content so the final counters are written.
+5. Send `dingooemu-diagnostic.txt` from RetroArch's save directory, normally
+   `/storage/emulated/0/RetroArch/saves/`.
+
+Diagnostics are disabled by default. The file is replaced for each session and
+contains timing and aggregate counters, not game data. It is refreshed once per
+second while enabled, so it can still be copied if the frontend cannot close
+content cleanly. The report includes cumulative and recent frame timing, video
+and audio callback costs, audio short writes, frontend buffer status, and JIT
+execution and fallback counters. Fields for unavailable delivery modes are kept
+in the report with explicit unsupported or zero values so reports from different
+core versions remain directly comparable.
+
 ## Building the Android core locally
 
 Building for Android requires the [Android NDK](https://developer.android.com/ndk)
