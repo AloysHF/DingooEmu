@@ -4,6 +4,7 @@
 //! or audio output device. Both front-ends (standalone and libretro) link
 //! against this crate.
 
+pub mod a330_memory;
 pub mod app_loader;
 pub mod arm_cpu;
 pub mod audio;
