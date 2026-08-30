@@ -20,7 +20,7 @@ fn test_load_simple_game() {
 
     // Verify CPU is still running or has executed instructions
     assert!(
-        emu.cpu.is_running() || emu.cpu.instruction_count > 0,
+        emu.is_running() || emu.instruction_count() > 0,
         "CPU should have executed some instructions"
     );
 }

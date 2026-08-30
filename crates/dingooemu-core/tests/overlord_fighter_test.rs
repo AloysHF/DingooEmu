@@ -33,8 +33,8 @@ fn test_overlord_fighter_accepts_title_screen_input() {
 
     let control = run_menu(&app_path, false);
     let input = run_menu(&app_path, true);
-    assert_eq!(control.video.framebuffer_crc32(), 0xd7d5_e307);
-    assert_eq!(input.video.framebuffer_crc32(), 0x7999_d125);
+    assert_eq!(control.framebuffer_crc32(), 0xd7d5_e307);
+    assert_eq!(input.framebuffer_crc32(), 0x7999_d125);
 
     let unknown: Vec<_> = input
         .unknown_hle_calls()

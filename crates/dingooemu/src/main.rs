@@ -214,19 +214,16 @@ fn main() -> anyhow::Result<()> {
     // Load the game
     log::info!("Loading game: {}", args.path);
     let mut emu = Emulator::from_path(&args.path)?;
-    emu.cpu
-        .set_unknown_instruction_policy(args.unknown_instruction_policy.into());
+    emu.set_unknown_instruction_policy(args.unknown_instruction_policy.into());
     emu.set_unknown_hle_policy(args.unknown_hle_policy.into());
     emu.set_unknown_hle_allowlist(args.allowed_unknown_hle.iter().cloned());
-    emu.audio.set_master_volume(args.volume);
-    emu.input
-        .set_repeat_timing(args.repeat_delay, args.repeat_period);
+    emu.set_master_volume(args.volume);
+    emu.set_input_repeat_timing(args.repeat_delay, args.repeat_period);
     for (index, cheat) in args.cheats.iter().cloned().enumerate() {
         emu.set_parsed_cheat(index as u32, true, cheat)?;
     }
 
-    emu.audio
-        .set_host_output_enabled(args.screenshot.is_none() && !args.headless);
+    emu.set_host_audio_output_enabled(args.screenshot.is_none() && !args.headless);
 
     emu.start();
 
@@ -250,7 +247,7 @@ fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
                 log::info!("Frame {}", frame);
             }
         }
-        emu.video.save_screenshot(screenshot_path)?;
+        emu.save_screenshot(screenshot_path)?;
         log::info!("Screenshot saved to: {}", screenshot_path.display());
         return Ok(());
     }
@@ -308,7 +305,7 @@ fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
             emu.tick()?;
 
             // Get framebuffer and convert to XRGB8888
-            let mut buffer = emu.video.to_xrgb8888();
+            let mut buffer = emu.frame_xrgb8888();
             if args.show_gamepad {
                 gamepad_overlay::draw(
                     &mut buffer,

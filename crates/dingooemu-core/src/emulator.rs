@@ -1,8 +1,8 @@
 use crate::app_loader::{AppImage, ResourceKind};
 use crate::audio::{Audio, AudioConfig};
 use crate::cheats::{CheatManager, CheatParseError, CheatRule};
-use crate::content::GuestArchitecture;
-use crate::cpu::Cpu;
+use crate::content::{ArmProfile, ContentFormat, GuestArchitecture};
+use crate::cpu::{Cpu, UnknownInstructionPolicy};
 use crate::error::{Result, SimulatorError};
 use crate::input::Input;
 #[cfg(feature = "jit")]
@@ -241,15 +241,15 @@ fn prepare_resource_file_data(name: &str, kind: ResourceKind, data: Vec<u8>) -> 
 /// Main emulator struct that ties all components together
 pub struct Emulator {
     /// CPU core
-    pub cpu: Cpu,
+    pub(crate) cpu: Cpu,
     /// Memory system
-    pub memory: Memory,
+    pub(crate) memory: Memory,
     /// Video subsystem
-    pub video: Video,
+    pub(crate) video: Video,
     /// Input subsystem
-    pub input: Input,
+    pub(crate) input: Input,
     /// PCM audio subsystem
-    pub audio: Audio,
+    pub(crate) audio: Audio,
     /// Frontend-managed memory and register freeze rules
     cheats: CheatManager,
     /// Frame count
@@ -1895,6 +1895,116 @@ impl Emulator {
     /// Set the button state
     pub fn set_buttons(&mut self, buttons: u32) {
         self.input.set_buttons(buttons);
+    }
+
+    /// Return the loaded content category.
+    pub fn content_format(&self) -> ContentFormat {
+        self.app
+            .as_ref()
+            .map_or(ContentFormat::App, AppImage::format)
+    }
+
+    /// Return the active guest architecture.
+    pub fn guest_architecture(&self) -> GuestArchitecture {
+        self.app
+            .as_ref()
+            .map_or(GuestArchitecture::Mips32, AppImage::architecture)
+    }
+
+    /// Return the active A330 profile for ARM content.
+    pub fn arm_profile(&self) -> Option<ArmProfile> {
+        self.app.as_ref().and_then(AppImage::arm_profile)
+    }
+
+    /// Configure how unsupported guest instructions are handled.
+    pub fn set_unknown_instruction_policy(&mut self, policy: UnknownInstructionPolicy) {
+        self.cpu.set_unknown_instruction_policy(policy);
+    }
+
+    /// Return the number of guest instructions executed by the active runtime.
+    pub fn instruction_count(&self) -> u64 {
+        self.cpu.instruction_count
+    }
+
+    /// Configure frontend audio volume as a percentage.
+    pub fn set_master_volume(&mut self, volume: u8) {
+        self.audio.set_master_volume(volume);
+    }
+
+    /// Enable or disable direct host audio output.
+    #[cfg(feature = "standalone")]
+    pub fn set_host_audio_output_enabled(&mut self, enabled: bool) {
+        self.audio.set_host_output_enabled(enabled);
+    }
+
+    /// Return the current guest audio stream configuration.
+    pub fn audio_config(&self) -> Option<AudioConfig> {
+        self.audio.config()
+    }
+
+    /// Configure held-button repeat timing.
+    pub fn set_input_repeat_timing(&mut self, delay: u32, period: u32) {
+        self.input.set_repeat_timing(delay, period);
+    }
+
+    /// Configure logical A/B button swapping.
+    pub fn set_swap_ab(&mut self, swap_ab: bool) {
+        self.input.set_swap_ab(swap_ab);
+    }
+
+    /// Return the current logical button mask.
+    pub fn buttons(&self) -> u32 {
+        self.input.buttons()
+    }
+
+    /// Return the current RGB565 frame submitted to the frontend.
+    pub fn framebuffer(&self) -> &[u8] {
+        self.video.framebuffer()
+    }
+
+    /// Calculate a deterministic checksum over the current RGB565 frame.
+    pub fn framebuffer_crc32(&self) -> u32 {
+        self.video.framebuffer_crc32()
+    }
+
+    /// Convert the current frame to XRGB8888 pixels.
+    pub fn frame_xrgb8888(&self) -> Vec<u32> {
+        self.video.to_xrgb8888()
+    }
+
+    /// Save the current frame as a PNG image.
+    pub fn save_screenshot(&self, path: &Path) -> anyhow::Result<()> {
+        self.video.save_screenshot(path)
+    }
+
+    /// Return frontend-visible system RAM.
+    pub fn system_ram(&self) -> &[u8] {
+        self.memory.system_ram()
+    }
+
+    /// Return mutable frontend-visible system RAM.
+    pub fn system_ram_mut(&mut self) -> &mut [u8] {
+        self.memory.system_ram_mut()
+    }
+
+    /// Return frontend-visible video RAM.
+    pub fn video_ram(&self) -> &[u8] {
+        self.memory.framebuffer()
+    }
+
+    /// Return mutable frontend-visible video RAM.
+    pub fn video_ram_mut(&mut self) -> &mut [u8] {
+        self.memory.framebuffer_mut()
+    }
+
+    /// Read a 32-bit guest value for diagnostics and frontend tests.
+    pub fn read_memory_u32(&self, address: u32) -> Result<u32> {
+        self.memory.read_u32(address)
+    }
+
+    /// Write a 32-bit guest value for diagnostics and frontend tests.
+    pub fn write_memory_u32(&mut self, address: u32, value: u32) -> Result<()> {
+        self.memory.write_u32(address, value)
     }
 
     /// Install or update a frontend cheat slot.

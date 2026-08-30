@@ -228,7 +228,7 @@ pub extern "C" fn retro_run() {
 
     let Some(diagnostic_timer) = diagnostic_timer else {
         callbacks::video_refresh(
-            emulator.video.framebuffer().as_ptr().cast(),
+            emulator.framebuffer().as_ptr().cast(),
             SCREEN_WIDTH,
             SCREEN_HEIGHT,
             SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
@@ -248,7 +248,7 @@ pub extern "C" fn retro_run() {
 
     let video_timer = Instant::now();
     callbacks::video_refresh(
-        emulator.video.framebuffer().as_ptr().cast(),
+        emulator.framebuffer().as_ptr().cast(),
         SCREEN_WIDTH,
         SCREEN_HEIGHT,
         SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
@@ -445,8 +445,8 @@ pub extern "C" fn retro_get_memory_data(id: c_uint) -> *mut c_void {
         return ptr::null_mut();
     };
     match id & RETRO_MEMORY_MASK {
-        RETRO_MEMORY_SYSTEM_RAM => emulator.memory.system_ram_mut().as_mut_ptr().cast(),
-        RETRO_MEMORY_VIDEO_RAM => emulator.memory.framebuffer_mut().as_mut_ptr().cast(),
+        RETRO_MEMORY_SYSTEM_RAM => emulator.system_ram_mut().as_mut_ptr().cast(),
+        RETRO_MEMORY_VIDEO_RAM => emulator.video_ram_mut().as_mut_ptr().cast(),
         _ => ptr::null_mut(),
     }
 }
@@ -457,8 +457,8 @@ pub extern "C" fn retro_get_memory_size(id: c_uint) -> usize {
         return 0;
     };
     match id & RETRO_MEMORY_MASK {
-        RETRO_MEMORY_SYSTEM_RAM => emulator.memory.system_ram().len(),
-        RETRO_MEMORY_VIDEO_RAM => emulator.memory.framebuffer().len(),
+        RETRO_MEMORY_SYSTEM_RAM => emulator.system_ram().len(),
+        RETRO_MEMORY_VIDEO_RAM => emulator.video_ram().len(),
         _ => 0,
     }
 }
@@ -483,25 +483,27 @@ fn frontend_directory(command: u32) -> Option<std::path::PathBuf> {
 }
 
 fn register_memory_maps(emulator: &mut Emulator) {
+    let system_ram_len = emulator.system_ram().len();
+    let video_ram_len = emulator.video_ram().len();
     let descriptors = [
         RetroMemoryDescriptor {
             flags: RETRO_MEMDESC_SYSTEM_RAM,
-            ptr: emulator.memory.system_ram_mut().as_mut_ptr().cast(),
+            ptr: emulator.system_ram_mut().as_mut_ptr().cast(),
             offset: 0,
             start: 0,
             select: 0,
             disconnect: 0,
-            len: emulator.memory.system_ram().len(),
+            len: system_ram_len,
             addrspace: c"Dingoo".as_ptr(),
         },
         RetroMemoryDescriptor {
             flags: RETRO_MEMDESC_VIDEO_RAM,
-            ptr: emulator.memory.framebuffer_mut().as_mut_ptr().cast(),
+            ptr: emulator.video_ram_mut().as_mut_ptr().cast(),
             offset: 0,
             start: dingooemu_core::video::VM_LCD_FB_ADDRESS as usize,
             select: 0,
             disconnect: 0,
-            len: emulator.memory.framebuffer().len(),
+            len: video_ram_len,
             addrspace: c"Dingoo".as_ptr(),
         },
     ];
@@ -665,16 +667,12 @@ fn read_core_options(mut get: impl FnMut(&CStr) -> Option<String>) -> CoreOption
 
 fn apply_core_options(emulator: &mut Emulator) {
     let options = read_core_options(get_core_option);
-    emulator.audio.set_master_volume(options.volume);
-    emulator
-        .input
-        .set_repeat_timing(options.repeat_delay, options.repeat_period);
-    emulator.input.set_swap_ab(options.swap_ab);
+    emulator.set_master_volume(options.volume);
+    emulator.set_input_repeat_timing(options.repeat_delay, options.repeat_period);
+    emulator.set_swap_ab(options.swap_ab);
     // Keep performance diagnostics independent of verbose frontend logging.
     crate::logger::set_debug_logging(false);
-    emulator
-        .cpu
-        .set_unknown_instruction_policy(options.unknown_instruction_policy);
+    emulator.set_unknown_instruction_policy(options.unknown_instruction_policy);
     emulator.set_jit_enabled(options.jit_enabled);
     emulator.set_jit_diagnostics_enabled(options.diagnostics_enabled);
     crate::diagnostics::set_enabled(options.diagnostics_enabled, emulator);
@@ -1093,9 +1091,9 @@ mod tests {
         unsafe {
             let emulator = EMULATOR.as_mut().unwrap();
             assert!(emulator.is_running());
-            assert_eq!(emulator.input.buttons(), BUTTON_A | BUTTON_START);
-            assert_eq!(emulator.memory.read_u32(0x1000).unwrap(), 0xfeed_beef);
-            emulator.memory.write_u32(0x1000, 0x1234_5678).unwrap();
+            assert_eq!(emulator.buttons(), BUTTON_A | BUTTON_START);
+            assert_eq!(emulator.read_memory_u32(0x1000).unwrap(), 0xfeed_beef);
+            emulator.write_memory_u32(0x1000, 0x1234_5678).unwrap();
         }
 
         let mut state = vec![0u8; retro_serialize_size()];
@@ -1104,8 +1102,7 @@ mod tests {
             EMULATOR
                 .as_mut()
                 .unwrap()
-                .memory
-                .write_u32(0x1000, 0)
+                .write_memory_u32(0x1000, 0)
                 .unwrap();
         }
         assert!(retro_unserialize(state.as_ptr().cast(), state.len()));
@@ -1113,7 +1110,7 @@ mod tests {
         assert_eq!(retro_get_memory_data(RETRO_MEMORY_VIDEO_RAM), video_ram);
         unsafe {
             assert_eq!(
-                EMULATOR.as_ref().unwrap().memory.read_u32(0x1000).unwrap(),
+                EMULATOR.as_ref().unwrap().read_memory_u32(0x1000).unwrap(),
                 0x1234_5678
             );
         }
@@ -1122,14 +1119,13 @@ mod tests {
             EMULATOR
                 .as_mut()
                 .unwrap()
-                .memory
-                .write_u32(0x1000, 0)
+                .write_memory_u32(0x1000, 0)
                 .unwrap();
         }
         retro_run();
         unsafe {
             assert_eq!(
-                EMULATOR.as_ref().unwrap().memory.read_u32(0x1000).unwrap(),
+                EMULATOR.as_ref().unwrap().read_memory_u32(0x1000).unwrap(),
                 0
             );
         }
@@ -1140,7 +1136,7 @@ mod tests {
         unsafe {
             let emulator = EMULATOR.as_ref().unwrap();
             assert!(emulator.is_running());
-            assert_eq!(emulator.memory.read_u32(0x1000).unwrap(), 0);
+            assert_eq!(emulator.read_memory_u32(0x1000).unwrap(), 0);
         }
 
         retro_unload_game();

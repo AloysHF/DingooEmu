@@ -31,7 +31,7 @@ fn test_snake_app_reaches_framebuffer() {
         emu.tick().expect("Snake.app tick failed");
     }
 
-    let framebuffer = emu.video.framebuffer();
+    let framebuffer = emu.framebuffer();
     let non_zero = framebuffer.iter().filter(|&&b| b != 0).count();
     let unique_colors = framebuffer
         .as_chunks::<2>()
@@ -41,11 +41,11 @@ fn test_snake_app_reaches_framebuffer() {
         .collect::<std::collections::BTreeSet<_>>()
         .len();
 
-    assert!(emu.cpu.instruction_count > 0);
+    assert!(emu.instruction_count() > 0);
     assert!(
         non_zero > 0,
         "Snake.app did not produce framebuffer pixels after {} instructions",
-        emu.cpu.instruction_count
+        emu.instruction_count()
     );
     assert!(
         unique_colors > 8,
@@ -68,7 +68,7 @@ fn test_snake_app_does_not_force_startup_audio() {
     }
 
     assert!(
-        emu.audio.config().is_none(),
+        emu.audio_config().is_none(),
         "Snake.app audio was started without a guest request"
     );
 }
@@ -106,7 +106,7 @@ fn test_snake_app_enables_audio_from_menu() {
     }
 
     assert_eq!(
-        emu.audio.config(),
+        emu.audio_config(),
         Some(AudioConfig {
             sample_rate: 8_000,
             format: SampleFormat::S16Le,
