@@ -5,6 +5,7 @@
 //! against this crate.
 
 pub mod app_loader;
+pub mod arm_cpu;
 pub mod audio;
 pub mod cheats;
 pub mod content;
