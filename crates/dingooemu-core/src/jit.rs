@@ -15,10 +15,10 @@ use std::time::Instant;
 
 const HOT_BLOCK_THRESHOLD: u16 = 256;
 const MIN_COMPILED_BLOCK_LEN: usize = 4;
-const MAX_JIT_CACHE_ENTRIES: usize = 32_768;
+const MAX_JIT_CACHE_ENTRIES: usize = 65_536;
 const FAST_JIT_CACHE_SLOTS: usize = 4_096;
 const MAX_ZERO_INSTRUCTION_EXITS: u8 = 4;
-const COMPILE_COOLDOWN_FRAMES: u8 = 3;
+const MAX_COMPILES_PER_FRAME: u8 = 4;
 const REGISTER_COUNT: usize = 34;
 const HI_INDEX: usize = 32;
 const LO_INDEX: usize = 33;
@@ -96,10 +96,15 @@ pub(crate) struct JitEngine {
     fast_entries: Box<[FastJitCacheEntry]>,
     enabled: bool,
     compile_budget: u8,
-    compile_cooldown: u8,
     compiled_block_count: u64,
     diagnostics_enabled: bool,
     counters: JitCounters,
+}
+
+pub(crate) enum CompiledExecution {
+    Missing,
+    Fallback,
+    Executed(u64),
 }
 
 impl JitEngine {
@@ -120,8 +125,7 @@ impl JitEngine {
             fast_entries: vec![FastJitCacheEntry::default(); FAST_JIT_CACHE_SLOTS]
                 .into_boxed_slice(),
             enabled: true,
-            compile_budget: 1,
-            compile_cooldown: 0,
+            compile_budget: MAX_COMPILES_PER_FRAME,
             compiled_block_count: 0,
             diagnostics_enabled: false,
             counters: JitCounters::default(),
@@ -166,6 +170,125 @@ impl JitEngine {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_compiled_block(&self, start: u32) -> bool {
+        if !self.enabled || self.compiler.is_none() {
+            return false;
+        }
+        let fast_index = (start as usize >> 2) & (FAST_JIT_CACHE_SLOTS - 1);
+        let fast_entry = self.fast_entries[fast_index];
+        (fast_entry.start == start && fast_entry.block.is_some())
+            || self
+                .entries
+                .get(&start)
+                .is_some_and(|entry| entry.block.is_some())
+    }
+
+    pub(crate) fn execute_compiled(
+        &mut self,
+        start: u32,
+        instruction_limit: usize,
+        registers: &mut Registers,
+        ram: *mut u8,
+        framebuffer: *mut u8,
+    ) -> CompiledExecution {
+        if self.diagnostics_enabled {
+            return self.execute_compiled_with_diagnostics(
+                start,
+                instruction_limit,
+                registers,
+                ram,
+                framebuffer,
+            );
+        }
+        self.execute_compiled_inner::<false>(start, instruction_limit, registers, ram, framebuffer)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn execute_compiled_with_diagnostics(
+        &mut self,
+        start: u32,
+        instruction_limit: usize,
+        registers: &mut Registers,
+        ram: *mut u8,
+        framebuffer: *mut u8,
+    ) -> CompiledExecution {
+        self.execute_compiled_inner::<true>(start, instruction_limit, registers, ram, framebuffer)
+    }
+
+    #[inline(always)]
+    fn execute_compiled_inner<const DIAGNOSTICS: bool>(
+        &mut self,
+        start: u32,
+        instruction_limit: usize,
+        registers: &mut Registers,
+        ram: *mut u8,
+        framebuffer: *mut u8,
+    ) -> CompiledExecution {
+        if !self.enabled || self.compiler.is_none() {
+            return CompiledExecution::Missing;
+        }
+
+        let fast_index = (start as usize >> 2) & (FAST_JIT_CACHE_SLOTS - 1);
+        let fast_entry = self.fast_entries[fast_index];
+        let block = if fast_entry.start == start {
+            fast_entry.block
+        } else {
+            let block = self.entries.get(&start).and_then(|entry| entry.block);
+            if let Some(block) = block {
+                self.fast_entries[fast_index] = FastJitCacheEntry {
+                    start,
+                    block: Some(block),
+                };
+            }
+            block
+        };
+        let Some(block) = block else {
+            return CompiledExecution::Missing;
+        };
+
+        if DIAGNOSTICS {
+            self.counters.execute_requests = self.counters.execute_requests.saturating_add(1);
+        }
+        match execute_compiled_block(block, instruction_limit, registers, ram, framebuffer) {
+            Some(completed) if completed != 0 => {
+                if let Some(entry) = self.entries.get_mut(&start) {
+                    entry.zero_instruction_exits = 0;
+                }
+                if DIAGNOSTICS {
+                    self.counters.native_executions =
+                        self.counters.native_executions.saturating_add(1);
+                    self.counters.native_instructions =
+                        self.counters.native_instructions.saturating_add(completed);
+                }
+                CompiledExecution::Executed(completed)
+            }
+            Some(_) => {
+                if DIAGNOSTICS {
+                    self.counters.zero_exit_fallbacks =
+                        self.counters.zero_exit_fallbacks.saturating_add(1);
+                }
+                if let Some(entry) = self.entries.get_mut(&start) {
+                    entry.zero_instruction_exits = entry.zero_instruction_exits.saturating_add(1);
+                    if entry.zero_instruction_exits >= MAX_ZERO_INSTRUCTION_EXITS {
+                        entry.block = None;
+                        entry.failed = true;
+                        self.fast_entries[fast_index].block = None;
+                    }
+                }
+                CompiledExecution::Fallback
+            }
+            None => {
+                if DIAGNOSTICS {
+                    self.counters.instruction_limit_fallbacks =
+                        self.counters.instruction_limit_fallbacks.saturating_add(1);
+                }
+                CompiledExecution::Fallback
+            }
+        }
+    }
+
     pub(crate) fn record_interpreter_execution(&mut self, completed: u64) {
         if self.diagnostics_enabled && completed != 0 {
             self.record_interpreter_diagnostics(completed);
@@ -202,17 +325,11 @@ impl JitEngine {
             }
             self.compiled_block_count = 0;
         }
-        self.compile_budget = 1;
-        self.compile_cooldown = 0;
+        self.compile_budget = MAX_COMPILES_PER_FRAME;
     }
 
     pub(crate) fn begin_frame(&mut self) {
-        if self.compile_cooldown == 0 {
-            self.compile_budget = 1;
-        } else {
-            self.compile_cooldown -= 1;
-            self.compile_budget = 0;
-        }
+        self.compile_budget = MAX_COMPILES_PER_FRAME;
     }
 
     pub(crate) fn execute(
@@ -395,8 +512,7 @@ impl JitEngine {
             return None;
         }
 
-        self.compile_budget = 0;
-        self.compile_cooldown = COMPILE_COOLDOWN_FRAMES;
+        self.compile_budget = self.compile_budget.saturating_sub(1);
         let compile_start = Instant::now();
         let compile_result = self
             .compiler
@@ -1461,30 +1577,36 @@ mod tests {
             (9 << 21) | (8 << 16) | (10 << 11) | 0x26,
         ];
         let first_start = 0x1000;
-        let second_start = first_start + 0x4000;
+        let compiled_starts: Vec<u32> = (0..MAX_COMPILES_PER_FRAME)
+            .map(|index| first_start + index as u32 * 0x4000)
+            .collect();
+        let deferred_start = first_start + MAX_COMPILES_PER_FRAME as u32 * 0x4000;
         let mut engine = JitEngine::new();
         let mut registers = Registers::new(first_start);
         let mut memory = Memory::new();
         let ram = memory.jit_ram_ptr();
         let framebuffer = memory.jit_framebuffer_ptr();
 
-        for _ in 0..HOT_BLOCK_THRESHOLD {
-            let _ = engine.execute(
-                first_start,
-                &instructions,
-                instructions.len(),
-                &mut registers,
-                ram,
-                framebuffer,
-            );
+        for &start in &compiled_starts {
+            registers.pc = start;
+            for _ in 0..HOT_BLOCK_THRESHOLD {
+                let _ = engine.execute(
+                    start,
+                    &instructions,
+                    instructions.len(),
+                    &mut registers,
+                    ram,
+                    framebuffer,
+                );
+            }
+            assert!(engine.entries[&start].block.is_some());
         }
-        assert!(engine.entries[&first_start].block.is_some());
 
-        registers.pc = second_start;
+        registers.pc = deferred_start;
         for _ in 0..HOT_BLOCK_THRESHOLD {
             assert!(engine
                 .execute(
-                    second_start,
+                    deferred_start,
                     &instructions,
                     instructions.len(),
                     &mut registers,
@@ -1493,14 +1615,12 @@ mod tests {
                 )
                 .is_none());
         }
-        assert!(engine.entries[&second_start].block.is_none());
+        assert!(engine.entries[&deferred_start].block.is_none());
 
-        for _ in 0..=COMPILE_COOLDOWN_FRAMES {
-            engine.begin_frame();
-        }
+        engine.begin_frame();
         assert!(engine
             .execute(
-                second_start,
+                deferred_start,
                 &instructions,
                 instructions.len(),
                 &mut registers,
@@ -1508,8 +1628,10 @@ mod tests {
                 framebuffer,
             )
             .is_some());
-        assert!(engine.entries[&first_start].block.is_some());
-        assert!(engine.entries[&second_start].block.is_some());
+        for start in compiled_starts {
+            assert!(engine.entries[&start].block.is_some());
+        }
+        assert!(engine.entries[&deferred_start].block.is_some());
     }
 
     #[test]

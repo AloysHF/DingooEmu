@@ -67,6 +67,15 @@ struct DiagnosticSession {
     audio_buffer_occupancy_min: Option<u32>,
     audio_buffer_occupancy_max: u32,
     audio_buffer_underrun_likely: u64,
+    async_audio_callback_supported: Option<bool>,
+    async_audio_enabled: bool,
+    async_audio_state_changes: u64,
+    async_audio_callback_calls: u64,
+    async_audio_real_frames: u64,
+    async_audio_output_frames_requested: u64,
+    async_audio_output_frames_accepted: u64,
+    async_audio_dropped_frames: u64,
+    async_audio_max_queued_frames: u64,
     write_failed: bool,
 }
 
@@ -94,6 +103,15 @@ impl DiagnosticSession {
             audio_buffer_occupancy_min: None,
             audio_buffer_occupancy_max: 0,
             audio_buffer_underrun_likely: 0,
+            async_audio_callback_supported: None,
+            async_audio_enabled: false,
+            async_audio_state_changes: 0,
+            async_audio_callback_calls: 0,
+            async_audio_real_frames: 0,
+            async_audio_output_frames_requested: 0,
+            async_audio_output_frames_accepted: 0,
+            async_audio_dropped_frames: 0,
+            async_audio_max_queued_frames: 0,
             write_failed: false,
         }
     }
@@ -112,6 +130,13 @@ impl DiagnosticSession {
         self.audio_buffer_occupancy_min = None;
         self.audio_buffer_occupancy_max = 0;
         self.audio_buffer_underrun_likely = 0;
+        self.async_audio_state_changes = 0;
+        self.async_audio_callback_calls = 0;
+        self.async_audio_real_frames = 0;
+        self.async_audio_output_frames_requested = 0;
+        self.async_audio_output_frames_accepted = 0;
+        self.async_audio_dropped_frames = 0;
+        self.async_audio_max_queued_frames = 0;
         self.write_failed = false;
     }
 
@@ -147,7 +172,7 @@ impl DiagnosticSession {
         let recent = self.recent;
         format!(
             "DingooEmu performance diagnostics\n\
-format_version=5\n\
+format_version=6\n\
 core_version={}\n\
 target_os={}\n\
 target_arch={}\n\
@@ -176,8 +201,6 @@ audio_frames_requested={}\n\
 audio_frames_accepted={}\n\
 audio_short_writes={}\n\
 audio_output_sample_rate_hz={}\n\
-audio_minimum_latency_ms=0\n\
-audio_latency_request_status=not_requested\n\
 audio_buffer_status_callback_status={}\n\
 audio_buffer_status_callbacks={}\n\
 audio_buffer_active_callbacks={}\n\
@@ -185,15 +208,15 @@ audio_buffer_occupancy_average_percent={}\n\
 audio_buffer_occupancy_min_percent={}\n\
 audio_buffer_occupancy_max_percent={}\n\
 audio_buffer_underrun_likely={}\n\
-async_audio_callback_status=unsupported\n\
-async_audio_enabled=false\n\
-async_audio_state_changes=0\n\
-async_audio_callback_calls=0\n\
-async_audio_real_frames=0\n\
-async_audio_output_frames_requested=0\n\
-async_audio_output_frames_accepted=0\n\
-async_audio_dropped_frames=0\n\
-async_audio_max_queued_frames=0\n\
+async_audio_callback_status={}\n\
+async_audio_enabled={}\n\
+async_audio_state_changes={}\n\
+async_audio_callback_calls={}\n\
+async_audio_real_frames={}\n\
+async_audio_output_frames_requested={}\n\
+async_audio_output_frames_accepted={}\n\
+async_audio_dropped_frames={}\n\
+async_audio_max_queued_frames={}\n\
 jit_feature_available={}\n\
 jit_enabled={}\n\
 jit_backend_available={}\n\
@@ -250,6 +273,15 @@ jit_zero_exit_fallbacks={}\n",
             self.audio_buffer_occupancy_min.unwrap_or(0),
             self.audio_buffer_occupancy_max,
             self.audio_buffer_underrun_likely,
+            status(self.async_audio_callback_supported),
+            self.async_audio_enabled,
+            self.async_audio_state_changes,
+            self.async_audio_callback_calls,
+            self.async_audio_real_frames,
+            self.async_audio_output_frames_requested,
+            self.async_audio_output_frames_accepted,
+            self.async_audio_dropped_frames,
+            self.async_audio_max_queued_frames,
             jit.feature_available,
             jit.enabled,
             jit.backend_available,
@@ -353,6 +385,54 @@ pub fn record_audio_buffer_status(active: bool, occupancy: u32, underrun_likely:
     }
 }
 
+pub fn set_async_audio_callback_status(supported: bool) {
+    if let Some(session) = SESSION.lock().unwrap().as_mut() {
+        session.async_audio_callback_supported = Some(supported);
+    }
+}
+
+pub fn record_async_audio_state(enabled: bool) {
+    let diagnostics_enabled = is_enabled();
+    if let Some(session) = SESSION.lock().unwrap().as_mut() {
+        session.async_audio_enabled = enabled;
+        if diagnostics_enabled {
+            session.async_audio_state_changes = session.async_audio_state_changes.saturating_add(1);
+        }
+    }
+}
+
+pub fn record_async_audio_enqueue(dropped_frames: usize, queued_frames: usize) {
+    if !is_enabled() {
+        return;
+    }
+    if let Some(session) = SESSION.lock().unwrap().as_mut() {
+        session.async_audio_dropped_frames = session
+            .async_audio_dropped_frames
+            .saturating_add(dropped_frames as u64);
+        session.async_audio_max_queued_frames = session
+            .async_audio_max_queued_frames
+            .max(queued_frames as u64);
+    }
+}
+
+pub fn record_async_audio_callback(real_frames: usize, accepted: usize, requested: usize) {
+    if !is_enabled() {
+        return;
+    }
+    if let Some(session) = SESSION.lock().unwrap().as_mut() {
+        session.async_audio_callback_calls = session.async_audio_callback_calls.saturating_add(1);
+        session.async_audio_real_frames = session
+            .async_audio_real_frames
+            .saturating_add(real_frames as u64);
+        session.async_audio_output_frames_requested = session
+            .async_audio_output_frames_requested
+            .saturating_add(requested as u64);
+        session.async_audio_output_frames_accepted = session
+            .async_audio_output_frames_accepted
+            .saturating_add(accepted as u64);
+    }
+}
+
 pub fn set_enabled(enabled: bool, emulator: &Emulator) {
     let mut session = SESSION.lock().unwrap();
     let Some(session) = session.as_mut() else {
@@ -438,9 +518,11 @@ mod tests {
             "dingooemu-diagnostic-schema-test-{}",
             std::process::id()
         ));
-        let mut session = DiagnosticSession::new(Some(&directory), "games/test.app", 22_050);
+        let mut session = DiagnosticSession::new(Some(&directory), "games/test.app", 48_000);
         session.enabled = true;
         session.audio_buffer_status_callback_supported = Some(true);
+        session.async_audio_callback_supported = Some(true);
+        session.async_audio_enabled = true;
         session.record_frame(
             Duration::from_micros(12_345),
             Duration::from_micros(23_456),
@@ -459,7 +541,7 @@ mod tests {
 
         let report = std::fs::read_to_string(directory.join(DIAGNOSTIC_FILE_NAME)).unwrap();
         for expected in [
-            "format_version=5",
+            "format_version=6",
             "content=test.app",
             "frames=1",
             "tick_max_us=12345",
@@ -470,18 +552,22 @@ mod tests {
             "audio_frames_requested=368",
             "audio_frames_accepted=300",
             "audio_short_writes=1",
-            "audio_output_sample_rate_hz=22050",
-            "audio_minimum_latency_ms=0",
-            "audio_latency_request_status=not_requested",
+            "audio_output_sample_rate_hz=48000",
             "audio_buffer_status_callback_status=accepted",
-            "async_audio_callback_status=unsupported",
-            "async_audio_enabled=false",
+            "async_audio_callback_status=accepted",
+            "async_audio_enabled=true",
             "jit_native_executions=7",
             "jit_zero_exit_fallbacks=0",
         ] {
             assert!(
                 report.contains(expected),
                 "missing report field: {expected}"
+            );
+        }
+        for removed in ["audio_minimum_latency_ms", "audio_latency_request_status"] {
+            assert!(
+                !report.contains(removed),
+                "obsolete report field: {removed}"
             );
         }
         std::fs::remove_dir_all(directory).unwrap();

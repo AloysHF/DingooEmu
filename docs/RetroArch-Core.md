@@ -67,7 +67,9 @@ platform-specific installation requirements:
 ## Supported Features
 
 - Video output using the native RGB565 pixel format
-- PCM audio output resampled to 22050 Hz stereo
+- PCM audio output resampled to 48 kHz stereo for common host audio devices
+- Asynchronous audio delivery when supported by the frontend, with automatic
+  synchronous fallback
 - RetroPad input handling
 - `.app` content loading
 - Cold reset through RetroArch's **Reset** command
@@ -129,13 +131,18 @@ Core option changes are applied while content is running and restored after a
 RetroArch reset.
 
 The JIT waits until a block has executed 256 times and rate-limits native
-compilation to one block every four frames. Short blocks and repeatedly
+compilation to one block per frame. Short blocks and repeatedly
 unsupported memory paths remain on the interpreter to avoid runtime stutter.
 
 When diagnostics are enabled, the report is refreshed once per second and when
 content is unloaded. It includes cumulative and recent 60-frame timing,
 separate video and audio callback costs, audio short-write and frontend buffer
-status counters, plus JIT execution, compilation, and fallback counters.
+status counters, asynchronous queue statistics, the 48 kHz output rate,
+plus JIT execution, compilation, and fallback counters. Supported frontends
+deliver audio outside the emulation thread so audio backpressure does not stall
+video and input. The core leaves frontend latency settings unchanged, discards
+audio while the frontend callback is disabled, and uses only a short bounded
+queue so stale audio cannot build up across pauses.
 Diagnostics are disabled by default; timing, report writes, frontend buffer
 callbacks, and JIT counter updates remain inactive until explicitly enabled.
 
