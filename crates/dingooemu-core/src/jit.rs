@@ -168,13 +168,19 @@ impl JitEngine {
 
     pub(crate) fn record_interpreter_execution(&mut self, completed: u64) {
         if self.diagnostics_enabled && completed != 0 {
-            self.counters.interpreter_executions =
-                self.counters.interpreter_executions.saturating_add(1);
-            self.counters.interpreter_instructions = self
-                .counters
-                .interpreter_instructions
-                .saturating_add(completed);
+            self.record_interpreter_diagnostics(completed);
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn record_interpreter_diagnostics(&mut self, completed: u64) {
+        self.counters.interpreter_executions =
+            self.counters.interpreter_executions.saturating_add(1);
+        self.counters.interpreter_instructions = self
+            .counters
+            .interpreter_instructions
+            .saturating_add(completed);
     }
 
     pub(crate) fn clear(&mut self) {
@@ -219,10 +225,61 @@ impl JitEngine {
         framebuffer: *mut u8,
     ) -> Option<u64> {
         if self.diagnostics_enabled {
+            return self.execute_with_diagnostics(
+                start,
+                instructions,
+                instruction_limit,
+                registers,
+                ram,
+                framebuffer,
+            );
+        }
+        self.execute_inner::<false>(
+            start,
+            instructions,
+            instruction_limit,
+            registers,
+            ram,
+            framebuffer,
+        )
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn execute_with_diagnostics(
+        &mut self,
+        start: u32,
+        instructions: &[u32],
+        instruction_limit: usize,
+        registers: &mut Registers,
+        ram: *mut u8,
+        framebuffer: *mut u8,
+    ) -> Option<u64> {
+        self.execute_inner::<true>(
+            start,
+            instructions,
+            instruction_limit,
+            registers,
+            ram,
+            framebuffer,
+        )
+    }
+
+    #[inline(always)]
+    fn execute_inner<const DIAGNOSTICS: bool>(
+        &mut self,
+        start: u32,
+        instructions: &[u32],
+        instruction_limit: usize,
+        registers: &mut Registers,
+        ram: *mut u8,
+        framebuffer: *mut u8,
+    ) -> Option<u64> {
+        if DIAGNOSTICS {
             self.counters.execute_requests = self.counters.execute_requests.saturating_add(1);
         }
         if !self.enabled || instruction_limit == 0 || self.compiler.is_none() {
-            if self.diagnostics_enabled {
+            if DIAGNOSTICS {
                 self.counters.cold_fallbacks = self.counters.cold_fallbacks.saturating_add(1);
             }
             return None;
@@ -236,7 +293,7 @@ impl JitEngine {
                     execute_compiled_block(block, instruction_limit, registers, ram, framebuffer);
                 if let Some(completed) = completed {
                     if completed != 0 {
-                        if self.diagnostics_enabled {
+                        if DIAGNOSTICS {
                             self.counters.native_executions =
                                 self.counters.native_executions.saturating_add(1);
                             self.counters.native_instructions =
@@ -244,7 +301,7 @@ impl JitEngine {
                         }
                         return Some(completed);
                     }
-                    if self.diagnostics_enabled {
+                    if DIAGNOSTICS {
                         self.counters.zero_exit_fallbacks =
                             self.counters.zero_exit_fallbacks.saturating_add(1);
                     }
@@ -257,7 +314,7 @@ impl JitEngine {
                             self.fast_entries[fast_index].block = None;
                         }
                     }
-                } else if self.diagnostics_enabled {
+                } else if DIAGNOSTICS {
                     self.counters.instruction_limit_fallbacks =
                         self.counters.instruction_limit_fallbacks.saturating_add(1);
                 }
@@ -270,7 +327,7 @@ impl JitEngine {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 if at_capacity {
-                    if self.diagnostics_enabled {
+                    if DIAGNOSTICS {
                         self.counters.cold_fallbacks =
                             self.counters.cold_fallbacks.saturating_add(1);
                     }
@@ -289,7 +346,7 @@ impl JitEngine {
                 execute_compiled_block(block, instruction_limit, registers, ram, framebuffer);
             if let Some(completed) = completed {
                 if completed == 0 {
-                    if self.diagnostics_enabled {
+                    if DIAGNOSTICS {
                         self.counters.zero_exit_fallbacks =
                             self.counters.zero_exit_fallbacks.saturating_add(1);
                     }
@@ -302,7 +359,7 @@ impl JitEngine {
                     return None;
                 }
                 entry.zero_instruction_exits = 0;
-                if self.diagnostics_enabled {
+                if DIAGNOSTICS {
                     self.counters.native_executions =
                         self.counters.native_executions.saturating_add(1);
                     self.counters.native_instructions =
@@ -310,14 +367,14 @@ impl JitEngine {
                 }
                 return Some(completed);
             }
-            if self.diagnostics_enabled {
+            if DIAGNOSTICS {
                 self.counters.instruction_limit_fallbacks =
                     self.counters.instruction_limit_fallbacks.saturating_add(1);
             }
             return None;
         }
         if entry.failed {
-            if self.diagnostics_enabled {
+            if DIAGNOSTICS {
                 self.counters.cold_fallbacks = self.counters.cold_fallbacks.saturating_add(1);
             }
             return None;
@@ -325,14 +382,14 @@ impl JitEngine {
 
         entry.hits = entry.hits.saturating_add(1);
         if entry.hits < HOT_BLOCK_THRESHOLD || self.compile_budget == 0 {
-            if self.diagnostics_enabled {
+            if DIAGNOSTICS {
                 self.counters.cold_fallbacks = self.counters.cold_fallbacks.saturating_add(1);
             }
             return None;
         }
         if candidate_instruction_count(instructions) < MIN_COMPILED_BLOCK_LEN {
             entry.failed = true;
-            if self.diagnostics_enabled {
+            if DIAGNOSTICS {
                 self.counters.cold_fallbacks = self.counters.cold_fallbacks.saturating_add(1);
             }
             return None;
@@ -347,7 +404,7 @@ impl JitEngine {
             .expect("compiler presence checked above")
             .compile(start, instructions);
         let compile_elapsed = compile_start.elapsed();
-        if self.diagnostics_enabled {
+        if DIAGNOSTICS {
             let elapsed_us = u64::try_from(compile_elapsed.as_micros()).unwrap_or(u64::MAX);
             self.counters.compilation_attempts =
                 self.counters.compilation_attempts.saturating_add(1);
@@ -374,7 +431,7 @@ impl JitEngine {
                 match execute_compiled_block(block, instruction_limit, registers, ram, framebuffer)
                 {
                     Some(completed) if completed != 0 => {
-                        if self.diagnostics_enabled {
+                        if DIAGNOSTICS {
                             self.counters.native_executions =
                                 self.counters.native_executions.saturating_add(1);
                             self.counters.native_instructions =
@@ -383,14 +440,14 @@ impl JitEngine {
                         Some(completed)
                     }
                     Some(_) => {
-                        if self.diagnostics_enabled {
+                        if DIAGNOSTICS {
                             self.counters.zero_exit_fallbacks =
                                 self.counters.zero_exit_fallbacks.saturating_add(1);
                         }
                         None
                     }
                     None => {
-                        if self.diagnostics_enabled {
+                        if DIAGNOSTICS {
                             self.counters.instruction_limit_fallbacks =
                                 self.counters.instruction_limit_fallbacks.saturating_add(1);
                         }
@@ -400,7 +457,7 @@ impl JitEngine {
             }
             Ok(None) => {
                 entry.failed = true;
-                if self.diagnostics_enabled {
+                if DIAGNOSTICS {
                     self.counters.compilation_failures =
                         self.counters.compilation_failures.saturating_add(1);
                 }
@@ -409,7 +466,7 @@ impl JitEngine {
             Err(error) => {
                 log::warn!("Failed to compile MIPS block at {start:#010x}: {error}");
                 entry.failed = true;
-                if self.diagnostics_enabled {
+                if DIAGNOSTICS {
                     self.counters.compilation_failures =
                         self.counters.compilation_failures.saturating_add(1);
                 }
