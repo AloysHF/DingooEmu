@@ -210,7 +210,15 @@ pub extern "C" fn retro_run() {
 
     let diagnostic_timer = crate::diagnostics::frame_timer();
     if let Err(error) = emulator.tick() {
-        log::error!("Frame execution failed: {error}");
+        log::error!("Frame execution failed; requesting frontend shutdown: {error}");
+        callbacks::environment(RETRO_ENVIRONMENT_SHUTDOWN, ptr::null_mut());
+        return;
+    }
+
+    if !emulator.is_running() {
+        log::info!("Content exited normally; requesting frontend shutdown");
+        callbacks::environment(RETRO_ENVIRONMENT_SHUTDOWN, ptr::null_mut());
+        return;
     }
 
     let Some(diagnostic_timer) = diagnostic_timer else {
