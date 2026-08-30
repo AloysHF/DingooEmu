@@ -117,6 +117,18 @@ impl ArmCpu {
         if condition != 0xf && !self.condition_passed(condition) {
             return Ok(());
         }
+        if condition == 0xf && instruction & 0x0e00_0000 == 0x0a00_0000 {
+            let offset = (((instruction & 0x00ff_ffff) << 8) as i32 >> 6) as u32;
+            let target = pc
+                .wrapping_add(8)
+                .wrapping_add(offset)
+                .wrapping_add((instruction >> 23) & 2);
+            self.r[14] = pc.wrapping_add(4);
+            self.state = ArmExecutionState::Thumb;
+            self.cpsr |= T;
+            self.r[15] = target & !1;
+            return Ok(());
+        }
         if instruction & 0x0fff_fff0 == 0x012f_ff10 {
             return self.branch_exchange(self.read_reg((instruction & 0xf) as usize, pc, false));
         }
@@ -719,6 +731,13 @@ impl ArmCpu {
                     .wrapping_add(4)
                     .wrapping_add((((op & 0x7ff) << 21) as i32 >> 9) as u32)
             }
+            0b11101 => {
+                let target = self.r[14].wrapping_add((op & 0x7ff) << 1) & !3;
+                self.r[14] = pc.wrapping_add(2) | 1;
+                self.state = ArmExecutionState::Arm;
+                self.cpsr &= !T;
+                self.r[15] = target;
+            }
             0b11111 => {
                 let target = self.r[14].wrapping_add((op & 0x7ff) << 1);
                 self.r[14] = pc.wrapping_add(2) | 1;
@@ -1077,5 +1096,23 @@ mod tests {
         assert_eq!(cpu.r[15], 10);
         assert_eq!(bus.svc, Some(0x42));
         assert_eq!(cpu.r[0], 0x55aa);
+    }
+
+    #[test]
+    fn immediate_blx_switches_between_arm_and_thumb() {
+        let mut arm_bus = TestBus::new(&[0xfa00_0000]);
+        let mut arm_cpu = running_cpu();
+        arm_cpu.step(&mut arm_bus).unwrap();
+        assert_eq!(arm_cpu.execution_state(), ArmExecutionState::Thumb);
+        assert_eq!(arm_cpu.r[15], 8);
+        assert_eq!(arm_cpu.r[14], 4);
+
+        let mut thumb_bus = TestBus::new_thumb(&[0xf000, 0xe802]);
+        let mut thumb_cpu = ArmCpu::new(1, 0xf00, 0);
+        thumb_cpu.start();
+        thumb_cpu.run(&mut thumb_bus, 2).unwrap();
+        assert_eq!(thumb_cpu.execution_state(), ArmExecutionState::Arm);
+        assert_eq!(thumb_cpu.r[15], 8);
+        assert_eq!(thumb_cpu.r[14], 5);
     }
 }

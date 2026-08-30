@@ -1,5 +1,6 @@
 use crate::a330_memory::{
-    A330Memory, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE, STACK_BASE, STACK_SIZE,
+    A330Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE, STACK_BASE,
+    STACK_SIZE,
 };
 use crate::app_loader::PackageImage;
 use crate::arm_cpu::{ArmBus, ArmCpu};
@@ -30,6 +31,7 @@ pub(crate) struct A330Runtime {
     running: bool,
     boot_complete: bool,
     app_main: Option<u32>,
+    dynamic_imports: Vec<String>,
 }
 
 impl A330Runtime {
@@ -72,6 +74,7 @@ impl A330Runtime {
             running: false,
             boot_complete: false,
             app_main,
+            dynamic_imports: Vec::new(),
         })
     }
 
@@ -156,8 +159,18 @@ impl A330Runtime {
                 next_heap: &mut self.next_heap,
                 frame_address: &mut frame_address,
                 stop_requested: false,
+                dynamic_imports: &mut self.dynamic_imports,
             };
-            self.cpu.step(&mut bus)?;
+            let pc = self.cpu.r[15];
+            if let Err(error) = self.cpu.step(&mut bus) {
+                return match error {
+                    SimulatorError::MemoryError { .. } => Err(SimulatorError::CpuError {
+                        pc,
+                        message: format!("{:?} state: {error}", self.cpu.execution_state()),
+                    }),
+                    other => Err(other),
+                };
+            }
             if bus.stop_requested {
                 self.stop();
                 break;
@@ -185,19 +198,31 @@ struct RuntimeBus<'a> {
     next_heap: &'a mut u32,
     frame_address: &'a mut Option<u32>,
     stop_requested: bool,
+    dynamic_imports: &'a mut Vec<String>,
 }
 
 impl RuntimeBus<'_> {
     fn dispatch(&mut self, cpu: &mut ArmCpu, immediate: u32) -> Result<()> {
-        let symbol =
-            self.imports
-                .get(immediate as usize)
+        let (symbol_name, symbol_address) = if immediate & 0x0080_0000 != 0 {
+            let index = (immediate & 0x007f_ffff) as usize;
+            let name = self
+                .dynamic_imports
+                .get(index)
                 .ok_or_else(|| SimulatorError::CpuError {
                     pc: cpu.r[15].wrapping_sub(4),
-                    message: format!("ARM SVC index {immediate} is outside the import table"),
+                    message: format!("dynamic ARM SVC index {index} is invalid"),
                 })?;
-        let symbol_name = symbol.name.clone();
-        let symbol_address = symbol.address;
+            (name.clone(), DYNAMIC_THUNK_BASE + index as u32 * 8)
+        } else {
+            let symbol =
+                self.imports
+                    .get(immediate as usize)
+                    .ok_or_else(|| SimulatorError::CpuError {
+                        pc: cpu.r[15].wrapping_sub(4),
+                        message: format!("ARM SVC index {immediate} is outside the import table"),
+                    })?;
+            (symbol.name.clone(), symbol.address)
+        };
         let name = symbol_name.as_str();
         match name {
             "lcd_get_frame" | "_lcd_get_frame" | "LCDGetFB" => cpu.r[0] = FRAMEBUFFER_BASE,
@@ -226,9 +251,19 @@ impl RuntimeBus<'_> {
                 self.memory.write_bytes(cpu.r[0], &data)?;
             }
             "vxGoHome" | "abort" | "av_end_thread" | "av_queue_abort" => self.stop_requested = true,
+            "TaskMediaFunStop" => cpu.r[0] = 0,
             "get_current_language" => cpu.r[0] = 0,
-            "cmGetSysVersion" => cpu.r[0] = 0x0100,
-            "LCDIsDoubleFBEnabled" | "LCDGetFBFormat" => cpu.r[0] = 0,
+            "GetDLHandle" | "get_dl_handle" => cpu.r[0] = STACK_BASE + 0x100,
+            "__to_locale_ansi" | "_to_locale_ansi" => cpu.r[0] = LOCALE_ADDRESS,
+            "dl_get_proc" => cpu.r[0] = self.dynamic_import(cpu.r[1])?,
+            "cmGetSysModel" => {
+                cpu.r[0] = u32::from(!self.write_guest_string(cpu.r[0], cpu.r[1], "CC1800")?)
+            }
+            "cmGetSysVersion" => {
+                cpu.r[0] = u32::from(!self.write_guest_string(cpu.r[0], cpu.r[1], "1.0")?)
+            }
+            "LCDIsDoubleFBEnabled" => cpu.r[0] = 1,
+            "LCDGetFBFormat" => cpu.r[0] = 0,
             "LCDEnableDoubleFB" | "LCDDisableDoubleFB" | "LCDSetFBFormat" | "LCDInit"
             | "LCDSetRefreshRate" | "LCDSetBrightness" | "FlushDCache" | "InvalidICache"
             | "fsys_RefreshCache" | "consoleEnable" | "consoleDisable" | "PMSetMode" => {
@@ -253,6 +288,46 @@ impl RuntimeBus<'_> {
             }
             _ => 0,
         }
+    }
+
+    fn dynamic_import(&mut self, name_address: u32) -> Result<u32> {
+        let name = self.read_c_string(name_address, 256)?;
+        let index = match self.dynamic_imports.iter().position(|item| item == &name) {
+            Some(index) => index,
+            None => {
+                self.dynamic_imports.push(name);
+                self.dynamic_imports.len() - 1
+            }
+        };
+        let address = DYNAMIC_THUNK_BASE + index as u32 * 8;
+        self.memory.write32(address, 0xef80_0000 | index as u32)?;
+        self.memory.write32(address + 4, 0xe12f_ff1e)?;
+        Ok(address)
+    }
+
+    fn read_c_string(&self, address: u32, limit: usize) -> Result<String> {
+        let mut bytes = Vec::new();
+        for offset in 0..limit {
+            let value = self.memory.read8(address.wrapping_add(offset as u32))?;
+            if value == 0 {
+                return Ok(String::from_utf8_lossy(&bytes).into_owned());
+            }
+            bytes.push(value);
+        }
+        Err(SimulatorError::SdkHleError(
+            "unterminated ARM guest string".into(),
+        ))
+    }
+
+    fn write_guest_string(&mut self, address: u32, capacity: u32, value: &str) -> Result<bool> {
+        if address == 0 || capacity == 0 {
+            return Ok(false);
+        }
+        let count = value.len().min(capacity.saturating_sub(1) as usize);
+        self.memory
+            .write_bytes(address, &value.as_bytes()[..count])?;
+        self.memory.write8(address + count as u32, 0)?;
+        Ok(count == value.len())
     }
 
     fn record_unknown(&mut self, cpu: &mut ArmCpu, name: &str, import_address: u32) -> Result<()> {
@@ -371,5 +446,37 @@ mod tests {
         let call = runtime.unknown_hle_calls().next().unwrap();
         assert_eq!(call.name, "unknown_call");
         assert_eq!(call.count, 1);
+    }
+
+    #[test]
+    fn dynamic_imports_create_reusable_svc_thunks() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("dl_get_proc"), PathBuf::new()).unwrap();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE, b"dynamic_call\0")
+            .unwrap();
+        runtime.cpu.r[1] = STACK_BASE;
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[0], DYNAMIC_THUNK_BASE);
+        assert_eq!(
+            runtime.memory.read32(DYNAMIC_THUNK_BASE).unwrap(),
+            0xef80_0000
+        );
+        assert_eq!(
+            runtime.memory.read32(DYNAMIC_THUNK_BASE + 4).unwrap(),
+            0xe12f_ff1e
+        );
+
+        runtime.cpu = ArmCpu::new(DYNAMIC_THUNK_BASE, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.boot_complete = true;
+        runtime.tick().unwrap();
+        assert_eq!(
+            runtime.unknown_hle_calls().next().unwrap().name,
+            "dynamic_call"
+        );
     }
 }
