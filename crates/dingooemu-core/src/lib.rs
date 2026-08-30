@@ -7,6 +7,7 @@
 pub mod app_loader;
 pub mod audio;
 pub mod cheats;
+pub mod content;
 pub mod cpu;
 pub mod emulator;
 pub mod error;
@@ -18,5 +19,6 @@ mod save_state;
 pub mod video;
 
 // Re-export main types for convenience
+pub use content::{ArmProfile, ContentFormat, GuestArchitecture};
 pub use emulator::{Emulator, JitDiagnostics, UnknownHleCall, UnknownHlePolicy};
 pub use error::{Result, SimulatorError};

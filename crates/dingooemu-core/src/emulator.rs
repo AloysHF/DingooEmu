@@ -1,6 +1,7 @@
 use crate::app_loader::{AppImage, ResourceKind};
 use crate::audio::{Audio, AudioConfig};
 use crate::cheats::{CheatManager, CheatParseError, CheatRule};
+use crate::content::GuestArchitecture;
 use crate::cpu::Cpu;
 use crate::error::{Result, SimulatorError};
 use crate::input::Input;
@@ -325,6 +326,12 @@ impl Emulator {
     }
 
     fn from_app_with_path(app: AppImage, app_path: String) -> Result<Self> {
+        if app.architecture() != GuestArchitecture::Mips32 {
+            return Err(SimulatorError::UnsupportedContentFormat(format!(
+                ".{} requires the ARM runtime, which is not available yet",
+                app.format()
+            )));
+        }
         let mut memory = Memory::new();
 
         // Load executable into memory at the load base address (KSEG0)

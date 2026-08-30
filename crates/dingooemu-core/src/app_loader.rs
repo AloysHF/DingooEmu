@@ -1,3 +1,4 @@
+use crate::content::{ArmProfile, ContentFormat, GuestArchitecture};
 use crate::error::{Result, SimulatorError};
 use std::path::Path;
 
@@ -91,9 +92,11 @@ pub enum ResourceKind {
     Packed64,
 }
 
-/// Complete parsed .app file structure
+/// Complete parsed CCDL package structure.
 #[derive(Debug, Clone)]
-pub struct AppImage {
+pub struct PackageImage {
+    /// Content category selected from the file extension or caller context.
+    pub format: ContentFormat,
     /// Raw file data
     pub data: Vec<u8>,
     /// Import table descriptor
@@ -114,15 +117,28 @@ pub struct AppImage {
     pub resources: Vec<ResourceEntry>,
 }
 
-impl AppImage {
-    /// Load and parse an .app file from disk
+impl PackageImage {
+    /// Load and parse a supported CCDL package from disk.
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let data = std::fs::read(path.as_ref())?;
-        Self::parse(&data)
+        let path = path.as_ref();
+        let format = ContentFormat::from_path(path).ok_or_else(|| {
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("<none>");
+            SimulatorError::UnsupportedContentFormat(extension.to_string())
+        })?;
+        let data = std::fs::read(path)?;
+        Self::parse_with_format(&data, format)
     }
 
-    /// Parse .app data from a byte slice
+    /// Parse an APP package from a byte slice for backward compatibility.
     pub fn parse(data: &[u8]) -> Result<Self> {
+        Self::parse_with_format(data, ContentFormat::App)
+    }
+
+    /// Parse package data using an explicit content category.
+    pub fn parse_with_format(data: &[u8], format: ContentFormat) -> Result<Self> {
         // Validate minimum size
         if data.len() < MIN_FILE_SIZE {
             return Err(SimulatorError::InvalidAppFormat(format!(
@@ -143,6 +159,17 @@ impl AppImage {
         let impt = read_chunk_header(data, IMPT_OFFSET as usize)?;
         let expt = read_chunk_header(data, EXPT_OFFSET as usize)?;
         let mut rawd = read_rawd_header(data, RAWD_OFFSET as usize)?;
+
+        if impt.ident != *MAGIC_IMPT || expt.ident != *MAGIC_EXPT {
+            return Err(SimulatorError::InvalidAppFormat(
+                "Missing IMPT or EXPT descriptor".to_string(),
+            ));
+        }
+        if rawd.base.ident != *MAGIC_RAWD {
+            return Err(SimulatorError::InvalidAppFormat(
+                "Missing RAWD descriptor".to_string(),
+            ));
+        }
 
         // Validate RAWD
         if rawd.entry == 0 {
@@ -170,6 +197,7 @@ impl AppImage {
             );
             rawd.program_size = rawd.base.size;
         }
+        validate_guest_metadata(format, &rawd)?;
 
         // Check for ERPT chunk
         let (has_erpt, erpt) = if data.len() >= ERPT_OFFSET as usize + 16 {
@@ -200,7 +228,9 @@ impl AppImage {
         let resources = parse_resources(data, &rawd, has_erpt, &erpt)?;
 
         log::info!(
-            "Parsed .app: entry={:#010x}, base={:#010x}, size={}, imports={}, exports={}, resources={}",
+            "Parsed .{} package: architecture={:?}, entry={:#010x}, base={:#010x}, size={}, imports={}, exports={}, resources={}",
+            format,
+            format.architecture(),
             rawd.entry,
             rawd.origin,
             rawd.program_size,
@@ -210,6 +240,7 @@ impl AppImage {
         );
 
         Ok(Self {
+            format,
             data: data.to_vec(),
             impt,
             expt,
@@ -220,6 +251,20 @@ impl AppImage {
             exports,
             resources,
         })
+    }
+
+    pub const fn format(&self) -> ContentFormat {
+        self.format
+    }
+
+    pub const fn architecture(&self) -> GuestArchitecture {
+        self.format.architecture()
+    }
+
+    pub fn arm_profile(&self) -> Option<ArmProfile> {
+        (self.architecture() == GuestArchitecture::Arm32)
+            .then(|| ArmProfile::detect(self.load_base()))
+            .flatten()
     }
 
     /// Get the executable data (RAWD payload)
@@ -272,6 +317,38 @@ impl AppImage {
         }
 
         data
+    }
+}
+
+/// Backward-compatible name for callers that only handle APP content.
+pub type AppImage = PackageImage;
+
+fn validate_guest_metadata(format: ContentFormat, rawd: &RawdHeader) -> Result<()> {
+    let program_end = rawd
+        .origin
+        .checked_add(rawd.program_size)
+        .ok_or_else(|| SimulatorError::InvalidAppFormat("Program range overflow".to_string()))?;
+    if rawd.entry < rawd.origin || rawd.entry >= program_end {
+        return Err(SimulatorError::InvalidAppFormat(format!(
+            ".{format} entry {:#010x} is outside program range {:#010x}..{:#010x}",
+            rawd.entry, rawd.origin, program_end
+        )));
+    }
+
+    match format.architecture() {
+        GuestArchitecture::Mips32 if rawd.origin & 0x8000_0000 == 0 => {
+            Err(SimulatorError::InvalidAppFormat(format!(
+                ".{format} package has non-MIPS origin {:#010x}",
+                rawd.origin
+            )))
+        }
+        GuestArchitecture::Arm32 if ArmProfile::detect(rawd.origin).is_none() => {
+            Err(SimulatorError::InvalidAppFormat(format!(
+                ".{format} package has unsupported ARM origin {:#010x}",
+                rawd.origin
+            )))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -360,6 +437,13 @@ fn parse_symbol_table(data: &[u8], offset: usize, size: usize) -> Result<Vec<Sym
         return Ok(Vec::new());
     }
 
+    let section_end = offset
+        .checked_add(size)
+        .filter(|&end| end <= data.len())
+        .ok_or_else(|| {
+            SimulatorError::InvalidAppFormat("Symbol table range is outside file".to_string())
+        })?;
+
     // Read count (first 4 bytes)
     let count = u32::from_le_bytes([
         data[offset],
@@ -376,9 +460,14 @@ fn parse_symbol_table(data: &[u8], offset: usize, size: usize) -> Result<Vec<Sym
 
     // String table starts after 16-byte header + count * 16-byte entries
     let entries_start = offset + 16;
-    let strings_start = entries_start + count * 16;
+    let strings_start = count
+        .checked_mul(16)
+        .and_then(|entries_size| entries_start.checked_add(entries_size))
+        .ok_or_else(|| {
+            SimulatorError::InvalidAppFormat("Symbol table size overflow".to_string())
+        })?;
 
-    if strings_start > offset + size {
+    if strings_start > section_end {
         return Err(SimulatorError::InvalidAppFormat(
             "Symbol table truncated".to_string(),
         ));
@@ -415,7 +504,13 @@ fn parse_symbol_table(data: &[u8], offset: usize, size: usize) -> Result<Vec<Sym
         ]);
 
         // Resolve name from string table
-        let name = read_cstring(data, strings_start + string_offset as usize, 256);
+        let name_offset = strings_start
+            .checked_add(string_offset as usize)
+            .filter(|&name_offset| name_offset < section_end)
+            .ok_or_else(|| {
+                SimulatorError::InvalidAppFormat("Symbol name offset is outside table".to_string())
+            })?;
+        let name = read_cstring(data, name_offset, (section_end - name_offset).min(256));
 
         symbols.push(SymbolEntry {
             string_offset,
@@ -812,6 +907,24 @@ fn is_printable_ascii(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn minimal_package_data(origin: u32) -> Vec<u8> {
+        let mut data = vec![0u8; 256];
+        data[0..4].copy_from_slice(b"CCDL");
+        data[0x20..0x24].copy_from_slice(b"IMPT");
+        data[0x40..0x44].copy_from_slice(b"EXPT");
+        data[0x60..0x64].copy_from_slice(b"RAWD");
+        data[0x68..0x6C].copy_from_slice(&0x80u32.to_le_bytes());
+        data[0x6C..0x70].copy_from_slice(&0x20u32.to_le_bytes());
+        data[0x74..0x78].copy_from_slice(&origin.to_le_bytes());
+        data[0x78..0x7C].copy_from_slice(&origin.to_le_bytes());
+        data[0x7C..0x80].copy_from_slice(&0x20u32.to_le_bytes());
+        data
+    }
+
+    fn minimal_package(origin: u32, format: ContentFormat) -> PackageImage {
+        PackageImage::parse_with_format(&minimal_package_data(origin), format).unwrap()
+    }
+
     #[test]
     fn test_read_chunk_header() {
         let mut data = vec![0u8; 64];
@@ -861,6 +974,41 @@ mod tests {
 
         assert_eq!(app.program_size(), 0x20);
         assert_eq!(app.executable().len(), 0x20);
+    }
+
+    #[test]
+    fn test_parse_records_content_architecture_and_arm_profile() {
+        let app = minimal_package(0x80A0_0000, ContentFormat::App);
+        assert_eq!(app.format(), ContentFormat::App);
+        assert_eq!(app.architecture(), GuestArchitecture::Mips32);
+        assert_eq!(app.arm_profile(), None);
+
+        for format in [ContentFormat::Cc, ContentFormat::C2s, ContentFormat::C3s] {
+            let retail = minimal_package(ArmProfile::RETAIL_ORIGIN, format);
+            assert_eq!(retail.architecture(), GuestArchitecture::Arm32);
+            assert_eq!(retail.arm_profile(), Some(ArmProfile::Retail));
+
+            let homebrew = minimal_package(ArmProfile::HOMEBREW_ORIGIN, format);
+            assert_eq!(homebrew.arm_profile(), Some(ArmProfile::Homebrew));
+        }
+    }
+
+    #[test]
+    fn test_parse_rejects_extension_architecture_mismatch() {
+        let arm_data = minimal_package_data(ArmProfile::RETAIL_ORIGIN);
+        assert!(PackageImage::parse_with_format(&arm_data, ContentFormat::App).is_err());
+
+        let mips_data = minimal_package_data(0x80A0_0000);
+        assert!(PackageImage::parse_with_format(&mips_data, ContentFormat::Cc).is_err());
+    }
+
+    #[test]
+    fn test_parse_rejects_symbol_table_outside_file() {
+        let mut package = minimal_package(0x80A0_0000, ContentFormat::App);
+        package.data[0x28..0x2C].copy_from_slice(&0xF8u32.to_le_bytes());
+        package.data[0x2C..0x30].copy_from_slice(&0x20u32.to_le_bytes());
+
+        assert!(PackageImage::parse(&package.data).is_err());
     }
 
     #[test]
