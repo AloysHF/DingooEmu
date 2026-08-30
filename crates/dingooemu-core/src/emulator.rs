@@ -313,19 +313,19 @@ pub struct Emulator {
 }
 
 impl Emulator {
-    /// Create a new emulator from an .app file path
+    /// Create the legacy APP runtime from a content path.
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let app = AppImage::from_path(path)?;
         Self::from_app_with_path(app, path.to_string_lossy().into_owned())
     }
 
-    /// Create a new emulator from a parsed AppImage
+    /// Create the legacy APP runtime from a parsed package.
     pub fn from_app(app: AppImage) -> Result<Self> {
         Self::from_app_with_path(app, String::new())
     }
 
-    fn from_app_with_path(app: AppImage, app_path: String) -> Result<Self> {
+    pub(crate) fn from_app_with_path(app: AppImage, app_path: String) -> Result<Self> {
         if app.architecture() != GuestArchitecture::Mips32 {
             return Err(SimulatorError::UnsupportedContentFormat(format!(
                 ".{} requires the ARM runtime, which is not available yet",

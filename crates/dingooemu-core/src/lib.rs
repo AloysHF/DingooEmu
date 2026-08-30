@@ -15,10 +15,12 @@ pub mod input;
 #[cfg(feature = "jit")]
 mod jit;
 pub mod memory;
+mod runtime;
 mod save_state;
 pub mod video;
 
 // Re-export main types for convenience
 pub use content::{ArmProfile, ContentFormat, GuestArchitecture};
-pub use emulator::{Emulator, JitDiagnostics, UnknownHleCall, UnknownHlePolicy};
+pub use emulator::{JitDiagnostics, UnknownHleCall, UnknownHlePolicy};
 pub use error::{Result, SimulatorError};
+pub use runtime::Emulator;
