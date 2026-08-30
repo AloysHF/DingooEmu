@@ -1006,6 +1006,34 @@ impl Emulator {
         true
     }
 
+    /// Delete a guest task using the uC/OS-II OSTaskDel convention.
+    ///
+    ///
+    /// Priority 0xff refers to the currently executing task. Guest task CPUs
+    /// are installed in `self.cpu` while scheduled, so stopping `self.cpu`
+    /// also handles deletion of the active task.
+    fn delete_guest_task(&mut self, priority: u32) -> bool {
+        const OS_PRIO_SELF: u32 = 0xff;
+
+        if priority == OS_PRIO_SELF {
+            self.cpu.stop();
+            return true;
+        }
+
+        if let Some(task_index) = self.active_task {
+            if self.tasks[task_index].priority == priority {
+                self.cpu.stop();
+                return true;
+            }
+        }
+
+        if let Some(task) = self.tasks.iter_mut().find(|task| task.priority == priority) {
+            task.cpu.stop();
+            return true;
+        }
+
+        false
+    }
     fn set_active_wait(&mut self, wait: TaskWait) {
         if let Some(task_index) = self.active_task {
             self.tasks[task_index].wait = Some(wait);

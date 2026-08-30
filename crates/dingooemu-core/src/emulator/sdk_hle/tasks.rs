@@ -15,6 +15,12 @@ pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResul
                 emu.cpu.regs.read(2)
             );
         }
+        "OSTaskDel" => {
+            let priority = emu.cpu.regs.read(4);
+            let deleted = emu.delete_guest_task(priority);
+            emu.cpu.regs.write(2, if deleted { 0 } else { 1 });
+            log::trace!("  OSTaskDel({priority}) = {}", emu.cpu.regs.read(2));
+        }
         "OSSemCreate" => {
             let count = emu.cpu.regs.read(4);
             let handle = emu.create_semaphore(count);
