@@ -138,9 +138,11 @@ When diagnostics are enabled, the report is refreshed once per second and when
 content is unloaded. It includes cumulative and recent 60-frame timing,
 separate video and audio callback costs, audio short-write and frontend buffer
 status counters, asynchronous queue statistics, the 48 kHz output rate,
-acceptance of the 128 ms minimum latency request, plus JIT execution,
-compilation, and fallback counters. Supported frontends deliver audio outside
-the emulation thread so audio backpressure does not stall video and input.
+plus JIT execution, compilation, and fallback counters. Supported frontends
+deliver audio outside the emulation thread so audio backpressure does not stall
+video and input. The core leaves frontend latency settings unchanged, discards
+audio while the frontend callback is disabled, and uses only a short bounded
+queue so stale audio cannot build up across pauses.
 Diagnostics are disabled by default; timing, report writes, frontend buffer
 callbacks, and JIT counter updates remain inactive until explicitly enabled.
 

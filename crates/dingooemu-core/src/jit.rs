@@ -1577,30 +1577,36 @@ mod tests {
             (9 << 21) | (8 << 16) | (10 << 11) | 0x26,
         ];
         let first_start = 0x1000;
-        let second_start = first_start + 0x4000;
+        let compiled_starts: Vec<u32> = (0..MAX_COMPILES_PER_FRAME)
+            .map(|index| first_start + index as u32 * 0x4000)
+            .collect();
+        let deferred_start = first_start + MAX_COMPILES_PER_FRAME as u32 * 0x4000;
         let mut engine = JitEngine::new();
         let mut registers = Registers::new(first_start);
         let mut memory = Memory::new();
         let ram = memory.jit_ram_ptr();
         let framebuffer = memory.jit_framebuffer_ptr();
 
-        for _ in 0..HOT_BLOCK_THRESHOLD {
-            let _ = engine.execute(
-                first_start,
-                &instructions,
-                instructions.len(),
-                &mut registers,
-                ram,
-                framebuffer,
-            );
+        for &start in &compiled_starts {
+            registers.pc = start;
+            for _ in 0..HOT_BLOCK_THRESHOLD {
+                let _ = engine.execute(
+                    start,
+                    &instructions,
+                    instructions.len(),
+                    &mut registers,
+                    ram,
+                    framebuffer,
+                );
+            }
+            assert!(engine.entries[&start].block.is_some());
         }
-        assert!(engine.entries[&first_start].block.is_some());
 
-        registers.pc = second_start;
+        registers.pc = deferred_start;
         for _ in 0..HOT_BLOCK_THRESHOLD {
             assert!(engine
                 .execute(
-                    second_start,
+                    deferred_start,
                     &instructions,
                     instructions.len(),
                     &mut registers,
@@ -1609,12 +1615,12 @@ mod tests {
                 )
                 .is_none());
         }
-        assert!(engine.entries[&second_start].block.is_none());
+        assert!(engine.entries[&deferred_start].block.is_none());
 
         engine.begin_frame();
         assert!(engine
             .execute(
-                second_start,
+                deferred_start,
                 &instructions,
                 instructions.len(),
                 &mut registers,
@@ -1622,8 +1628,10 @@ mod tests {
                 framebuffer,
             )
             .is_some());
-        assert!(engine.entries[&first_start].block.is_some());
-        assert!(engine.entries[&second_start].block.is_some());
+        for start in compiled_starts {
+            assert!(engine.entries[&start].block.is_some());
+        }
+        assert!(engine.entries[&deferred_start].block.is_some());
     }
 
     #[test]

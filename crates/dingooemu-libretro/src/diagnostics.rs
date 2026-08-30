@@ -60,8 +60,6 @@ struct DiagnosticSession {
     audio_frames_accepted: u64,
     audio_short_writes: u64,
     audio_output_sample_rate_hz: u32,
-    audio_minimum_latency_ms: u32,
-    audio_latency_request_accepted: Option<bool>,
     audio_buffer_status_callback_supported: Option<bool>,
     audio_buffer_status_callbacks: u64,
     audio_buffer_active_callbacks: u64,
@@ -82,12 +80,7 @@ struct DiagnosticSession {
 }
 
 impl DiagnosticSession {
-    fn new(
-        save_directory: Option<&Path>,
-        content_path: &str,
-        sample_rate_hz: u32,
-        minimum_latency_ms: u32,
-    ) -> Self {
+    fn new(save_directory: Option<&Path>, content_path: &str, sample_rate_hz: u32) -> Self {
         let content_name = Path::new(content_path)
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -103,8 +96,6 @@ impl DiagnosticSession {
             audio_frames_accepted: 0,
             audio_short_writes: 0,
             audio_output_sample_rate_hz: sample_rate_hz,
-            audio_minimum_latency_ms: minimum_latency_ms,
-            audio_latency_request_accepted: None,
             audio_buffer_status_callback_supported: None,
             audio_buffer_status_callbacks: 0,
             audio_buffer_active_callbacks: 0,
@@ -181,7 +172,7 @@ impl DiagnosticSession {
         let recent = self.recent;
         format!(
             "DingooEmu performance diagnostics\n\
-format_version=5\n\
+format_version=6\n\
 core_version={}\n\
 target_os={}\n\
 target_arch={}\n\
@@ -210,8 +201,6 @@ audio_frames_requested={}\n\
 audio_frames_accepted={}\n\
 audio_short_writes={}\n\
 audio_output_sample_rate_hz={}\n\
-audio_minimum_latency_ms={}\n\
-audio_latency_request_status={}\n\
 audio_buffer_status_callback_status={}\n\
 audio_buffer_status_callbacks={}\n\
 audio_buffer_active_callbacks={}\n\
@@ -274,8 +263,6 @@ jit_zero_exit_fallbacks={}\n",
             self.audio_frames_accepted,
             self.audio_short_writes,
             self.audio_output_sample_rate_hz,
-            self.audio_minimum_latency_ms,
-            status(self.audio_latency_request_accepted),
             status(self.audio_buffer_status_callback_supported),
             self.audio_buffer_status_callbacks,
             self.audio_buffer_active_callbacks,
@@ -354,29 +341,17 @@ fn average(total: u64, count: u64) -> u64 {
     total.checked_div(count).unwrap_or(0)
 }
 
-pub fn configure(
-    save_directory: Option<&Path>,
-    content_path: &str,
-    sample_rate_hz: u32,
-    minimum_latency_ms: u32,
-) {
+pub fn configure(save_directory: Option<&Path>, content_path: &str, sample_rate_hz: u32) {
     ENABLED.store(false, Ordering::Relaxed);
     *SESSION.lock().unwrap() = Some(DiagnosticSession::new(
         save_directory,
         content_path,
         sample_rate_hz,
-        minimum_latency_ms,
     ));
 }
 
 pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
-}
-
-pub fn set_audio_latency_request_status(accepted: bool) {
-    if let Some(session) = SESSION.lock().unwrap().as_mut() {
-        session.audio_latency_request_accepted = Some(accepted);
-    }
 }
 
 pub fn set_audio_buffer_status_callback_status(supported: bool) {
@@ -543,9 +518,8 @@ mod tests {
             "dingooemu-diagnostic-schema-test-{}",
             std::process::id()
         ));
-        let mut session = DiagnosticSession::new(Some(&directory), "games/test.app", 48_000, 128);
+        let mut session = DiagnosticSession::new(Some(&directory), "games/test.app", 48_000);
         session.enabled = true;
-        session.audio_latency_request_accepted = Some(true);
         session.audio_buffer_status_callback_supported = Some(true);
         session.async_audio_callback_supported = Some(true);
         session.async_audio_enabled = true;
@@ -567,7 +541,7 @@ mod tests {
 
         let report = std::fs::read_to_string(directory.join(DIAGNOSTIC_FILE_NAME)).unwrap();
         for expected in [
-            "format_version=5",
+            "format_version=6",
             "content=test.app",
             "frames=1",
             "tick_max_us=12345",
@@ -579,8 +553,6 @@ mod tests {
             "audio_frames_accepted=300",
             "audio_short_writes=1",
             "audio_output_sample_rate_hz=48000",
-            "audio_minimum_latency_ms=128",
-            "audio_latency_request_status=accepted",
             "audio_buffer_status_callback_status=accepted",
             "async_audio_callback_status=accepted",
             "async_audio_enabled=true",
@@ -590,6 +562,12 @@ mod tests {
             assert!(
                 report.contains(expected),
                 "missing report field: {expected}"
+            );
+        }
+        for removed in ["audio_minimum_latency_ms", "audio_latency_request_status"] {
+            assert!(
+                !report.contains(removed),
+                "obsolete report field: {removed}"
             );
         }
         std::fs::remove_dir_all(directory).unwrap();

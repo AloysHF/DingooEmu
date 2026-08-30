@@ -19,10 +19,8 @@ use crate::types::*;
 use crate::EMULATOR;
 
 const PERFORMANCE_LEVEL: u32 = 4;
-const MINIMUM_AUDIO_LATENCY_MS: u32 = 128;
 const FRAMES_PER_SECOND: f64 = 60.0;
 static DIAGNOSTIC_AUDIO_BUFFER_REGISTERED: AtomicBool = AtomicBool::new(false);
-static AUDIO_CONFIGURATION_REQUEST_PENDING: AtomicBool = AtomicBool::new(true);
 static ASYNC_AUDIO_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
@@ -158,17 +156,11 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
             let diagnostic_directory = save_directory
                 .as_deref()
                 .or_else(|| std::path::Path::new(path).parent());
-            crate::diagnostics::configure(
-                diagnostic_directory,
-                path,
-                OUTPUT_SAMPLE_RATE,
-                MINIMUM_AUDIO_LATENCY_MS,
-            );
+            crate::diagnostics::configure(diagnostic_directory, path, OUTPUT_SAMPLE_RATE);
             apply_core_options(&mut emulator);
             emulator.start();
             unsafe { EMULATOR = Some(emulator) };
             register_async_audio();
-            AUDIO_CONFIGURATION_REQUEST_PENDING.store(true, Ordering::Relaxed);
             if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
                 register_memory_maps(emulator);
             }
@@ -215,8 +207,6 @@ pub extern "C" fn retro_run() {
     let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
         return;
     };
-
-    request_audio_configuration();
 
     callbacks::input_poll();
     let buttons =
@@ -362,24 +352,6 @@ unsafe extern "C" fn frontend_async_audio_set_state(enabled: bool) {
 }
 
 unsafe extern "C" fn frontend_frame_time(_usec: i64) {}
-
-fn request_audio_configuration() {
-    if !AUDIO_CONFIGURATION_REQUEST_PENDING.swap(false, Ordering::Relaxed) {
-        return;
-    }
-
-    let mut latency_ms = MINIMUM_AUDIO_LATENCY_MS;
-    let accepted = callbacks::environment(
-        RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY,
-        (&mut latency_ms as *mut u32).cast(),
-    );
-    crate::diagnostics::set_audio_latency_request_status(accepted);
-    if accepted {
-        log::info!("Requested minimum frontend audio latency: {latency_ms} ms");
-    } else {
-        log::debug!("Frontend does not support minimum audio latency requests");
-    }
-}
 
 #[no_mangle]
 pub extern "C" fn retro_reset() {
@@ -784,6 +756,7 @@ mod tests {
 
     use super::*;
 
+    const TEST_MINIMUM_AUDIO_LATENCY_COMMAND: u32 = 63;
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     static PIXEL_FORMAT: AtomicU32 = AtomicU32::new(u32::MAX);
     static INPUT_DESCRIPTORS_SET: AtomicBool = AtomicBool::new(false);
@@ -792,7 +765,7 @@ mod tests {
     static AUDIO_BATCH_CALLED: AtomicBool = AtomicBool::new(false);
     static AUDIO_BUFFER_STATUS_REGISTERED: AtomicBool = AtomicBool::new(false);
     static ASYNC_AUDIO_CALLBACK: Mutex<RetroAudioCallbackFn> = Mutex::new(None);
-    static AUDIO_LATENCY_MS: AtomicU32 = AtomicU32::new(0);
+    static AUDIO_LATENCY_REQUESTED: AtomicBool = AtomicBool::new(false);
     static MEMORY_MAPS_SET: AtomicBool = AtomicBool::new(false);
     static SAVE_DIRECTORY: Mutex<Option<CString>> = Mutex::new(None);
 
@@ -826,8 +799,8 @@ mod tests {
                 }
                 true
             }
-            RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY => {
-                AUDIO_LATENCY_MS.store(*(data.cast::<u32>()), Ordering::SeqCst);
+            TEST_MINIMUM_AUDIO_LATENCY_COMMAND => {
+                AUDIO_LATENCY_REQUESTED.store(true, Ordering::SeqCst);
                 true
             }
             RETRO_ENVIRONMENT_SET_MEMORY_MAPS => {
@@ -1050,7 +1023,7 @@ mod tests {
         AUDIO_BUFFER_STATUS_REGISTERED.store(false, Ordering::SeqCst);
         DIAGNOSTIC_AUDIO_BUFFER_REGISTERED.store(false, Ordering::SeqCst);
         *ASYNC_AUDIO_CALLBACK.lock().unwrap() = None;
-        AUDIO_LATENCY_MS.store(0, Ordering::SeqCst);
+        AUDIO_LATENCY_REQUESTED.store(false, Ordering::SeqCst);
         MEMORY_MAPS_SET.store(false, Ordering::SeqCst);
 
         let test_directory = std::env::temp_dir().join(format!(
@@ -1100,10 +1073,7 @@ mod tests {
         retro_run();
         assert!(!crate::diagnostics::is_enabled());
         assert!(!AUDIO_BUFFER_STATUS_REGISTERED.load(Ordering::SeqCst));
-        assert_eq!(
-            AUDIO_LATENCY_MS.load(Ordering::SeqCst),
-            MINIMUM_AUDIO_LATENCY_MS
-        );
+        assert!(!AUDIO_LATENCY_REQUESTED.load(Ordering::SeqCst));
         assert!(INPUT_POLLED.load(Ordering::SeqCst));
         assert_eq!(VIDEO_WIDTH.load(Ordering::SeqCst), SCREEN_WIDTH);
         assert!(!AUDIO_BATCH_CALLED.load(Ordering::SeqCst));
