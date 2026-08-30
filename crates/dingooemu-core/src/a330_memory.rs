@@ -14,6 +14,12 @@ pub const FRAMEBUFFER_SIZE: usize = 0x0080_0000;
 pub const LEGACY_LOW_MEMORY_SIZE: usize = 0x0001_0000;
 pub const DYNAMIC_THUNK_BASE: u32 = STACK_BASE + 0x1000;
 pub const EXIT_ADDRESS: u32 = STACK_BASE + STACK_SIZE as u32 - 4;
+const LEGACY_MMIO_BASE: u32 = 0x0400_0000;
+const LEGACY_MMIO_SIZE: usize = 0x0010_0000;
+const LEGACY_AUDIO_MMIO_BASE: u32 = 0x08a0_0000;
+const LEGACY_AUDIO_MMIO_SIZE: usize = 0x0001_0000;
+const LEGACY_SYSTEM_MMIO_BASE: u32 = 0x0930_0000;
+const LEGACY_SYSTEM_MMIO_SIZE: usize = 0x0001_0000;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct A330Memory {
@@ -23,6 +29,9 @@ pub struct A330Memory {
     heap: Vec<u8>,
     framebuffer: Vec<u8>,
     low_memory: Vec<u8>,
+    legacy_mmio: Vec<u8>,
+    legacy_audio_mmio: Vec<u8>,
+    legacy_system_mmio: Vec<u8>,
 }
 
 impl A330Memory {
@@ -37,6 +46,9 @@ impl A330Memory {
             heap: vec![0; HEAP_SIZE],
             framebuffer: vec![0; FRAMEBUFFER_SIZE],
             low_memory: vec![0; LEGACY_LOW_MEMORY_SIZE],
+            legacy_mmio: vec![0; LEGACY_MMIO_SIZE],
+            legacy_audio_mmio: vec![0; LEGACY_AUDIO_MMIO_SIZE],
+            legacy_system_mmio: vec![0; LEGACY_SYSTEM_MMIO_SIZE],
         };
         let program_end = package
             .load_base()
@@ -145,6 +157,25 @@ impl A330Memory {
         if let Some(range) = region_range(address, size, FRAMEBUFFER_BASE, self.framebuffer.len()) {
             return Ok(&self.framebuffer[range]);
         }
+        if let Some(range) = region_range(address, size, LEGACY_MMIO_BASE, self.legacy_mmio.len()) {
+            return Ok(&self.legacy_mmio[range]);
+        }
+        if let Some(range) = region_range(
+            address,
+            size,
+            LEGACY_AUDIO_MMIO_BASE,
+            self.legacy_audio_mmio.len(),
+        ) {
+            return Ok(&self.legacy_audio_mmio[range]);
+        }
+        if let Some(range) = region_range(
+            address,
+            size,
+            LEGACY_SYSTEM_MMIO_BASE,
+            self.legacy_system_mmio.len(),
+        ) {
+            return Ok(&self.legacy_system_mmio[range]);
+        }
         Err(memory_error(address, size))
     }
 
@@ -175,6 +206,33 @@ impl A330Memory {
             self.framebuffer.len(),
         ) {
             self.framebuffer[range].copy_from_slice(data);
+            return Ok(());
+        }
+        if let Some(range) = region_range(
+            address,
+            data.len(),
+            LEGACY_MMIO_BASE,
+            self.legacy_mmio.len(),
+        ) {
+            self.legacy_mmio[range].copy_from_slice(data);
+            return Ok(());
+        }
+        if let Some(range) = region_range(
+            address,
+            data.len(),
+            LEGACY_AUDIO_MMIO_BASE,
+            self.legacy_audio_mmio.len(),
+        ) {
+            self.legacy_audio_mmio[range].copy_from_slice(data);
+            return Ok(());
+        }
+        if let Some(range) = region_range(
+            address,
+            data.len(),
+            LEGACY_SYSTEM_MMIO_BASE,
+            self.legacy_system_mmio.len(),
+        ) {
+            self.legacy_system_mmio[range].copy_from_slice(data);
             return Ok(());
         }
         Err(memory_error(address, data.len()))

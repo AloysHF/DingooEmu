@@ -1,15 +1,17 @@
+use crate::a330_runtime::A330Runtime;
 use crate::app_loader::{AppImage, PackageImage};
 use crate::audio::AudioConfig;
 use crate::cheats::{CheatParseError, CheatRule};
 use crate::content::{ArmProfile, ContentFormat, GuestArchitecture};
 use crate::cpu::UnknownInstructionPolicy;
 use crate::emulator::{Emulator as AppRuntime, JitDiagnostics, UnknownHleCall, UnknownHlePolicy};
-use crate::error::{Result, SimulatorError};
+use crate::error::Result;
 use std::path::{Path, PathBuf};
 
 /// Architecture-specific runtime selected by the content probe.
 enum Runtime {
-    App(AppRuntime),
+    App(Box<AppRuntime>),
+    Arm(Box<A330Runtime>),
 }
 
 /// Format-neutral emulator façade used by every frontend.
@@ -20,7 +22,7 @@ pub struct Emulator {
 impl Default for Emulator {
     fn default() -> Self {
         Self {
-            runtime: Runtime::App(AppRuntime::default()),
+            runtime: Runtime::App(Box::default()),
         }
     }
 }
@@ -41,52 +43,56 @@ impl Emulator {
     fn from_package_with_path(package: PackageImage, path: String) -> Result<Self> {
         let runtime = match package.architecture() {
             GuestArchitecture::Mips32 => {
-                Runtime::App(AppRuntime::from_app_with_path(package, path)?)
+                Runtime::App(Box::new(AppRuntime::from_app_with_path(package, path)?))
             }
-            GuestArchitecture::Arm32 => {
-                return Err(SimulatorError::UnsupportedContentFormat(format!(
-                    ".{} requires the ARM runtime, which is not available yet",
-                    package.format()
-                )));
-            }
+            GuestArchitecture::Arm32 => Runtime::Arm(Box::new(A330Runtime::from_package(
+                package,
+                PathBuf::from(path),
+            )?)),
         };
         Ok(Self { runtime })
     }
 
-    fn app_runtime(&self) -> &AppRuntime {
-        match &self.runtime {
-            Runtime::App(runtime) => runtime,
-        }
-    }
-
-    fn app_mut(&mut self) -> &mut AppRuntime {
-        match &mut self.runtime {
-            Runtime::App(runtime) => runtime,
-        }
-    }
-
     pub fn start(&mut self) {
-        self.app_mut().start();
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.start(),
+            Runtime::Arm(runtime) => runtime.start(),
+        }
     }
 
     pub fn stop(&mut self) {
-        self.app_mut().stop();
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.stop(),
+            Runtime::Arm(runtime) => runtime.stop(),
+        }
     }
 
     pub fn reset(&mut self) -> Result<()> {
-        self.app_mut().reset()
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.reset(),
+            Runtime::Arm(runtime) => runtime.reset(),
+        }
     }
 
     pub fn tick(&mut self) -> Result<()> {
-        self.app_mut().tick()
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.tick(),
+            Runtime::Arm(runtime) => runtime.tick(),
+        }
     }
 
     pub fn is_running(&self) -> bool {
-        self.app_runtime().is_running()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.is_running(),
+            Runtime::Arm(runtime) => runtime.is_running(),
+        }
     }
 
     pub fn set_unknown_hle_policy(&mut self, policy: UnknownHlePolicy) {
-        self.app_mut().set_unknown_hle_policy(policy);
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_unknown_hle_policy(policy),
+            Runtime::Arm(runtime) => runtime.set_unknown_hle_policy(policy),
+        }
     }
 
     pub fn set_unknown_hle_allowlist<I, S>(&mut self, names: I)
@@ -94,136 +100,231 @@ impl Emulator {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.app_mut().set_unknown_hle_allowlist(names);
+        let names: Vec<String> = names.into_iter().map(Into::into).collect();
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_unknown_hle_allowlist(names),
+            Runtime::Arm(runtime) => runtime.set_unknown_hle_allowlist(names),
+        }
     }
 
-    pub fn unknown_hle_calls(&self) -> impl ExactSizeIterator<Item = &UnknownHleCall> {
-        self.app_runtime().unknown_hle_calls()
+    pub fn unknown_hle_calls(&self) -> Box<dyn ExactSizeIterator<Item = &UnknownHleCall> + '_> {
+        match &self.runtime {
+            Runtime::App(runtime) => Box::new(runtime.unknown_hle_calls()),
+            Runtime::Arm(runtime) => Box::new(runtime.unknown_hle_calls()),
+        }
     }
 
     pub fn clear_unknown_hle_calls(&mut self) {
-        self.app_mut().clear_unknown_hle_calls();
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.clear_unknown_hle_calls(),
+            Runtime::Arm(runtime) => runtime.clear_unknown_hle_calls(),
+        }
     }
 
     pub fn serialized_state_size(&self) -> usize {
-        self.app_runtime().serialized_state_size()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.serialized_state_size(),
+            Runtime::Arm(_) => 128 * 1024 * 1024,
+        }
     }
 
     pub fn serialize_state(&self, output: &mut [u8]) -> anyhow::Result<()> {
-        self.app_runtime().serialize_state(output)
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.serialize_state(output),
+            Runtime::Arm(_) => Err(anyhow::anyhow!("ARM save states are not available yet")),
+        }
     }
 
     pub fn unserialize_state(&mut self, input: &[u8]) -> anyhow::Result<()> {
-        self.app_mut().unserialize_state(input)
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.unserialize_state(input),
+            Runtime::Arm(_) => Err(anyhow::anyhow!("ARM save states are not available yet")),
+        }
     }
 
     pub fn set_jit_enabled(&mut self, enabled: bool) {
-        self.app_mut().set_jit_enabled(enabled);
+        if let Runtime::App(runtime) = &mut self.runtime {
+            runtime.set_jit_enabled(enabled);
+        }
     }
 
     pub fn set_jit_diagnostics_enabled(&mut self, enabled: bool) {
-        self.app_mut().set_jit_diagnostics_enabled(enabled);
+        if let Runtime::App(runtime) = &mut self.runtime {
+            runtime.set_jit_diagnostics_enabled(enabled);
+        }
     }
 
     pub fn jit_diagnostics(&self) -> JitDiagnostics {
-        self.app_runtime().jit_diagnostics()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.jit_diagnostics(),
+            Runtime::Arm(_) => JitDiagnostics::default(),
+        }
     }
 
     pub fn flush_save_files(&mut self) {
-        self.app_mut().flush_save_files();
+        if let Runtime::App(runtime) = &mut self.runtime {
+            runtime.flush_save_files();
+        }
     }
 
     pub fn set_save_directory<P: Into<PathBuf>>(&mut self, directory: P) {
-        self.app_mut().set_save_directory(directory);
+        if let Runtime::App(runtime) = &mut self.runtime {
+            runtime.set_save_directory(directory);
+        }
     }
 
     pub fn set_buttons(&mut self, buttons: u32) {
-        self.app_mut().set_buttons(buttons);
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_buttons(buttons),
+            Runtime::Arm(runtime) => runtime.input.set_buttons(buttons),
+        }
     }
 
     pub fn content_format(&self) -> ContentFormat {
-        self.app_runtime().content_format()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.content_format(),
+            Runtime::Arm(runtime) => runtime.format(),
+        }
     }
 
     pub fn guest_architecture(&self) -> GuestArchitecture {
-        self.app_runtime().guest_architecture()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.guest_architecture(),
+            Runtime::Arm(_) => GuestArchitecture::Arm32,
+        }
     }
 
     pub fn arm_profile(&self) -> Option<ArmProfile> {
-        self.app_runtime().arm_profile()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.arm_profile(),
+            Runtime::Arm(runtime) => Some(runtime.profile()),
+        }
     }
 
     pub fn set_unknown_instruction_policy(&mut self, policy: UnknownInstructionPolicy) {
-        self.app_mut().set_unknown_instruction_policy(policy);
+        if let Runtime::App(runtime) = &mut self.runtime {
+            runtime.set_unknown_instruction_policy(policy);
+        }
     }
 
     pub fn instruction_count(&self) -> u64 {
-        self.app_runtime().instruction_count()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.instruction_count(),
+            Runtime::Arm(runtime) => runtime.cpu.instruction_count,
+        }
     }
 
     pub fn set_master_volume(&mut self, volume: u8) {
-        self.app_mut().set_master_volume(volume);
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_master_volume(volume),
+            Runtime::Arm(runtime) => runtime.audio.set_master_volume(volume),
+        }
     }
 
     #[cfg(feature = "standalone")]
     pub fn set_host_audio_output_enabled(&mut self, enabled: bool) {
-        self.app_mut().set_host_audio_output_enabled(enabled);
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_host_audio_output_enabled(enabled),
+            Runtime::Arm(runtime) => runtime.audio.set_host_output_enabled(enabled),
+        }
     }
 
     pub fn audio_config(&self) -> Option<AudioConfig> {
-        self.app_runtime().audio_config()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.audio_config(),
+            Runtime::Arm(runtime) => runtime.audio.config(),
+        }
     }
 
     pub fn set_input_repeat_timing(&mut self, delay: u32, period: u32) {
-        self.app_mut().set_input_repeat_timing(delay, period);
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_input_repeat_timing(delay, period),
+            Runtime::Arm(runtime) => runtime.input.set_repeat_timing(delay, period),
+        }
     }
 
     pub fn set_swap_ab(&mut self, swap_ab: bool) {
-        self.app_mut().set_swap_ab(swap_ab);
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_swap_ab(swap_ab),
+            Runtime::Arm(runtime) => runtime.input.set_swap_ab(swap_ab),
+        }
     }
 
     pub fn buttons(&self) -> u32 {
-        self.app_runtime().buttons()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.buttons(),
+            Runtime::Arm(runtime) => runtime.input.buttons(),
+        }
     }
 
     pub fn framebuffer(&self) -> &[u8] {
-        self.app_runtime().framebuffer()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.framebuffer(),
+            Runtime::Arm(runtime) => runtime.video.framebuffer(),
+        }
     }
 
     pub fn framebuffer_crc32(&self) -> u32 {
-        self.app_runtime().framebuffer_crc32()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.framebuffer_crc32(),
+            Runtime::Arm(runtime) => runtime.video.framebuffer_crc32(),
+        }
     }
 
     pub fn frame_xrgb8888(&self) -> Vec<u32> {
-        self.app_runtime().frame_xrgb8888()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.frame_xrgb8888(),
+            Runtime::Arm(runtime) => runtime.video.to_xrgb8888(),
+        }
     }
 
     pub fn save_screenshot(&self, path: &Path) -> anyhow::Result<()> {
-        self.app_runtime().save_screenshot(path)
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.save_screenshot(path),
+            Runtime::Arm(runtime) => runtime.video.save_screenshot(path),
+        }
     }
 
     pub fn system_ram(&self) -> &[u8] {
-        self.app_runtime().system_ram()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.system_ram(),
+            Runtime::Arm(runtime) => runtime.memory.system_ram(),
+        }
     }
 
     pub fn system_ram_mut(&mut self) -> &mut [u8] {
-        self.app_mut().system_ram_mut()
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.system_ram_mut(),
+            Runtime::Arm(runtime) => runtime.memory.system_ram_mut(),
+        }
     }
 
     pub fn video_ram(&self) -> &[u8] {
-        self.app_runtime().video_ram()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.video_ram(),
+            Runtime::Arm(runtime) => runtime.memory.framebuffer(),
+        }
     }
 
     pub fn video_ram_mut(&mut self) -> &mut [u8] {
-        self.app_mut().video_ram_mut()
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.video_ram_mut(),
+            Runtime::Arm(runtime) => runtime.memory.framebuffer_mut(),
+        }
     }
 
     pub fn read_memory_u32(&self, address: u32) -> Result<u32> {
-        self.app_runtime().read_memory_u32(address)
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.read_memory_u32(address),
+            Runtime::Arm(runtime) => runtime.memory.read32(address),
+        }
     }
 
     pub fn write_memory_u32(&mut self, address: u32, value: u32) -> Result<()> {
-        self.app_mut().write_memory_u32(address, value)
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.write_memory_u32(address, value),
+            Runtime::Arm(runtime) => runtime.memory.write32(address, value),
+        }
     }
 
     pub fn set_cheat(
@@ -232,7 +333,13 @@ impl Emulator {
         enabled: bool,
         code: &str,
     ) -> std::result::Result<(), CheatParseError> {
-        self.app_mut().set_cheat(index, enabled, code)
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_cheat(index, enabled, code),
+            Runtime::Arm(_) => {
+                let _: CheatRule = code.parse()?;
+                Ok(())
+            }
+        }
     }
 
     pub fn set_parsed_cheat(
@@ -241,27 +348,44 @@ impl Emulator {
         enabled: bool,
         rule: CheatRule,
     ) -> std::result::Result<(), CheatParseError> {
-        self.app_mut().set_parsed_cheat(index, enabled, rule)
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_parsed_cheat(index, enabled, rule),
+            Runtime::Arm(_) => Ok(()),
+        }
     }
 
     pub fn clear_cheats(&mut self) {
-        self.app_mut().clear_cheats();
+        if let Runtime::App(runtime) = &mut self.runtime {
+            runtime.clear_cheats();
+        }
     }
 
     pub fn take_audio_samples(&mut self) -> Vec<i16> {
-        self.app_mut().take_audio_samples()
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.take_audio_samples(),
+            Runtime::Arm(runtime) => runtime.audio.take_frame_samples(),
+        }
     }
 
     pub fn audio_sample_rate(&self) -> u32 {
-        self.app_runtime().audio_sample_rate()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.audio_sample_rate(),
+            Runtime::Arm(_) => crate::audio::OUTPUT_SAMPLE_RATE,
+        }
     }
 
     pub fn frame_count(&self) -> u64 {
-        self.app_runtime().frame_count()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.frame_count(),
+            Runtime::Arm(runtime) => runtime.video.frame_count(),
+        }
     }
 
     pub fn app(&self) -> Option<&PackageImage> {
-        self.app_runtime().app()
+        match &self.runtime {
+            Runtime::App(runtime) => runtime.app(),
+            Runtime::Arm(runtime) => Some(runtime.package()),
+        }
     }
 }
 
@@ -293,15 +417,15 @@ mod tests {
     }
 
     #[test]
-    fn arm_package_requires_an_arm_runtime_variant() {
+    fn arm_package_selects_the_a330_runtime() {
         let mut package = minimal_app();
         package.format = ContentFormat::Cc;
         package.rawd.entry = ArmProfile::RETAIL_ORIGIN;
         package.rawd.origin = ArmProfile::RETAIL_ORIGIN;
 
-        assert!(matches!(
-            Emulator::from_app(package),
-            Err(SimulatorError::UnsupportedContentFormat(_))
-        ));
+        let emulator = Emulator::from_app(package).unwrap();
+        assert_eq!(emulator.content_format(), ContentFormat::Cc);
+        assert_eq!(emulator.guest_architecture(), GuestArchitecture::Arm32);
+        assert_eq!(emulator.arm_profile(), Some(ArmProfile::Retail));
     }
 }

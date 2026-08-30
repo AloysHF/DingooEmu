@@ -5,6 +5,7 @@
 //! against this crate.
 
 pub mod a330_memory;
+mod a330_runtime;
 pub mod app_loader;
 pub mod arm_cpu;
 pub mod audio;
