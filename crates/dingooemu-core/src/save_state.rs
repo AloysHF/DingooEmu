@@ -6,6 +6,10 @@ use serde::Serialize;
 const MAGIC: &[u8; 8] = b"DINGSTAT";
 const VERSION: u32 = 3;
 const HEADER_SIZE: usize = 32;
+// A Dingoo snapshot always contains the 32 MiB guest RAM and may also contain
+// resources that the guest deliberately keeps open. Real applications can
+// therefore exceed the original 64 MiB ceiling even though their LZ4 payload
+// still fits in the fixed libretro serialization buffer.
 const MAX_DECODED_SIZE: usize = 128 * 1024 * 1024;
 
 /// Fixed capacity required by the libretro serialization API.
@@ -24,12 +28,20 @@ pub fn encode<T: Serialize>(value: &T, content_crc32: u32, output: &mut [u8]) ->
         .serialize(value)
         .context("failed to encode save-state payload")?;
     if decoded.len() > MAX_DECODED_SIZE {
-        bail!("save-state payload exceeds the decoded size limit");
+        bail!(
+            "save-state decoded payload is {} bytes; limit is {} bytes",
+            decoded.len(),
+            MAX_DECODED_SIZE
+        );
     }
 
     let payload = lz4_flex::compress(&decoded);
     if payload.len() > SERIALIZED_SIZE - HEADER_SIZE {
-        bail!("save state exceeds the fixed serialization capacity");
+        bail!(
+            "save-state compressed payload is {} bytes; fixed capacity is {} bytes",
+            payload.len(),
+            SERIALIZED_SIZE - HEADER_SIZE
+        );
     }
 
     output.fill(0);
@@ -62,7 +74,11 @@ pub fn decode<T: DeserializeOwned>(input: &[u8], expected_content_crc32: u32) ->
     let payload_len = read_u32(input, 16) as usize;
     let decoded_len = read_u32(input, 20) as usize;
     if decoded_len > MAX_DECODED_SIZE {
-        bail!("save-state decoded size exceeds the limit");
+        bail!(
+            "save-state declares {} decoded bytes; limit is {} bytes",
+            decoded_len,
+            MAX_DECODED_SIZE
+        );
     }
     let payload_end = HEADER_SIZE
         .checked_add(payload_len)
