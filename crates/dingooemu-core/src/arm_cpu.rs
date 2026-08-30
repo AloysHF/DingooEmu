@@ -432,11 +432,301 @@ impl ArmCpu {
         Ok(())
     }
 
-    fn execute_thumb<B: ArmBus>(&mut self, instruction: u16, pc: u32, _bus: &mut B) -> Result<()> {
-        Err(SimulatorError::InvalidInstruction {
-            pc,
-            instr: u32::from(instruction),
-        })
+    fn execute_thumb<B: ArmBus>(&mut self, instruction: u16, pc: u32, bus: &mut B) -> Result<()> {
+        let op = u32::from(instruction);
+        let rd = (op & 7) as usize;
+        let rs = ((op >> 3) & 7) as usize;
+
+        if op & 0xe000 == 0 {
+            if op & 0x1800 != 0x1800 {
+                let (result, carry) = shift(
+                    self.r[rs],
+                    (op >> 11) & 3,
+                    (op >> 6) & 0x1f,
+                    self.cpsr & C != 0,
+                    true,
+                );
+                self.r[rd] = result;
+                self.set_nz(result);
+                self.set_flag(C, carry);
+            } else {
+                let right = if op & (1 << 10) != 0 {
+                    (op >> 6) & 7
+                } else {
+                    self.r[((op >> 6) & 7) as usize]
+                };
+                let (result, carry, overflow) = if op & (1 << 9) != 0 {
+                    sub_with_carry(self.r[rs], right, 1)
+                } else {
+                    add_with_carry(self.r[rs], right, 0)
+                };
+                self.r[rd] = result;
+                self.set_nz(result);
+                self.set_flag(C, carry);
+                self.set_flag(V, overflow);
+            }
+            return Ok(());
+        }
+
+        if op & 0xe000 == 0x2000 {
+            let opcode = (op >> 11) & 3;
+            let register = ((op >> 8) & 7) as usize;
+            let immediate = op & 0xff;
+            let (result, carry, overflow) = match opcode {
+                0 => (immediate, self.cpsr & C != 0, false),
+                1 | 3 => sub_with_carry(self.r[register], immediate, 1),
+                2 => add_with_carry(self.r[register], immediate, 0),
+                _ => unreachable!(),
+            };
+            if opcode != 1 {
+                self.r[register] = result;
+            }
+            self.set_nz(result);
+            if opcode != 0 {
+                self.set_flag(C, carry);
+                self.set_flag(V, overflow);
+            }
+            return Ok(());
+        }
+
+        if op & 0xfc00 == 0x4000 {
+            let opcode = (op >> 6) & 0xf;
+            let left = self.r[rd];
+            let right = self.r[rs];
+            let carry_in = u32::from(self.cpsr & C != 0);
+            let (result, carry, overflow) = match opcode {
+                0 | 8 => (left & right, self.cpsr & C != 0, false),
+                1 => (left ^ right, self.cpsr & C != 0, false),
+                2..=4 | 7 => {
+                    let kind = if opcode == 7 { 3 } else { opcode - 2 };
+                    let (value, carry) = shift(left, kind, right & 0xff, self.cpsr & C != 0, false);
+                    (value, carry, false)
+                }
+                5 => add_with_carry(left, right, carry_in),
+                6 => sub_with_carry(left, right, carry_in),
+                9 => sub_with_carry(0, right, 1),
+                10 => sub_with_carry(left, right, 1),
+                11 => add_with_carry(left, right, 0),
+                12 => (left | right, self.cpsr & C != 0, false),
+                13 => (left.wrapping_mul(right), self.cpsr & C != 0, false),
+                14 => (left & !right, self.cpsr & C != 0, false),
+                15 => (!right, self.cpsr & C != 0, false),
+                _ => return Err(SimulatorError::InvalidInstruction { pc, instr: op }),
+            };
+            if !matches!(opcode, 8 | 10 | 11) {
+                self.r[rd] = result;
+            }
+            self.set_nz(result);
+            if matches!(opcode, 2..=7 | 9..=11) {
+                self.set_flag(C, carry);
+            }
+            if matches!(opcode, 5 | 6 | 9..=11) {
+                self.set_flag(V, overflow);
+            }
+            return Ok(());
+        }
+
+        if op & 0xfc00 == 0x4400 {
+            let opcode = (op >> 8) & 3;
+            let destination = ((op & 7) | ((op >> 4) & 8)) as usize;
+            let source = ((op >> 3) & 0xf) as usize;
+            let right = self.read_reg(source, pc, false);
+            match opcode {
+                0 => self.write_reg(
+                    destination,
+                    self.read_reg(destination, pc, false).wrapping_add(right),
+                ),
+                1 => {
+                    let (result, carry, overflow) =
+                        sub_with_carry(self.read_reg(destination, pc, false), right, 1);
+                    self.set_nz(result);
+                    self.set_flag(C, carry);
+                    self.set_flag(V, overflow);
+                }
+                2 => self.write_reg(destination, right),
+                3 => {
+                    if op & (1 << 7) != 0 {
+                        self.r[14] = pc.wrapping_add(2) | 1;
+                    }
+                    self.branch_exchange(right)?;
+                }
+                _ => unreachable!(),
+            }
+            return Ok(());
+        }
+
+        if op & 0xf800 == 0x4800 {
+            let register = ((op >> 8) & 7) as usize;
+            let address = (pc.wrapping_add(4) & !3).wrapping_add((op & 0xff) << 2);
+            self.r[register] = bus.read32(address)?;
+            return Ok(());
+        }
+
+        if op & 0xf000 == 0x5000 {
+            let opcode = (op >> 9) & 7;
+            let address = self.r[rs].wrapping_add(self.r[((op >> 6) & 7) as usize]);
+            match opcode {
+                0 => bus.write32(address, self.r[rd])?,
+                1 => bus.write16(address, self.r[rd] as u16)?,
+                2 => bus.write8(address, self.r[rd] as u8)?,
+                3 => self.r[rd] = bus.read8(address)? as i8 as i32 as u32,
+                4 => self.r[rd] = bus.read32(address & !3)?.rotate_right((address & 3) * 8),
+                5 => self.r[rd] = u32::from(bus.read16(address)?),
+                6 => self.r[rd] = u32::from(bus.read8(address)?),
+                7 => self.r[rd] = bus.read16(address)? as i16 as i32 as u32,
+                _ => unreachable!(),
+            }
+            return Ok(());
+        }
+
+        if op & 0xe000 == 0x6000 {
+            let byte = op & (1 << 12) != 0;
+            let load = op & (1 << 11) != 0;
+            let address = self.r[rs].wrapping_add(if byte {
+                (op >> 6) & 0x1f
+            } else {
+                ((op >> 6) & 0x1f) << 2
+            });
+            match (load, byte) {
+                (false, false) => bus.write32(address, self.r[rd])?,
+                (false, true) => bus.write8(address, self.r[rd] as u8)?,
+                (true, false) => self.r[rd] = bus.read32(address)?,
+                (true, true) => self.r[rd] = u32::from(bus.read8(address)?),
+            }
+            return Ok(());
+        }
+
+        if op & 0xf000 == 0x8000 {
+            let address = self.r[rs].wrapping_add(((op >> 6) & 0x1f) << 1);
+            if op & (1 << 11) != 0 {
+                self.r[rd] = u32::from(bus.read16(address)?);
+            } else {
+                bus.write16(address, self.r[rd] as u16)?;
+            }
+            return Ok(());
+        }
+
+        if op & 0xf000 == 0x9000 {
+            let register = ((op >> 8) & 7) as usize;
+            let address = self.r[13].wrapping_add((op & 0xff) << 2);
+            if op & (1 << 11) != 0 {
+                self.r[register] = bus.read32(address)?;
+            } else {
+                bus.write32(address, self.r[register])?;
+            }
+            return Ok(());
+        }
+
+        if op & 0xf000 == 0xa000 {
+            let register = ((op >> 8) & 7) as usize;
+            let base = if op & (1 << 11) != 0 {
+                self.r[13]
+            } else {
+                pc.wrapping_add(4) & !3
+            };
+            self.r[register] = base.wrapping_add((op & 0xff) << 2);
+            return Ok(());
+        }
+
+        if op & 0xff00 == 0xb000 {
+            let amount = (op & 0x7f) << 2;
+            self.r[13] = if op & 0x80 != 0 {
+                self.r[13].wrapping_sub(amount)
+            } else {
+                self.r[13].wrapping_add(amount)
+            };
+            return Ok(());
+        }
+
+        if op & 0xf600 == 0xb400 {
+            let pop = op & (1 << 11) != 0;
+            let list = op & 0xff;
+            if pop {
+                for reg in 0..8 {
+                    if list & (1 << reg) != 0 {
+                        self.r[reg] = bus.read32(self.r[13])?;
+                        self.r[13] = self.r[13].wrapping_add(4);
+                    }
+                }
+                if op & (1 << 8) != 0 {
+                    let target = bus.read32(self.r[13])?;
+                    self.r[13] = self.r[13].wrapping_add(4);
+                    self.branch_exchange(target)?;
+                }
+            } else {
+                if op & (1 << 8) != 0 {
+                    self.r[13] = self.r[13].wrapping_sub(4);
+                    bus.write32(self.r[13], self.r[14])?;
+                }
+                for reg in (0..8).rev() {
+                    if list & (1 << reg) != 0 {
+                        self.r[13] = self.r[13].wrapping_sub(4);
+                        bus.write32(self.r[13], self.r[reg])?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        if op & 0xf000 == 0xc000 {
+            let load = op & (1 << 11) != 0;
+            let base = ((op >> 8) & 7) as usize;
+            let list = op & 0xff;
+            if list == 0 {
+                return Err(SimulatorError::InvalidInstruction { pc, instr: op });
+            }
+            let mut address = self.r[base];
+            for reg in 0..8 {
+                if list & (1 << reg) != 0 {
+                    if load {
+                        self.r[reg] = bus.read32(address)?;
+                    } else {
+                        bus.write32(address, self.r[reg])?;
+                    }
+                    address = address.wrapping_add(4);
+                }
+            }
+            if !(load && list & (1 << base) != 0) {
+                self.r[base] = address;
+            }
+            return Ok(());
+        }
+
+        if op & 0xf000 == 0xd000 {
+            let condition = (op >> 8) & 0xf;
+            if condition == 0xf {
+                return bus.svc(self, op & 0xff);
+            }
+            if condition == 0xe {
+                return Err(SimulatorError::InvalidInstruction { pc, instr: op });
+            }
+            if self.condition_passed(condition) {
+                self.r[15] = pc
+                    .wrapping_add(4)
+                    .wrapping_add(((op as u8 as i8 as i32) << 1) as u32);
+            }
+            return Ok(());
+        }
+
+        match op >> 11 {
+            0b11100 => {
+                self.r[15] = pc
+                    .wrapping_add(4)
+                    .wrapping_add((((op & 0x7ff) << 21) as i32 >> 20) as u32)
+            }
+            0b11110 => {
+                self.r[14] = pc
+                    .wrapping_add(4)
+                    .wrapping_add((((op & 0x7ff) << 21) as i32 >> 9) as u32)
+            }
+            0b11111 => {
+                let target = self.r[14].wrapping_add((op & 0x7ff) << 1);
+                self.r[14] = pc.wrapping_add(2) | 1;
+                self.r[15] = target & !1;
+            }
+            _ => return Err(SimulatorError::InvalidInstruction { pc, instr: op }),
+        }
+        Ok(())
     }
 
     fn branch_exchange(&mut self, target: u32) -> Result<()> {
@@ -570,6 +860,14 @@ mod tests {
             let mut data = vec![0; 0x1000];
             for (index, instruction) in instructions.iter().enumerate() {
                 data[index * 4..index * 4 + 4].copy_from_slice(&instruction.to_le_bytes());
+            }
+            Self { data, svc: None }
+        }
+
+        fn new_thumb(instructions: &[u16]) -> Self {
+            let mut data = vec![0; 0x1000];
+            for (index, instruction) in instructions.iter().enumerate() {
+                data[index * 2..index * 2 + 2].copy_from_slice(&instruction.to_le_bytes());
             }
             Self { data, svc: None }
         }
@@ -737,5 +1035,47 @@ mod tests {
         let mut cpu = running_cpu();
         assert_eq!(cpu.run(&mut bus, 25).unwrap(), 25);
         assert_eq!(cpu.r[15], 0);
+    }
+
+    #[test]
+    fn thumb_arithmetic_and_conditional_branch_set_flags() {
+        let mut bus = TestBus::new_thumb(&[0x2005, 0x3003, 0x2808, 0xd000, 0x2101, 0x2102]);
+        let mut cpu = ArmCpu::new(1, 0xf00, 0xffff_ffff);
+        cpu.start();
+        cpu.run(&mut bus, 3).unwrap();
+        assert_eq!(cpu.r[0], 8);
+        assert_ne!(cpu.cpsr & Z, 0);
+        cpu.run(&mut bus, 2).unwrap();
+        assert_eq!(cpu.r[1], 2);
+    }
+
+    #[test]
+    fn thumb_load_store_and_stack_round_trip() {
+        let mut bus = TestBus::new_thumb(&[0x6008, 0x680a, 0xb503, 0xbd0c]);
+        let mut cpu = ArmCpu::new(1, 0xf00, 0x21);
+        cpu.r[0] = 0x1234_5678;
+        cpu.r[1] = 0x100;
+        cpu.start();
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[2], 0x1234_5678);
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[2], 0x1234_5678);
+        assert_eq!(cpu.r[3], 0x100);
+        assert_eq!(cpu.r[15], 0x20);
+        assert_eq!(cpu.r[13], 0xf00);
+    }
+
+    #[test]
+    fn thumb_long_branch_and_svc_preserve_return_state() {
+        let mut bus = TestBus::new_thumb(&[0xf000, 0xf802, 0x2000, 0x2000, 0xdf42]);
+        let mut cpu = ArmCpu::new(1, 0xf00, 0);
+        cpu.start();
+        cpu.run(&mut bus, 3).unwrap();
+        assert_eq!(cpu.r[14], 5);
+        assert_eq!(cpu.r[15], 10);
+        assert_eq!(bus.svc, Some(0x42));
+        assert_eq!(cpu.r[0], 0x55aa);
     }
 }
