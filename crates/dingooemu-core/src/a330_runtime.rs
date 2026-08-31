@@ -4,7 +4,7 @@ use crate::a330_memory::{
 };
 use crate::app_loader::PackageImage;
 use crate::arm_cpu::{ArmBus, ArmCpu};
-use crate::audio::Audio;
+use crate::audio::{Audio, AudioConfig};
 use crate::content::{ArmProfile, ContentFormat};
 use crate::emulator::{UnknownHleCall, UnknownHlePolicy};
 use crate::error::{Result, SimulatorError};
@@ -201,6 +201,7 @@ impl A330Runtime {
                     semaphores: &mut self.semaphores,
                     active_framebuffer: &mut self.active_framebuffer,
                     framebuffer_bits: &mut self.framebuffer_bits,
+                    audio: &mut self.audio,
                 };
                 let pc = self.cpu.r[15];
                 if let Err(error) = self.cpu.step(&mut bus) {
@@ -243,6 +244,7 @@ impl A330Runtime {
         if let Some(address) = frame_address {
             self.present_frame(address)?;
         }
+        self.audio.advance_frame();
         Ok(())
     }
 
@@ -306,6 +308,7 @@ struct RuntimeBus<'a> {
     semaphores: &'a mut BTreeMap<u32, u32>,
     active_framebuffer: &'a mut u32,
     framebuffer_bits: &'a mut u32,
+    audio: &'a mut Audio,
 }
 
 impl RuntimeBus<'_> {
@@ -407,6 +410,48 @@ impl RuntimeBus<'_> {
                 let left = self.read_c_string(cpu.r[0], 4096)?;
                 let right = self.read_c_string(cpu.r[1], 4096)?;
                 cpu.r[0] = compare_ascii_case_insensitive(&left, &right) as u32;
+            }
+            "_waveout_open" | "waveout_open" => {
+                let address = cpu.r[0];
+                let config = AudioConfig::new(
+                    self.memory.read32(address)?,
+                    self.memory.read16(address + 4)?,
+                    self.memory.read8(address + 6)?,
+                    self.memory.read8(address + 7)?,
+                );
+                cpu.r[0] = u32::from(config.is_some_and(|config| self.audio.open(config)));
+            }
+            "waveout_write" => {
+                let buffer = cpu.r[1];
+                let count = cpu.r[2];
+                if count == 0 || count > 4 * 1024 * 1024 {
+                    cpu.r[0] = 0;
+                } else if !self.audio.can_write() && self.profile == ArmProfile::Retail {
+                    cpu.r[15] = cpu.r[15].wrapping_sub(4);
+                    self.yield_requested = true;
+                } else {
+                    let data = self.memory.read_bytes(buffer, count as usize)?;
+                    cpu.r[0] = u32::from(self.audio.write(data));
+                }
+            }
+            "waveout_try_write" => {
+                let count = cpu.r[2];
+                cpu.r[0] = if count == 0 || count > 4 * 1024 * 1024 || !self.audio.can_write() {
+                    0
+                } else {
+                    let data = self.memory.read_bytes(cpu.r[1], count as usize)?;
+                    u32::from(self.audio.write(data))
+                };
+            }
+            "waveout_can_write" | "waveout_can_write_nonblocking" | "pcm_can_write" => {
+                cpu.r[0] = u32::from(self.audio.can_write())
+            }
+            "waveout_close" | "waveout_close_at_once" => cpu.r[0] = u32::from(self.audio.close()),
+            "_waveout_set_volume" | "waveout_set_volume" => {
+                cpu.r[0] = u32::from(self.audio.set_volume(cpu.r[0]))
+            }
+            "HP_Mute_sw" | "waveout_mute" => {
+                cpu.r[0] = u32::from(self.audio.set_muted(cpu.r[0] != 0))
             }
             "vxGoHome" | "abort" | "av_end_thread" | "av_queue_abort" => self.stop_requested = true,
             "OSTaskCreate" => {
@@ -1000,5 +1045,22 @@ mod tests {
         runtime.start();
         runtime.tick().unwrap();
         assert_eq!(&runtime.video.framebuffer()[..2], &[0x00, 0xf8]);
+    }
+
+    #[test]
+    fn waveout_open_uses_the_guest_audio_configuration() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("waveout_open"), PathBuf::new()).unwrap();
+        #[cfg(feature = "standalone")]
+        runtime.audio.set_host_output_enabled(false);
+        runtime.memory.write32(STACK_BASE, 16_000).unwrap();
+        runtime.memory.write16(STACK_BASE + 4, 16).unwrap();
+        runtime.memory.write8(STACK_BASE + 6, 1).unwrap();
+        runtime.memory.write8(STACK_BASE + 7, 80).unwrap();
+        runtime.cpu.r[0] = STACK_BASE;
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[0], 1);
+        assert_eq!(runtime.audio.config(), AudioConfig::new(16_000, 16, 1, 80));
     }
 }
