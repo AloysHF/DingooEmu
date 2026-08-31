@@ -22,6 +22,7 @@ const LEGACY_GRAPHICS_SURFACE: u32 = 0x0930_201c;
 struct GuestFile {
     data: Vec<u8>,
     position: usize,
+    data_address: u32,
 }
 
 pub(crate) struct A330Runtime {
@@ -182,6 +183,7 @@ impl A330Runtime {
             let (stop_requested, yield_requested, finish_current) = {
                 let mut bus = RuntimeBus {
                     memory: &mut self.memory,
+                    package: &self.package,
                     imports: &self.package.imports,
                     profile,
                     unknown_hle_calls: &mut self.unknown_hle_calls,
@@ -289,6 +291,7 @@ impl A330Runtime {
 
 struct RuntimeBus<'a> {
     memory: &'a mut A330Memory,
+    package: &'a PackageImage,
     imports: &'a [crate::app_loader::SymbolEntry],
     profile: ArmProfile,
     unknown_hle_calls: &'a mut BTreeMap<String, UnknownHleCall>,
@@ -405,6 +408,20 @@ impl RuntimeBus<'_> {
                     .map_or(1, |file| u32::from(file.position >= file.data.len()));
             }
             "ferror" | "fsys_ferror" => cpu.r[0] = u32::from(!self.files.contains_key(&cpu.r[0])),
+            "dl_res_open" => cpu.r[0] = self.open_resource([cpu.r[2], cpu.r[1], cpu.r[0]]),
+            "dl_res_get_size" => {
+                cpu.r[0] = self
+                    .files
+                    .get(&cpu.r[0])
+                    .map_or(0, |file| file.data.len() as u32)
+            }
+            "dl_res_get_data" => {
+                cpu.r[0] = self.read_resource(cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3])?;
+            }
+            "dl_res_close" => {
+                self.files.remove(&cpu.r[0]);
+                cpu.r[0] = 0;
+            }
             "printf" | "fprintf" => cpu.r[0] = 0,
             "stricmp" | "strcasecmp" => {
                 let left = self.read_c_string(cpu.r[0], 4096)?;
@@ -630,13 +647,108 @@ impl RuntimeBus<'_> {
         let Some(path) = resolve_guest_path(self.content_directory, name) else {
             return 0;
         };
-        let Ok(data) = std::fs::read(path) else {
-            return 0;
+        let data = match std::fs::read(path) {
+            Ok(data) => data,
+            Err(_) => {
+                let Some(resource) = self.package.find_resource(name) else {
+                    return 0;
+                };
+                self.package.get_resource_data(resource)
+            }
         };
         let handle = *self.next_file_handle;
         *self.next_file_handle = handle.wrapping_add(1).max(1);
-        self.files.insert(handle, GuestFile { data, position: 0 });
+        self.files.insert(
+            handle,
+            GuestFile {
+                data,
+                position: 0,
+                data_address: 0,
+            },
+        );
         handle
+    }
+
+    fn open_resource(&mut self, candidates: [u32; 3]) -> u32 {
+        let found = candidates.into_iter().find_map(|address| {
+            if address < 0x1_0000 {
+                return None;
+            }
+            let name = self.read_c_string(address, 1024).ok()?;
+            let resource = self.package.find_resource(&name)?;
+            Some((name, self.package.get_resource_data(resource)))
+        });
+        let Some((name, data)) = found else {
+            return 0;
+        };
+        let handle = self.allocate(16);
+        if handle == 0 {
+            return 0;
+        }
+        log::trace!("ARM resource open {name:?} -> {handle:#010x}");
+        self.files.insert(
+            handle,
+            GuestFile {
+                data,
+                position: 0,
+                data_address: 0,
+            },
+        );
+        handle
+    }
+
+    fn read_resource(
+        &mut self,
+        handle: u32,
+        destination: u32,
+        buffer_len: u32,
+        read_len: u32,
+    ) -> Result<u32> {
+        if destination == 0 {
+            let existing = self.files.get(&handle).map_or(0, |file| file.data_address);
+            if existing != 0 {
+                return Ok(existing);
+            }
+            let Some(size) = self.files.get(&handle).map(|file| file.data.len() as u32) else {
+                return Ok(0);
+            };
+            let address = self.allocate(size);
+            if address == 0 {
+                return Ok(0);
+            }
+            let data = self.files[&handle].data.clone();
+            self.memory.write_bytes(address, &data)?;
+            self.files.get_mut(&handle).unwrap().data_address = address;
+            return Ok(address);
+        }
+
+        let data = {
+            let Some(file) = self.files.get_mut(&handle) else {
+                return Ok(0);
+            };
+            let available = file.data.len().saturating_sub(file.position);
+            let requested = if read_len != 0 && buffer_len > 1 {
+                (read_len as usize).saturating_mul(buffer_len as usize)
+            } else if read_len != 0 {
+                read_len as usize
+            } else {
+                buffer_len as usize
+            };
+            let length = if requested == 0 || requested > available {
+                available
+            } else {
+                requested
+            };
+            let data = file.data[file.position..file.position + length].to_vec();
+            file.position += length;
+            data
+        };
+        self.memory.write_bytes(destination, &data)?;
+        Ok(if read_len != 0 {
+            (data.len() / read_len as usize) as u32
+        } else {
+            data.len() as u32
+        })
     }
 
     fn read_file(&mut self, destination: u32, size: u32, count: u32, handle: u32) -> Result<u32> {
@@ -814,7 +926,7 @@ impl ArmBus for RuntimeBus<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_loader::{ChunkHeader, RawdHeader, SymbolEntry};
+    use crate::app_loader::{ChunkHeader, RawdHeader, ResourceEntry, ResourceKind, SymbolEntry};
 
     fn svc_package(name: &str) -> PackageImage {
         let origin = ArmProfile::RETAIL_ORIGIN;
@@ -1077,5 +1189,30 @@ mod tests {
         runtime.tick().unwrap();
         assert_eq!(runtime.cpu.r[0], 1);
         assert_eq!(runtime.audio.config(), AudioConfig::new(16_000, 16, 1, 80));
+    }
+
+    #[test]
+    fn embedded_resources_are_found_and_decoded() {
+        let mut package = svc_package("dl_res_open");
+        let offset = package.data.len() as u32;
+        package.data.extend_from_slice(&[0x41, 0x42, 0x43, 0x44]);
+        package.resources.push(ResourceEntry {
+            kind: ResourceKind::Erpt,
+            name: "data/level.bin".into(),
+            offset,
+            size: 4,
+            xor_key: 0x40,
+        });
+        let mut runtime = A330Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE, b"data\\level.bin\0")
+            .unwrap();
+        runtime.cpu.r[2] = STACK_BASE;
+        runtime.start();
+        runtime.tick().unwrap();
+        let handle = runtime.cpu.r[0];
+        assert_ne!(handle, 0);
+        assert_eq!(runtime.files[&handle].data, [1, 2, 3, 4]);
     }
 }
