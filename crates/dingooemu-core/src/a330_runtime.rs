@@ -44,6 +44,7 @@ pub(crate) struct A330Runtime {
     content_directory: PathBuf,
     files: BTreeMap<u32, GuestFile>,
     next_file_handle: u32,
+    semaphores: BTreeMap<u32, u32>,
 }
 
 impl A330Runtime {
@@ -93,6 +94,7 @@ impl A330Runtime {
             content_directory,
             files: BTreeMap::new(),
             next_file_handle: 1,
+            semaphores: BTreeMap::new(),
         })
     }
 
@@ -192,6 +194,7 @@ impl A330Runtime {
                     content_directory: &self.content_directory,
                     files: &mut self.files,
                     next_file_handle: &mut self.next_file_handle,
+                    semaphores: &mut self.semaphores,
                 };
                 let pc = self.cpu.r[15];
                 if let Err(error) = self.cpu.step(&mut bus) {
@@ -276,6 +279,7 @@ struct RuntimeBus<'a> {
     content_directory: &'a std::path::Path,
     files: &'a mut BTreeMap<u32, GuestFile>,
     next_file_handle: &'a mut u32,
+    semaphores: &'a mut BTreeMap<u32, u32>,
 }
 
 impl RuntimeBus<'_> {
@@ -409,6 +413,56 @@ impl RuntimeBus<'_> {
                 } else {
                     cpu.r[0] = 41;
                 }
+            }
+            "OSSemCreate" => {
+                let initial = cpu.r[0];
+                let handle = self.allocate(16);
+                if handle != 0 {
+                    self.semaphores.insert(handle, initial);
+                }
+                cpu.r[0] = handle;
+            }
+            "OSSemPend" => {
+                let handle = cpu.r[0];
+                match self.semaphores.get_mut(&handle) {
+                    Some(count) if *count > 0 => {
+                        *count -= 1;
+                        if cpu.r[2] != 0 {
+                            self.memory.write8(cpu.r[2], 0)?;
+                        }
+                        cpu.r[0] = 0;
+                    }
+                    Some(_) if self.profile == ArmProfile::Retail => {
+                        cpu.r[15] = cpu.r[15].wrapping_sub(4);
+                        self.yield_requested = true;
+                    }
+                    Some(_) => {
+                        self.yield_requested = true;
+                        cpu.r[0] = 0;
+                    }
+                    None => {
+                        if cpu.r[2] != 0 {
+                            self.memory.write8(cpu.r[2], 4)?;
+                        }
+                        cpu.r[0] = 0;
+                    }
+                }
+            }
+            "OSSemPost" => {
+                cpu.r[0] = match self.semaphores.get_mut(&cpu.r[0]) {
+                    Some(count) => {
+                        *count = count.saturating_add(1);
+                        0
+                    }
+                    None => 41,
+                };
+            }
+            "OSSemDel" => {
+                cpu.r[0] = if self.semaphores.remove(&cpu.r[0]).is_some() {
+                    0
+                } else {
+                    41
+                };
             }
             "OSTimeDly" | "delay" | "delay_ms" | "OSTimeDlyHMSM" => {
                 cpu.r[0] = 0;
@@ -825,5 +879,42 @@ mod tests {
         );
         assert!(resolve_guest_path(root, "..\\secret.bin").is_none());
         assert!(resolve_guest_path(root, "C:\\..\\secret.bin").is_none());
+    }
+
+    #[test]
+    fn semaphore_waits_retry_after_another_task_posts() {
+        let origin = ArmProfile::RETAIL_ORIGIN;
+        let mut runtime =
+            A330Runtime::from_package(svc_package("OSSemCreate"), PathBuf::new()).unwrap();
+        runtime.cpu.r[0] = 1;
+        runtime.start();
+        runtime.tick().unwrap();
+        let handle = runtime.cpu.r[0];
+        assert_eq!(runtime.semaphores[&handle], 1);
+
+        runtime.package.imports[0].name = "OSSemPend".into();
+        runtime.cpu = ArmCpu::new(origin, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu.r[0] = handle;
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.boot_complete = true;
+        runtime.tick().unwrap();
+        assert_eq!(runtime.semaphores[&handle], 0);
+
+        runtime.cpu = ArmCpu::new(origin, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu.r[0] = handle;
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[15], origin);
+        assert!(runtime.is_running());
+
+        runtime.package.imports[0].name = "OSSemPost".into();
+        runtime.cpu = ArmCpu::new(origin, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu.r[0] = handle;
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.tick().unwrap();
+        assert_eq!(runtime.semaphores[&handle], 1);
     }
 }
