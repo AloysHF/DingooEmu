@@ -10,12 +10,19 @@ use crate::emulator::{UnknownHleCall, UnknownHlePolicy};
 use crate::error::{Result, SimulatorError};
 use crate::input::Input;
 use crate::video::{Video, FRAMEBUFFER_SIZE, SCREEN_HEIGHT, SCREEN_WIDTH};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 const INSTRUCTIONS_PER_SLICE: u64 = 1_000_000;
 const APP_PATH_ADDRESS: u32 = STACK_BASE + 0x200;
 const LOCALE_ADDRESS: u32 = STACK_BASE + 0x600;
+const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
+const LEGACY_GRAPHICS_SURFACE: u32 = 0x0930_201c;
+
+struct GuestFile {
+    data: Vec<u8>,
+    position: usize,
+}
 
 pub(crate) struct A330Runtime {
     package: PackageImage,
@@ -32,6 +39,11 @@ pub(crate) struct A330Runtime {
     boot_complete: bool,
     app_main: Option<u32>,
     dynamic_imports: Vec<String>,
+    tasks: VecDeque<(ArmCpu, u32)>,
+    current_priority: u32,
+    content_directory: PathBuf,
+    files: BTreeMap<u32, GuestFile>,
+    next_file_handle: u32,
 }
 
 impl A330Runtime {
@@ -60,6 +72,7 @@ impl A330Runtime {
             .iter()
             .find(|symbol| symbol.name == "AppMain")
             .map(|symbol| symbol.address);
+        let content_directory = _path.parent().map(PathBuf::from).unwrap_or_default();
         Ok(Self {
             package,
             cpu,
@@ -75,6 +88,11 @@ impl A330Runtime {
             boot_complete: false,
             app_main,
             dynamic_imports: Vec::new(),
+            tasks: VecDeque::new(),
+            current_priority: 0,
+            content_directory,
+            files: BTreeMap::new(),
+            next_file_handle: 1,
         })
     }
 
@@ -89,9 +107,11 @@ impl A330Runtime {
     pub(crate) fn reset(&mut self) -> Result<()> {
         let policy = self.unknown_hle_policy;
         let allowlist = self.unknown_hle_allowlist.clone();
+        let content_directory = self.content_directory.clone();
         let mut replacement = Self::from_package(self.package.clone(), PathBuf::new())?;
         replacement.unknown_hle_policy = policy;
         replacement.unknown_hle_allowlist = allowlist;
+        replacement.content_directory = content_directory;
         *self = replacement;
         Ok(())
     }
@@ -128,7 +148,6 @@ impl A330Runtime {
         if !self.is_running() {
             return Ok(());
         }
-        let imports = &self.package.imports;
         let profile = self.memory.profile();
         let mut frame_address = None;
         let initial = self.cpu.instruction_count;
@@ -143,36 +162,57 @@ impl A330Runtime {
                         self.cpu.instruction_count = count;
                         self.cpu.r[0] = APP_PATH_ADDRESS;
                         self.cpu.start();
+                        self.current_priority = 0;
                         continue;
                     }
                 }
+                if !self.activate_next_task() {
+                    self.stop();
+                    break;
+                }
+                continue;
+            }
+            let (stop_requested, yield_requested, finish_current) = {
+                let mut bus = RuntimeBus {
+                    memory: &mut self.memory,
+                    imports: &self.package.imports,
+                    profile,
+                    unknown_hle_calls: &mut self.unknown_hle_calls,
+                    unknown_hle_policy: self.unknown_hle_policy,
+                    unknown_hle_allowlist: &self.unknown_hle_allowlist,
+                    next_heap: &mut self.next_heap,
+                    frame_address: &mut frame_address,
+                    stop_requested: false,
+                    dynamic_imports: &mut self.dynamic_imports,
+                    tasks: &mut self.tasks,
+                    current_priority: self.current_priority,
+                    yield_requested: false,
+                    finish_current: false,
+                    content_directory: &self.content_directory,
+                    files: &mut self.files,
+                    next_file_handle: &mut self.next_file_handle,
+                };
+                let pc = self.cpu.r[15];
+                if let Err(error) = self.cpu.step(&mut bus) {
+                    return match error {
+                        SimulatorError::MemoryError { .. } => Err(SimulatorError::CpuError {
+                            pc,
+                            message: format!("{:?} state: {error}", self.cpu.execution_state()),
+                        }),
+                        other => Err(other),
+                    };
+                }
+                (bus.stop_requested, bus.yield_requested, bus.finish_current)
+            };
+            if stop_requested {
                 self.stop();
                 break;
             }
-            let mut bus = RuntimeBus {
-                memory: &mut self.memory,
-                imports,
-                profile,
-                unknown_hle_calls: &mut self.unknown_hle_calls,
-                unknown_hle_policy: self.unknown_hle_policy,
-                unknown_hle_allowlist: &self.unknown_hle_allowlist,
-                next_heap: &mut self.next_heap,
-                frame_address: &mut frame_address,
-                stop_requested: false,
-                dynamic_imports: &mut self.dynamic_imports,
-            };
-            let pc = self.cpu.r[15];
-            if let Err(error) = self.cpu.step(&mut bus) {
-                return match error {
-                    SimulatorError::MemoryError { .. } => Err(SimulatorError::CpuError {
-                        pc,
-                        message: format!("{:?} state: {error}", self.cpu.execution_state()),
-                    }),
-                    other => Err(other),
-                };
+            if finish_current {
+                self.cpu.r[15] = EXIT_ADDRESS;
             }
-            if bus.stop_requested {
-                self.stop();
+            if yield_requested {
+                self.rotate_task();
                 break;
             }
             if frame_address.is_some() {
@@ -185,6 +225,24 @@ impl A330Runtime {
             self.video.advance_frame();
         }
         Ok(())
+    }
+
+    fn activate_next_task(&mut self) -> bool {
+        if let Some((cpu, priority)) = self.tasks.pop_front() {
+            self.cpu = cpu;
+            self.current_priority = priority;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn rotate_task(&mut self) {
+        if let Some((next, priority)) = self.tasks.pop_front() {
+            let current = std::mem::replace(&mut self.cpu, next);
+            self.tasks.push_back((current, self.current_priority));
+            self.current_priority = priority;
+        }
     }
 }
 
@@ -199,6 +257,13 @@ struct RuntimeBus<'a> {
     frame_address: &'a mut Option<u32>,
     stop_requested: bool,
     dynamic_imports: &'a mut Vec<String>,
+    tasks: &'a mut VecDeque<(ArmCpu, u32)>,
+    current_priority: u32,
+    yield_requested: bool,
+    finish_current: bool,
+    content_directory: &'a std::path::Path,
+    files: &'a mut BTreeMap<u32, GuestFile>,
+    next_file_handle: &'a mut u32,
 }
 
 impl RuntimeBus<'_> {
@@ -250,7 +315,89 @@ impl RuntimeBus<'_> {
                     .to_vec();
                 self.memory.write_bytes(cpu.r[0], &data)?;
             }
+            "fopen" | "fsys_fopen" => {
+                let name = self.read_c_string(cpu.r[0], 1024)?;
+                let mode = self.read_c_string(cpu.r[1], 16)?;
+                cpu.r[0] = self.open_file(&name, &mode);
+            }
+            "fsys_fopenW" => {
+                let name = self.read_wide_string(cpu.r[0], 1024)?;
+                let mode = self.read_wide_string(cpu.r[1], 16)?;
+                cpu.r[0] = self.open_file(&name, &mode);
+            }
+            "fclose" | "fsys_fclose" | "fsys_fcloseW" => {
+                cpu.r[0] = if self.files.remove(&cpu.r[0]).is_some() {
+                    0
+                } else {
+                    u32::MAX
+                };
+            }
+            "fread" | "fsys_fread" => {
+                cpu.r[0] = self.read_file(cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3])?;
+            }
+            "fseek" | "fsys_fseek" => {
+                cpu.r[0] = self.seek_file(cpu.r[0], cpu.r[1] as i32, cpu.r[2]);
+            }
+            "ftell" | "fsys_ftell" => {
+                cpu.r[0] = self
+                    .files
+                    .get(&cpu.r[0])
+                    .map_or(u32::MAX, |file| file.position as u32);
+            }
+            "feof" | "fsys_feof" => {
+                cpu.r[0] = self
+                    .files
+                    .get(&cpu.r[0])
+                    .map_or(1, |file| u32::from(file.position >= file.data.len()));
+            }
+            "ferror" | "fsys_ferror" => cpu.r[0] = u32::from(!self.files.contains_key(&cpu.r[0])),
+            "printf" | "fprintf" => cpu.r[0] = 0,
+            "stricmp" | "strcasecmp" => {
+                let left = self.read_c_string(cpu.r[0], 4096)?;
+                let right = self.read_c_string(cpu.r[1], 4096)?;
+                cpu.r[0] = compare_ascii_case_insensitive(&left, &right) as u32;
+            }
             "vxGoHome" | "abort" | "av_end_thread" | "av_queue_abort" => self.stop_requested = true,
+            "OSTaskCreate" => {
+                if cpu.r[0] != 0 && cpu.r[2] != 0 {
+                    let mut task = ArmCpu::new(cpu.r[0], cpu.r[2], EXIT_ADDRESS);
+                    task.r[0] = cpu.r[1];
+                    task.start();
+                    self.tasks.push_back((task, cpu.r[3] & 0xff));
+                }
+                cpu.r[0] = 0;
+            }
+            "OSTaskQuery" => {
+                let priority = cpu.r[0] & 0xff;
+                cpu.r[0] = if priority == self.current_priority
+                    || self.tasks.iter().any(|(_, value)| *value == priority)
+                {
+                    0
+                } else {
+                    41
+                };
+            }
+            "OSTaskDel" => {
+                let priority = cpu.r[0] & 0xff;
+                if priority == self.current_priority {
+                    self.finish_current = true;
+                    cpu.r[0] = 0;
+                } else if let Some(index) =
+                    self.tasks.iter().position(|(_, value)| *value == priority)
+                {
+                    self.tasks.remove(index);
+                    cpu.r[0] = 0;
+                } else {
+                    cpu.r[0] = 41;
+                }
+            }
+            "OSTimeDly" | "delay" | "delay_ms" | "OSTimeDlyHMSM" => {
+                cpu.r[0] = 0;
+                self.yield_requested = true;
+            }
+            "OSTimeGet" => cpu.r[0] = (cpu.instruction_count / 150_000) as u32,
+            "GetTickCount" => cpu.r[0] = (cpu.instruction_count / 15_000) as u32,
+            "OSTimerGetTickTimeus" => cpu.r[0] = (cpu.instruction_count / 15) as u32,
             "TaskMediaFunStop" => cpu.r[0] = 0,
             "get_current_language" => cpu.r[0] = 0,
             "GetDLHandle" | "get_dl_handle" => cpu.r[0] = STACK_BASE + 0x100,
@@ -305,6 +452,59 @@ impl RuntimeBus<'_> {
         Ok(address)
     }
 
+    fn open_file(&mut self, name: &str, mode: &str) -> u32 {
+        if mode.as_bytes().first().copied().unwrap_or(b'r') != b'r' {
+            return 0;
+        }
+        let Some(path) = resolve_guest_path(self.content_directory, name) else {
+            return 0;
+        };
+        let Ok(data) = std::fs::read(path) else {
+            return 0;
+        };
+        let handle = *self.next_file_handle;
+        *self.next_file_handle = handle.wrapping_add(1).max(1);
+        self.files.insert(handle, GuestFile { data, position: 0 });
+        handle
+    }
+
+    fn read_file(&mut self, destination: u32, size: u32, count: u32, handle: u32) -> Result<u32> {
+        let requested = (size as usize).saturating_mul(count as usize);
+        if size == 0 || requested == 0 {
+            return Ok(0);
+        }
+        let data = {
+            let Some(file) = self.files.get_mut(&handle) else {
+                return Ok(0);
+            };
+            let available = file.data.len().saturating_sub(file.position);
+            let length = requested.min(available);
+            let data = file.data[file.position..file.position + length].to_vec();
+            file.position += length;
+            data
+        };
+        self.memory.write_bytes(destination, &data)?;
+        Ok(data.len() as u32 / size)
+    }
+
+    fn seek_file(&mut self, handle: u32, offset: i32, origin: u32) -> u32 {
+        let Some(file) = self.files.get_mut(&handle) else {
+            return u32::MAX;
+        };
+        let base = match origin {
+            0 => 0,
+            1 => file.position as i64,
+            2 => file.data.len() as i64,
+            _ => return u32::MAX,
+        };
+        let position = base.saturating_add(i64::from(offset));
+        if position < 0 || position > usize::MAX as i64 {
+            return u32::MAX;
+        }
+        file.position = position as usize;
+        0
+    }
+
     fn read_c_string(&self, address: u32, limit: usize) -> Result<String> {
         let mut bytes = Vec::new();
         for offset in 0..limit {
@@ -316,6 +516,22 @@ impl RuntimeBus<'_> {
         }
         Err(SimulatorError::SdkHleError(
             "unterminated ARM guest string".into(),
+        ))
+    }
+
+    fn read_wide_string(&self, address: u32, limit: usize) -> Result<String> {
+        let mut words = Vec::new();
+        for offset in 0..limit {
+            let value = self
+                .memory
+                .read16(address.wrapping_add((offset * 2) as u32))?;
+            if value == 0 {
+                return Ok(String::from_utf16_lossy(&words));
+            }
+            words.push(value);
+        }
+        Err(SimulatorError::SdkHleError(
+            "unterminated ARM guest wide string".into(),
         ))
     }
 
@@ -358,6 +574,43 @@ impl RuntimeBus<'_> {
     }
 }
 
+fn resolve_guest_path(root: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let normalized = name.replace('\\', "/");
+    let mut relative = PathBuf::new();
+    for (index, component) in normalized.split('/').enumerate() {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." || component.contains('\0') {
+            return None;
+        }
+        let component = if index == 0
+            && component.len() == 2
+            && component.as_bytes()[0].is_ascii_alphabetic()
+            && component.ends_with(':')
+        {
+            &component[..1]
+        } else {
+            component
+        };
+        if component.contains(':') {
+            return None;
+        }
+        relative.push(component);
+    }
+    (!relative.as_os_str().is_empty()).then(|| root.join(relative))
+}
+
+fn compare_ascii_case_insensitive(left: &str, right: &str) -> i32 {
+    let left = left.bytes().map(|value| value.to_ascii_lowercase());
+    let right = right.bytes().map(|value| value.to_ascii_lowercase());
+    match left.cmp(right) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
 impl ArmBus for RuntimeBus<'_> {
     fn read8(&mut self, address: u32) -> Result<u8> {
         self.memory.read8(address)
@@ -375,7 +628,11 @@ impl ArmBus for RuntimeBus<'_> {
         self.memory.write16(address, value)
     }
     fn write32(&mut self, address: u32, value: u32) -> Result<()> {
-        self.memory.write32(address, value)
+        self.memory.write32(address, value)?;
+        if address == LEGACY_GRAPHICS_SURFACE {
+            *self.frame_address = Some(LEGACY_FRAMEBUFFER_ADDRESS);
+        }
+        Ok(())
     }
     fn svc(&mut self, cpu: &mut ArmCpu, immediate: u32) -> Result<()> {
         self.dispatch(cpu, immediate)
@@ -478,5 +735,76 @@ mod tests {
             runtime.unknown_hle_calls().next().unwrap().name,
             "dynamic_call"
         );
+    }
+
+    #[test]
+    fn task_create_queues_and_runs_a_guest_task() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("OSTaskCreate"), PathBuf::new()).unwrap();
+        runtime.cpu.r[0] = ArmProfile::RETAIL_ORIGIN + 4;
+        runtime.cpu.r[1] = 0x1234;
+        runtime.cpu.r[2] = EXIT_ADDRESS - 0x100;
+        runtime.cpu.r[3] = 7;
+        runtime.start();
+        runtime.tick().unwrap();
+        assert!(!runtime.is_running());
+        assert!(runtime.tasks.is_empty());
+        assert_eq!(runtime.current_priority, 7);
+    }
+
+    #[test]
+    fn guest_files_are_opened_relative_to_the_package_and_read() {
+        let directory =
+            std::env::temp_dir().join(format!("dingooemu-arm-files-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("asset.bin"), [1, 2, 3, 4]).unwrap();
+
+        let mut runtime =
+            A330Runtime::from_package(svc_package("fsys_fopen"), directory.join("game.c2s"))
+                .unwrap();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE, b"asset.bin\0")
+            .unwrap();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE + 32, b"rb\0")
+            .unwrap();
+        runtime.cpu.r[0] = STACK_BASE;
+        runtime.cpu.r[1] = STACK_BASE + 32;
+        runtime.start();
+        runtime.tick().unwrap();
+        let handle = runtime.cpu.r[0];
+        assert_ne!(handle, 0);
+        assert_eq!(runtime.files[&handle].data, [1, 2, 3, 4]);
+
+        runtime.package.imports[0].name = "fsys_fread".into();
+        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu.r[0] = STACK_BASE + 64;
+        runtime.cpu.r[1] = 2;
+        runtime.cpu.r[2] = 2;
+        runtime.cpu.r[3] = handle;
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.boot_complete = true;
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[0], 2);
+        assert_eq!(
+            runtime.memory.read_bytes(STACK_BASE + 64, 4).unwrap(),
+            [1, 2, 3, 4]
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn guest_paths_cannot_escape_the_content_directory() {
+        let root = std::path::Path::new("content");
+        assert_eq!(
+            resolve_guest_path(root, ".\\data\\level.bin"),
+            Some(root.join("data").join("level.bin"))
+        );
+        assert!(resolve_guest_path(root, "..\\secret.bin").is_none());
+        assert!(resolve_guest_path(root, "C:\\..\\secret.bin").is_none());
     }
 }
