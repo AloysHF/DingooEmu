@@ -363,26 +363,27 @@ impl ArmCpu {
         let pre = instruction & (1 << 24) != 0;
         let address = if pre { adjusted } else { base };
         let kind = (instruction >> 5) & 3;
-        if instruction & (1 << 20) != 0 {
-            let value = match kind {
-                1 => u32::from(bus.read16(address)?),
-                2 => bus.read8(address)? as i8 as i32 as u32,
-                3 => bus.read16(address)? as i16 as i32 as u32,
-                _ => {
-                    return Err(SimulatorError::InvalidInstruction {
-                        pc,
-                        instr: instruction,
-                    })
+        let load = instruction & (1 << 20) != 0;
+        match (load, kind) {
+            (true, 1) => self.write_reg(rd, u32::from(bus.read16(address)?)),
+            (true, 2) => self.write_reg(rd, bus.read8(address)? as i8 as i32 as u32),
+            (true, 3) => self.write_reg(rd, bus.read16(address)? as i16 as i32 as u32),
+            (false, 1) => bus.write16(address, self.read_reg(rd, pc, true) as u16)?,
+            (false, 2 | 3) if rd & 1 == 0 && rd < 14 => {
+                if kind == 2 {
+                    self.r[rd] = bus.read32(address)?;
+                    self.r[rd + 1] = bus.read32(address.wrapping_add(4))?;
+                } else {
+                    bus.write32(address, self.r[rd])?;
+                    bus.write32(address.wrapping_add(4), self.r[rd + 1])?;
                 }
-            };
-            self.write_reg(rd, value);
-        } else if kind == 1 {
-            bus.write16(address, self.read_reg(rd, pc, true) as u16)?;
-        } else {
-            return Err(SimulatorError::InvalidInstruction {
-                pc,
-                instr: instruction,
-            });
+            }
+            _ => {
+                return Err(SimulatorError::InvalidInstruction {
+                    pc,
+                    instr: instruction,
+                })
+            }
         }
         if (!pre || instruction & (1 << 21) != 0) && rn != 15 {
             self.r[rn] = adjusted;
@@ -1013,6 +1014,24 @@ mod tests {
         assert_eq!(bus.read32(0x105).unwrap(), 0x1122_3344);
         assert_eq!(bus.read32(0x109).unwrap(), 0x44);
         assert_eq!(cpu.r[0], 0x10d);
+    }
+
+    #[test]
+    fn doubleword_transfers_move_adjacent_registers() {
+        let mut bus = TestBus::new(&[
+            0xe1cd_20f0, // STRD r2, r3, [sp]
+            0xe1cd_40d0, // LDRD r4, r5, [sp]
+        ]);
+        let mut cpu = running_cpu();
+        cpu.r[13] = 0x100;
+        cpu.r[2] = 0x1122_3344;
+        cpu.r[3] = 0x5566_7788;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.read32(0x100).unwrap(), 0x1122_3344);
+        assert_eq!(bus.read32(0x104).unwrap(), 0x5566_7788);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[4], 0x1122_3344);
+        assert_eq!(cpu.r[5], 0x5566_7788);
     }
 
     #[test]
