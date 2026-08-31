@@ -322,7 +322,11 @@ impl ArmCpu {
             } else {
                 bus.read32(address & !3)?.rotate_right((address & 3) * 8)
             };
-            self.write_reg(rd, value);
+            if rd == 15 {
+                self.branch_exchange(value)?;
+            } else {
+                self.r[rd] = value;
+            }
         } else {
             let value = self.read_reg(rd, pc, true);
             if byte {
@@ -419,7 +423,11 @@ impl ArmCpu {
             }
             if load {
                 let value = bus.read32(address)?;
-                self.write_reg(reg, value);
+                if reg == 15 {
+                    self.branch_exchange(value)?;
+                } else {
+                    self.r[reg] = value;
+                }
             } else {
                 bus.write32(address, self.read_reg(reg, pc, true))?;
             }
@@ -1005,6 +1013,28 @@ mod tests {
         assert_eq!(bus.read32(0x105).unwrap(), 0x1122_3344);
         assert_eq!(bus.read32(0x109).unwrap(), 0x44);
         assert_eq!(cpu.r[0], 0x10d);
+    }
+
+    #[test]
+    fn arm_loads_into_pc_support_thumb_interworking() {
+        let mut bus = TestBus::new(&[
+            0xe590_f000, // LDR pc, [r0]
+            0xe8b0_8000, // LDMIA r0!, {pc}
+        ]);
+        bus.write32(0x100, 0x201).unwrap();
+        let mut cpu = running_cpu();
+        cpu.r[0] = 0x100;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.execution_state(), ArmExecutionState::Thumb);
+        assert_eq!(cpu.r[15], 0x200);
+
+        cpu = running_cpu();
+        cpu.r[15] = 4;
+        cpu.r[0] = 0x100;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.execution_state(), ArmExecutionState::Thumb);
+        assert_eq!(cpu.r[15], 0x200);
+        assert_eq!(cpu.r[0], 0x104);
     }
 
     #[test]

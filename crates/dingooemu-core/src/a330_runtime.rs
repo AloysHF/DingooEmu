@@ -151,6 +151,7 @@ impl A330Runtime {
         let profile = self.memory.profile();
         let mut frame_address = None;
         let initial = self.cpu.instruction_count;
+        let mut previous_pc = self.cpu.r[15];
         while self.cpu.is_running() && self.cpu.instruction_count - initial < INSTRUCTIONS_PER_SLICE
         {
             if self.cpu.r[15] == EXIT_ADDRESS {
@@ -195,13 +196,24 @@ impl A330Runtime {
                 let pc = self.cpu.r[15];
                 if let Err(error) = self.cpu.step(&mut bus) {
                     return match error {
-                        SimulatorError::MemoryError { .. } => Err(SimulatorError::CpuError {
+                        SimulatorError::MemoryError { .. }
+                        | SimulatorError::InvalidInstruction { .. } => Err(SimulatorError::CpuError {
                             pc,
-                            message: format!("{:?} state: {error}", self.cpu.execution_state()),
+                            message: format!(
+                                "{:?} state: {error}; previous_pc={previous_pc:#010x}, r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, sp={:#010x}, lr={:#010x}",
+                                self.cpu.execution_state(),
+                                self.cpu.r[0],
+                                self.cpu.r[1],
+                                self.cpu.r[2],
+                                self.cpu.r[3],
+                                self.cpu.r[13],
+                                self.cpu.r[14]
+                            ),
                         }),
                         other => Err(other),
                     };
                 }
+                previous_pc = pc;
                 (bus.stop_requested, bus.yield_requested, bus.finish_current)
             };
             if stop_requested {
@@ -289,6 +301,13 @@ impl RuntimeBus<'_> {
             (symbol.name.clone(), symbol.address)
         };
         let name = symbol_name.as_str();
+        log::trace!(
+            "ARM HLE {name}(r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x})",
+            cpu.r[0],
+            cpu.r[1],
+            cpu.r[2],
+            cpu.r[3]
+        );
         match name {
             "lcd_get_frame" | "_lcd_get_frame" | "LCDGetFB" => cpu.r[0] = FRAMEBUFFER_BASE,
             "LCDGetWidth" | "get_lcd_width" => cpu.r[0] = SCREEN_WIDTH,
