@@ -346,10 +346,10 @@ impl RuntimeBus<'_> {
             "LCDGetWidth" | "get_lcd_width" => cpu.r[0] = SCREEN_WIDTH,
             "LCDGetHeight" | "get_lcd_height" => cpu.r[0] = SCREEN_HEIGHT,
             "lcd_set_frame" | "_lcd_set_frame" | "LCDFlushFB" | "LCDFlushFBZoom" => {
-                let address = if cpu.r[0] == 0 {
-                    *self.active_framebuffer
-                } else {
+                let address = if self.memory.read_bytes(cpu.r[0], FRAMEBUFFER_SIZE).is_ok() {
                     cpu.r[0]
+                } else {
+                    *self.active_framebuffer
                 };
                 *self.active_framebuffer = address;
                 *self.frame_address = Some(address);
@@ -1042,6 +1042,21 @@ mod tests {
             .write32(LEGACY_FRAMEBUFFER_ADDRESS, 0x00ff_0000)
             .unwrap();
         runtime.cpu.r[0] = LEGACY_FRAMEBUFFER_ADDRESS;
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(&runtime.video.framebuffer()[..2], &[0x00, 0xf8]);
+    }
+
+    #[test]
+    fn frame_submission_ignores_non_pointer_status_values() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("lcd_set_frame"), PathBuf::new()).unwrap();
+        runtime.active_framebuffer = LEGACY_FRAMEBUFFER_ADDRESS;
+        runtime
+            .memory
+            .write16(LEGACY_FRAMEBUFFER_ADDRESS, 0xf800)
+            .unwrap();
+        runtime.cpu.r[0] = 1;
         runtime.start();
         runtime.tick().unwrap();
         assert_eq!(&runtime.video.framebuffer()[..2], &[0x00, 0xf8]);
