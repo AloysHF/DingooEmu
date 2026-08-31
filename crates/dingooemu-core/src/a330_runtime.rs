@@ -8,7 +8,10 @@ use crate::audio::{Audio, AudioConfig};
 use crate::content::{ArmProfile, ContentFormat};
 use crate::emulator::{UnknownHleCall, UnknownHlePolicy};
 use crate::error::{Result, SimulatorError};
-use crate::input::Input;
+use crate::input::{
+    Input, BUTTON_A, BUTTON_B, BUTTON_DOWN, BUTTON_L, BUTTON_LEFT, BUTTON_R, BUTTON_RIGHT,
+    BUTTON_SELECT, BUTTON_START, BUTTON_UP, BUTTON_X, BUTTON_Y,
+};
 use crate::video::{Video, FRAMEBUFFER_SIZE, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -204,6 +207,7 @@ impl A330Runtime {
                     active_framebuffer: &mut self.active_framebuffer,
                     framebuffer_bits: &mut self.framebuffer_bits,
                     audio: &mut self.audio,
+                    input: &mut self.input,
                 };
                 let pc = self.cpu.r[15];
                 if let Err(error) = self.cpu.step(&mut bus) {
@@ -312,6 +316,7 @@ struct RuntimeBus<'a> {
     active_framebuffer: &'a mut u32,
     framebuffer_bits: &'a mut u32,
     audio: &'a mut Audio,
+    input: &'a mut Input,
 }
 
 impl RuntimeBus<'_> {
@@ -421,6 +426,24 @@ impl RuntimeBus<'_> {
             "dl_res_close" => {
                 self.files.remove(&cpu.r[0]);
                 cpu.r[0] = 0;
+            }
+            "_kbd_get_status" | "kbd_get_status" | "_rmt_get_status" | "rmt_get_status" => {
+                let address = cpu.r[0];
+                let (pressed, released, status) = self.input.take_status();
+                let pressed = map_a330_input(self.profile, pressed);
+                let released = map_a330_input(self.profile, released);
+                let status = map_a330_input(self.profile, status);
+                self.memory.write32(address, pressed)?;
+                self.memory.write32(address.wrapping_add(4), released)?;
+                self.memory.write32(address.wrapping_add(8), status)?;
+                cpu.r[0] = 0;
+            }
+            "_kbd_get_key" | "kbd_get_key" | "_rmt_get_key" | "rmt_get_key" | "sys_get_key"
+            | "KBDGetSKey" | "KBDGetSKeyStatus" | "RMTGetSKey" => {
+                cpu.r[0] = map_a330_input(self.profile, self.input.buttons());
+            }
+            "_sys_judge_event" | "sys_judge_event" => {
+                cpu.r[0] = u32::from(self.input.take_pending_event());
             }
             "printf" | "fprintf" => cpu.r[0] = 0,
             "stricmp" | "strcasecmp" => {
@@ -884,6 +907,50 @@ fn resolve_guest_path(root: &std::path::Path, name: &str) -> Option<PathBuf> {
     (!relative.as_os_str().is_empty()).then(|| root.join(relative))
 }
 
+fn map_a330_input(profile: ArmProfile, input: u32) -> u32 {
+    const POWER: u32 = 0x80;
+
+    let mut mapped = 0;
+    let mappings: &[(u32, u32)] = match profile {
+        ArmProfile::Retail => &[
+            (BUTTON_UP, 0x0010_0000),
+            (BUTTON_DOWN, 0x0800_0000),
+            (BUTTON_LEFT, 0x1000_0000),
+            (BUTTON_RIGHT, 0x0004_0000),
+            (BUTTON_A, 0x8000_0000),
+            (BUTTON_B, 0x0000_1000),
+            (BUTTON_X, 0x0001_0000),
+            (BUTTON_Y, 0x2000_0000),
+            (BUTTON_START, 0x0000_8000),
+            (BUTTON_SELECT, 0x0080_0000),
+            (BUTTON_L, 0x0002_0000),
+            (BUTTON_R, 0x4000_0000),
+            (POWER, POWER),
+        ],
+        ArmProfile::Homebrew => &[
+            (BUTTON_UP, 0x0010_0000),
+            (BUTTON_DOWN, 0x0800_0000),
+            (BUTTON_LEFT, 0x1000_0000),
+            (BUTTON_RIGHT, 0x0004_0000),
+            (BUTTON_A, 0x8000_0000),
+            (BUTTON_B, 0x0000_1000),
+            (BUTTON_X, 0x2000_0000),
+            (BUTTON_Y, 0x0001_0000),
+            (BUTTON_START, 0x0000_0080),
+            (BUTTON_SELECT, 0x0000_4000),
+            (BUTTON_L, 0x0002_0000),
+            (BUTTON_R, 0x4000_0000),
+            (POWER, 0x0000_0001),
+        ],
+    };
+    for &(source, destination) in mappings {
+        if input & source != 0 {
+            mapped |= destination;
+        }
+    }
+    mapped
+}
+
 fn compare_ascii_case_insensitive(left: &str, right: &str) -> i32 {
     let left = left.bytes().map(|value| value.to_ascii_lowercase());
     let right = right.bytes().map(|value| value.to_ascii_lowercase());
@@ -972,6 +1039,75 @@ mod tests {
         assert_eq!(runtime.cpu.r[0], SCREEN_WIDTH);
         assert_eq!(runtime.cpu.instruction_count, 2);
         assert!(!runtime.is_running());
+    }
+
+    #[test]
+    fn a330_button_masks_follow_each_guest_profile() {
+        let retail = [
+            (BUTTON_UP, 0x0010_0000),
+            (BUTTON_DOWN, 0x0800_0000),
+            (BUTTON_LEFT, 0x1000_0000),
+            (BUTTON_RIGHT, 0x0004_0000),
+            (BUTTON_A, 0x8000_0000),
+            (BUTTON_B, 0x0000_1000),
+            (BUTTON_X, 0x0001_0000),
+            (BUTTON_Y, 0x2000_0000),
+            (BUTTON_START, 0x0000_8000),
+            (BUTTON_SELECT, 0x0080_0000),
+            (BUTTON_L, 0x0002_0000),
+            (BUTTON_R, 0x4000_0000),
+        ];
+        let homebrew = [
+            (BUTTON_UP, 0x0010_0000),
+            (BUTTON_DOWN, 0x0800_0000),
+            (BUTTON_LEFT, 0x1000_0000),
+            (BUTTON_RIGHT, 0x0004_0000),
+            (BUTTON_A, 0x8000_0000),
+            (BUTTON_B, 0x0000_1000),
+            (BUTTON_X, 0x2000_0000),
+            (BUTTON_Y, 0x0001_0000),
+            (BUTTON_START, 0x0000_0080),
+            (BUTTON_SELECT, 0x0000_4000),
+            (BUTTON_L, 0x0002_0000),
+            (BUTTON_R, 0x4000_0000),
+        ];
+        for (source, expected) in retail {
+            assert_eq!(map_a330_input(ArmProfile::Retail, source), expected);
+        }
+        for (source, expected) in homebrew {
+            assert_eq!(map_a330_input(ArmProfile::Homebrew, source), expected);
+        }
+    }
+
+    #[test]
+    fn a330_status_poll_writes_translated_edges_and_state() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("kbd_get_status"), PathBuf::new()).unwrap();
+        runtime.input.set_buttons(BUTTON_A | BUTTON_B);
+        runtime.cpu.r[0] = STACK_BASE;
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[0], 0);
+        assert_eq!(runtime.memory.read32(STACK_BASE).unwrap(), 0x8000_1000);
+        assert_eq!(runtime.memory.read32(STACK_BASE + 4).unwrap(), 0);
+        assert_eq!(runtime.memory.read32(STACK_BASE + 8).unwrap(), 0x8000_1000);
+    }
+
+    #[test]
+    fn a330_event_poll_consumes_pending_input_event() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("sys_judge_event"), PathBuf::new()).unwrap();
+        runtime.input.set_buttons(BUTTON_START);
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[0], 1);
+
+        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.boot_complete = true;
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[0], 0);
     }
 
     #[test]
