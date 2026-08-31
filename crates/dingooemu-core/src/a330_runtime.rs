@@ -45,6 +45,8 @@ pub(crate) struct A330Runtime {
     files: BTreeMap<u32, GuestFile>,
     next_file_handle: u32,
     semaphores: BTreeMap<u32, u32>,
+    active_framebuffer: u32,
+    framebuffer_bits: u32,
 }
 
 impl A330Runtime {
@@ -95,6 +97,8 @@ impl A330Runtime {
             files: BTreeMap::new(),
             next_file_handle: 1,
             semaphores: BTreeMap::new(),
+            active_framebuffer: FRAMEBUFFER_BASE,
+            framebuffer_bits: 16,
         })
     }
 
@@ -195,6 +199,8 @@ impl A330Runtime {
                     files: &mut self.files,
                     next_file_handle: &mut self.next_file_handle,
                     semaphores: &mut self.semaphores,
+                    active_framebuffer: &mut self.active_framebuffer,
+                    framebuffer_bits: &mut self.framebuffer_bits,
                 };
                 let pc = self.cpu.r[15];
                 if let Err(error) = self.cpu.step(&mut bus) {
@@ -235,10 +241,28 @@ impl A330Runtime {
             }
         }
         if let Some(address) = frame_address {
+            self.present_frame(address)?;
+        }
+        Ok(())
+    }
+
+    fn present_frame(&mut self, address: u32) -> Result<()> {
+        if self.framebuffer_bits == 32 {
+            let source = self.memory.read_bytes(address, FRAMEBUFFER_SIZE * 2)?;
+            let (source_pixels, _) = source.as_chunks::<4>();
+            let (destination_pixels, _) = self.video.framebuffer_mut().as_chunks_mut::<2>();
+            for (destination, pixel) in destination_pixels.iter_mut().zip(source_pixels) {
+                let blue = u16::from(pixel[0]);
+                let green = u16::from(pixel[1]);
+                let red = u16::from(pixel[2]);
+                let rgb565 = ((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3);
+                destination.copy_from_slice(&rgb565.to_le_bytes());
+            }
+        } else {
             let source = self.memory.read_bytes(address, FRAMEBUFFER_SIZE)?;
             self.video.framebuffer_mut().copy_from_slice(source);
-            self.video.advance_frame();
         }
+        self.video.advance_frame();
         Ok(())
     }
 
@@ -280,6 +304,8 @@ struct RuntimeBus<'a> {
     files: &'a mut BTreeMap<u32, GuestFile>,
     next_file_handle: &'a mut u32,
     semaphores: &'a mut BTreeMap<u32, u32>,
+    active_framebuffer: &'a mut u32,
+    framebuffer_bits: &'a mut u32,
 }
 
 impl RuntimeBus<'_> {
@@ -313,15 +339,17 @@ impl RuntimeBus<'_> {
             cpu.r[3]
         );
         match name {
-            "lcd_get_frame" | "_lcd_get_frame" | "LCDGetFB" => cpu.r[0] = FRAMEBUFFER_BASE,
+            "lcd_get_frame" | "_lcd_get_frame" | "LCDGetFB" => cpu.r[0] = *self.active_framebuffer,
             "LCDGetWidth" | "get_lcd_width" => cpu.r[0] = SCREEN_WIDTH,
             "LCDGetHeight" | "get_lcd_height" => cpu.r[0] = SCREEN_HEIGHT,
             "lcd_set_frame" | "_lcd_set_frame" | "LCDFlushFB" | "LCDFlushFBZoom" => {
-                *self.frame_address = Some(if cpu.r[0] == 0 {
-                    FRAMEBUFFER_BASE
+                let address = if cpu.r[0] == 0 {
+                    *self.active_framebuffer
                 } else {
                     cpu.r[0]
-                });
+                };
+                *self.active_framebuffer = address;
+                *self.frame_address = Some(address);
                 cpu.r[0] = 0;
             }
             "malloc" | "OSMalloc" | "jmalloc" => cpu.r[0] = self.allocate(cpu.r[0]),
@@ -484,11 +512,36 @@ impl RuntimeBus<'_> {
             }
             "LCDIsDoubleFBEnabled" => cpu.r[0] = 1,
             "LCDGetFBFormat" => cpu.r[0] = 0,
-            "LCDEnableDoubleFB" | "LCDDisableDoubleFB" | "LCDSetFBFormat" | "LCDInit"
-            | "LCDSetRefreshRate" | "LCDSetBrightness" | "FlushDCache" | "InvalidICache"
-            | "fsys_RefreshCache" | "consoleEnable" | "consoleDisable" | "PMSetMode" => {
-                cpu.r[0] = 0
+            "LCDSetFBBit" => {
+                if matches!(cpu.r[0], 16 | 32) {
+                    *self.framebuffer_bits = cpu.r[0];
+                }
+                cpu.r[0] = 0;
             }
+            "BMF_SetLcdFramePtr" => {
+                if self.memory.read_bytes(cpu.r[0], FRAMEBUFFER_SIZE).is_ok() {
+                    *self.active_framebuffer = cpu.r[0];
+                }
+                cpu.r[0] = 0;
+            }
+            "SysLcdClear" => {
+                let clear = vec![0; FRAMEBUFFER_SIZE];
+                self.memory.write_bytes(FRAMEBUFFER_BASE, &clear)?;
+                self.memory
+                    .write_bytes(LEGACY_FRAMEBUFFER_ADDRESS, &clear)?;
+                cpu.r[0] = 0;
+            }
+            "FlushDCache" | "__dcache_writeback_all" => {
+                if self.memory.read_bytes(cpu.r[0], FRAMEBUFFER_SIZE).is_ok() {
+                    *self.active_framebuffer = cpu.r[0];
+                    *self.frame_address = Some(cpu.r[0]);
+                }
+                cpu.r[0] = 0;
+            }
+            "BMF_SelectPixelFunc" => cpu.r[0] = 0,
+            "LCDEnableDoubleFB" | "LCDDisableDoubleFB" | "LCDSetFBFormat" | "LCDInit"
+            | "LCDSetRefreshRate" | "LCDSetBrightness" | "InvalidICache" | "fsys_RefreshCache"
+            | "consoleEnable" | "consoleDisable" | "PMSetMode" => cpu.r[0] = 0,
             _ => self.record_unknown(cpu, &symbol_name, symbol_address)?,
         }
         if self.profile == ArmProfile::Homebrew {
@@ -703,6 +756,7 @@ impl ArmBus for RuntimeBus<'_> {
     fn write32(&mut self, address: u32, value: u32) -> Result<()> {
         self.memory.write32(address, value)?;
         if address == LEGACY_GRAPHICS_SURFACE {
+            *self.active_framebuffer = LEGACY_FRAMEBUFFER_ADDRESS;
             *self.frame_address = Some(LEGACY_FRAMEBUFFER_ADDRESS);
         }
         Ok(())
@@ -916,5 +970,35 @@ mod tests {
         runtime.running = true;
         runtime.tick().unwrap();
         assert_eq!(runtime.semaphores[&handle], 1);
+    }
+
+    #[test]
+    fn cache_flush_submits_legacy_rgb565_frames() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("FlushDCache"), PathBuf::new()).unwrap();
+        runtime
+            .memory
+            .write16(LEGACY_FRAMEBUFFER_ADDRESS, 0x07e0)
+            .unwrap();
+        runtime.cpu.r[0] = LEGACY_FRAMEBUFFER_ADDRESS;
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(&runtime.video.framebuffer()[..2], &[0xe0, 0x07]);
+        assert_eq!(runtime.video.frame_count(), 1);
+    }
+
+    #[test]
+    fn thirty_two_bit_guest_frames_are_converted_to_rgb565() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("FlushDCache"), PathBuf::new()).unwrap();
+        runtime.framebuffer_bits = 32;
+        runtime
+            .memory
+            .write32(LEGACY_FRAMEBUFFER_ADDRESS, 0x00ff_0000)
+            .unwrap();
+        runtime.cpu.r[0] = LEGACY_FRAMEBUFFER_ADDRESS;
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(&runtime.video.framebuffer()[..2], &[0x00, 0xf8]);
     }
 }
