@@ -61,7 +61,7 @@ contains timing and aggregate counters, not game data. It is refreshed once per
 second while enabled, so it can still be copied if the frontend cannot close
 content cleanly. The report includes cumulative and recent frame timing, video
 and audio callback costs, audio short writes, frontend buffer status,
-asynchronous queue statistics, the 48 kHz host output rate, and JIT execution
+asynchronous queue statistics, the 22.05 kHz host output rate, and JIT execution
 and fallback counters. The core leaves frontend latency settings unchanged.
 Audio produced while the frontend callback is disabled is discarded, and the
 active callback uses a short bounded queue to avoid stale playback.
