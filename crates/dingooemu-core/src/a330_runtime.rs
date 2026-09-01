@@ -27,6 +27,9 @@ struct GuestFile {
     data: Vec<u8>,
     position: usize,
     data_address: u32,
+    save_path: Option<PathBuf>,
+    writable: bool,
+    dirty: bool,
 }
 
 pub(crate) struct A330Runtime {
@@ -47,6 +50,7 @@ pub(crate) struct A330Runtime {
     tasks: VecDeque<(ArmCpu, u32)>,
     current_priority: u32,
     content_directory: PathBuf,
+    save_directory: Option<PathBuf>,
     files: BTreeMap<u32, GuestFile>,
     next_file_handle: u32,
     semaphores: BTreeMap<u32, u32>,
@@ -82,6 +86,8 @@ impl A330Runtime {
             .find(|symbol| symbol.name == "AppMain")
             .map(|symbol| symbol.address);
         let content_directory = _path.parent().map(PathBuf::from).unwrap_or_default();
+        let save_directory =
+            (!content_directory.as_os_str().is_empty()).then(|| content_directory.clone());
         let firmware_archive = FirmwareArchive::discover(&content_directory);
         Ok(Self {
             package,
@@ -101,6 +107,7 @@ impl A330Runtime {
             tasks: VecDeque::new(),
             current_priority: 0,
             content_directory,
+            save_directory,
             files: BTreeMap::new(),
             next_file_handle: 1,
             semaphores: BTreeMap::new(),
@@ -117,15 +124,19 @@ impl A330Runtime {
     pub(crate) fn stop(&mut self) {
         self.running = false;
         self.cpu.stop();
+        self.flush_save_files();
     }
     pub(crate) fn reset(&mut self) -> Result<()> {
+        self.flush_save_files();
         let policy = self.unknown_hle_policy;
         let allowlist = self.unknown_hle_allowlist.clone();
         let content_directory = self.content_directory.clone();
+        let save_directory = self.save_directory.clone();
         let mut replacement = Self::from_package(self.package.clone(), PathBuf::new())?;
         replacement.unknown_hle_policy = policy;
         replacement.unknown_hle_allowlist = allowlist;
         replacement.content_directory = content_directory;
+        replacement.save_directory = save_directory;
         replacement.firmware_archive = self.firmware_archive.clone();
         *self = replacement;
         Ok(())
@@ -157,6 +168,19 @@ impl A330Runtime {
         S: Into<String>,
     {
         self.unknown_hle_allowlist = names.into_iter().map(Into::into).collect();
+    }
+
+    pub(crate) fn flush_save_files(&mut self) {
+        for (handle, file) in &mut self.files {
+            if let Err(error) = flush_guest_file(file) {
+                log::error!("Failed to flush ARM guest save file {handle}: {error}");
+            }
+        }
+    }
+
+    pub(crate) fn set_save_directory<P: Into<PathBuf>>(&mut self, directory: P) {
+        self.flush_save_files();
+        self.save_directory = Some(directory.into());
     }
 
     pub(crate) fn tick(&mut self) -> Result<()> {
@@ -206,6 +230,7 @@ impl A330Runtime {
                     yield_requested: false,
                     finish_current: false,
                     content_directory: &self.content_directory,
+                    save_directory: self.save_directory.as_deref(),
                     files: &mut self.files,
                     next_file_handle: &mut self.next_file_handle,
                     semaphores: &mut self.semaphores,
@@ -316,6 +341,7 @@ struct RuntimeBus<'a> {
     yield_requested: bool,
     finish_current: bool,
     content_directory: &'a std::path::Path,
+    save_directory: Option<&'a std::path::Path>,
     files: &'a mut BTreeMap<u32, GuestFile>,
     next_file_handle: &'a mut u32,
     semaphores: &'a mut BTreeMap<u32, u32>,
@@ -395,14 +421,13 @@ impl RuntimeBus<'_> {
                 cpu.r[0] = self.open_file(&name, &mode);
             }
             "fclose" | "fsys_fclose" | "fsys_fcloseW" => {
-                cpu.r[0] = if self.files.remove(&cpu.r[0]).is_some() {
-                    0
-                } else {
-                    u32::MAX
-                };
+                cpu.r[0] = self.close_file(cpu.r[0]);
             }
             "fread" | "fsys_fread" => {
                 cpu.r[0] = self.read_file(cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3])?;
+            }
+            "fwrite" | "fsys_fwrite" => {
+                cpu.r[0] = self.write_file(cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3])?;
             }
             "fseek" | "fsys_fseek" => {
                 cpu.r[0] = self.seek_file(cpu.r[0], cpu.r[1] as i32, cpu.r[2]);
@@ -671,9 +696,38 @@ impl RuntimeBus<'_> {
     }
 
     fn open_file(&mut self, name: &str, mode: &str) -> u32 {
-        if mode.as_bytes().first().copied().unwrap_or(b'r') != b'r' {
-            log::trace!("ARM file open rejected write mode: {name:?} ({mode:?})");
+        let operation = mode.as_bytes().first().copied().unwrap_or(b'r');
+        let writable = matches!(operation, b'w' | b'a') || mode.contains('+');
+        if !matches!(operation, b'r' | b'w' | b'a') {
+            log::trace!("ARM file open rejected mode: {name:?} ({mode:?})");
             return 0;
+        }
+        let save_path = self
+            .save_directory
+            .and_then(|directory| resolve_guest_path(directory, name));
+        if writable && save_path.is_none() {
+            log::trace!("ARM file open has no safe save path: {name:?} ({mode:?})");
+            return 0;
+        }
+        if operation == b'w' {
+            log::trace!("ARM file create save path: {name:?}");
+            return self.insert_file(Vec::new(), save_path, 0, true, true);
+        }
+        if operation == b'a' {
+            let data = save_path
+                .as_ref()
+                .and_then(|path| std::fs::read(path).ok())
+                .unwrap_or_default();
+            let position = data.len();
+            log::trace!("ARM file append save path: {name:?}");
+            return self.insert_file(data, save_path, position, true, true);
+        }
+        if let Some((path, data)) = save_path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok().map(|data| (path.clone(), data)))
+        {
+            log::trace!("ARM file open save path: {name:?} -> {}", path.display());
+            return self.insert_file(data, writable.then_some(path), 0, writable, false);
         }
         let Some(path) = resolve_guest_path(self.content_directory, name) else {
             log::trace!("ARM file open rejected path: {name:?}");
@@ -702,14 +756,29 @@ impl RuntimeBus<'_> {
                 }
             }
         };
+        let persisted_path = if writable { save_path } else { None };
+        self.insert_file(data, persisted_path, 0, writable, false)
+    }
+
+    fn insert_file(
+        &mut self,
+        data: Vec<u8>,
+        save_path: Option<PathBuf>,
+        position: usize,
+        writable: bool,
+        dirty: bool,
+    ) -> u32 {
         let handle = *self.next_file_handle;
         *self.next_file_handle = handle.wrapping_add(1).max(1);
         self.files.insert(
             handle,
             GuestFile {
                 data,
-                position: 0,
+                position,
                 data_address: 0,
+                save_path,
+                writable,
+                dirty,
             },
         );
         handle
@@ -738,6 +807,9 @@ impl RuntimeBus<'_> {
                 data,
                 position: 0,
                 data_address: 0,
+                save_path: None,
+                writable: false,
+                dirty: false,
             },
         );
         handle
@@ -798,7 +870,9 @@ impl RuntimeBus<'_> {
     }
 
     fn read_file(&mut self, destination: u32, size: u32, count: u32, handle: u32) -> Result<u32> {
-        let requested = (size as usize).saturating_mul(count as usize);
+        let Some(requested) = (size as usize).checked_mul(count as usize) else {
+            return Ok(0);
+        };
         if size == 0 || requested == 0 {
             return Ok(0);
         }
@@ -806,6 +880,9 @@ impl RuntimeBus<'_> {
             let Some(file) = self.files.get_mut(&handle) else {
                 return Ok(0);
             };
+            if file.position >= file.data.len() {
+                return Ok(0);
+            }
             let available = file.data.len().saturating_sub(file.position);
             let length = requested.min(available);
             let data = file.data[file.position..file.position + length].to_vec();
@@ -814,6 +891,46 @@ impl RuntimeBus<'_> {
         };
         self.memory.write_bytes(destination, &data)?;
         Ok(data.len() as u32 / size)
+    }
+
+    fn write_file(&mut self, source: u32, size: u32, count: u32, handle: u32) -> Result<u32> {
+        let Some(requested) = (size as usize).checked_mul(count as usize) else {
+            return Ok(0);
+        };
+        if size == 0 || requested == 0 {
+            return Ok(0);
+        }
+        let data = self.memory.read_bytes(source, requested)?.to_vec();
+        let Some(file) = self.files.get_mut(&handle) else {
+            return Ok(0);
+        };
+        if !file.writable {
+            return Ok(0);
+        }
+        let Some(end) = file.position.checked_add(data.len()) else {
+            return Ok(0);
+        };
+        if file.data.len() < end {
+            file.data.resize(end, 0);
+        }
+        file.data[file.position..end].copy_from_slice(&data);
+        file.position = end;
+        file.dirty = true;
+        Ok(count)
+    }
+
+    fn close_file(&mut self, handle: u32) -> u32 {
+        let Some(file) = self.files.get_mut(&handle) else {
+            return u32::MAX;
+        };
+        let result = flush_guest_file(file);
+        self.files.remove(&handle);
+        if let Err(error) = result {
+            log::error!("Failed to close ARM guest save file {handle}: {error}");
+            u32::MAX
+        } else {
+            0
+        }
     }
 
     fn seek_file(&mut self, handle: u32, offset: i32, origin: u32) -> u32 {
@@ -901,6 +1018,21 @@ impl RuntimeBus<'_> {
         cpu.r[0] = 0;
         Ok(())
     }
+}
+
+fn flush_guest_file(file: &mut GuestFile) -> std::io::Result<()> {
+    if !file.dirty {
+        return Ok(());
+    }
+    let Some(path) = file.save_path.as_ref() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, &file.data)?;
+    file.dirty = false;
+    Ok(())
 }
 
 fn resolve_guest_path(root: &std::path::Path, name: &str) -> Option<PathBuf> {
@@ -1235,6 +1367,67 @@ mod tests {
         assert_eq!(
             runtime.memory.read_bytes(STACK_BASE + 64, 4).unwrap(),
             [1, 2, 3, 4]
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn writable_guest_files_persist_below_the_save_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "dingooemu-arm-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let save_directory = directory.join("saves");
+        let mut runtime =
+            A330Runtime::from_package(svc_package("fsys_fopen"), directory.join("game.c2s"))
+                .unwrap();
+        runtime.set_save_directory(&save_directory);
+        runtime
+            .memory
+            .write_bytes(STACK_BASE, b"a:\\platform\\system.ini\0")
+            .unwrap();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE + 64, b"wb\0")
+            .unwrap();
+        runtime.cpu.r[0] = STACK_BASE;
+        runtime.cpu.r[1] = STACK_BASE + 64;
+        runtime.start();
+        runtime.tick().unwrap();
+        let handle = runtime.cpu.r[0];
+        assert_ne!(handle, 0);
+
+        runtime.package.imports[0].name = "fsys_fwrite".into();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE + 128, b"language=0\n")
+            .unwrap();
+        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu.r[0] = STACK_BASE + 128;
+        runtime.cpu.r[1] = 1;
+        runtime.cpu.r[2] = 11;
+        runtime.cpu.r[3] = handle;
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.boot_complete = true;
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[0], 11);
+
+        runtime.package.imports[0].name = "fsys_fclose".into();
+        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu.r[0] = handle;
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[0], 0);
+        assert_eq!(
+            std::fs::read(save_directory.join("a/platform/system.ini")).unwrap(),
+            b"language=0\n"
         );
 
         std::fs::remove_dir_all(directory).unwrap();

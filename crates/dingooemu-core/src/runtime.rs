@@ -162,14 +162,17 @@ impl Emulator {
     }
 
     pub fn flush_save_files(&mut self) {
-        if let Runtime::App(runtime) = &mut self.runtime {
-            runtime.flush_save_files();
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.flush_save_files(),
+            Runtime::Arm(runtime) => runtime.flush_save_files(),
         }
     }
 
     pub fn set_save_directory<P: Into<PathBuf>>(&mut self, directory: P) {
-        if let Runtime::App(runtime) = &mut self.runtime {
-            runtime.set_save_directory(directory);
+        let directory = directory.into();
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_save_directory(directory),
+            Runtime::Arm(runtime) => runtime.set_save_directory(directory),
         }
     }
 
