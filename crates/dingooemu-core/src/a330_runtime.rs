@@ -22,6 +22,7 @@ const APP_PATH_ADDRESS: u32 = STACK_BASE + 0x200;
 const LOCALE_ADDRESS: u32 = STACK_BASE + 0x600;
 const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
 const LEGACY_GRAPHICS_SURFACE: u32 = 0x0930_201c;
+const GUEST_FILE_MAGIC: u32 = 0x4653_5953;
 
 struct GuestFile {
     data: Vec<u8>,
@@ -768,8 +769,17 @@ impl RuntimeBus<'_> {
         writable: bool,
         dirty: bool,
     ) -> u32 {
-        let handle = *self.next_file_handle;
-        *self.next_file_handle = handle.wrapping_add(1).max(1);
+        let handle = if self.profile == ArmProfile::Homebrew {
+            let address = self.allocate(16);
+            if address == 0 || self.memory.write32(address, GUEST_FILE_MAGIC).is_err() {
+                return 0;
+            }
+            address
+        } else {
+            let handle = *self.next_file_handle;
+            *self.next_file_handle = handle.wrapping_add(1).max(1);
+            handle
+        };
         self.files.insert(
             handle,
             GuestFile {
@@ -1368,6 +1378,41 @@ mod tests {
             runtime.memory.read_bytes(STACK_BASE + 64, 4).unwrap(),
             [1, 2, 3, 4]
         );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn homebrew_file_handles_are_readable_guest_objects() {
+        let directory = std::env::temp_dir().join(format!(
+            "dingooemu-arm-homebrew-file-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("asset.bin"), [1, 2, 3, 4]).unwrap();
+        let mut package = svc_package("fsys_fopen");
+        package.format = ContentFormat::C2s;
+        package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
+        package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
+        package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
+        let mut runtime = A330Runtime::from_package(package, directory.join("game.c2s")).unwrap();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE, b"asset.bin\0")
+            .unwrap();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE + 32, b"rb\0")
+            .unwrap();
+        runtime.cpu.r[0] = STACK_BASE;
+        runtime.cpu.r[1] = STACK_BASE + 32;
+        runtime.start();
+        runtime.tick().unwrap();
+        let handle = runtime.cpu.r[0];
+
+        assert!(handle >= runtime.memory.heap_base());
+        assert_eq!(runtime.memory.read32(handle).unwrap(), GUEST_FILE_MAGIC);
+        assert_eq!(runtime.files[&handle].data, [1, 2, 3, 4]);
 
         std::fs::remove_dir_all(directory).unwrap();
     }
