@@ -844,7 +844,7 @@ fn sub_with_carry(left: u32, right: u32, carry: u32) -> (u32, bool, bool) {
 fn shift(value: u32, kind: u32, amount: u32, old_carry: bool, immediate: bool) -> (u32, bool) {
     match (kind, amount) {
         (0, 0) => (value, old_carry),
-        (0, 1..=31) => (value << amount, value >> (32 - amount) != 0),
+        (0, 1..=31) => (value << amount, value >> (32 - amount) & 1 != 0),
         (0, 32) => (0, value & 1 != 0),
         (0, _) => (0, false),
         (1, 0) if immediate => (0, value >> 31 != 0),
@@ -979,6 +979,20 @@ mod tests {
         assert_eq!(cpu.r[3], 0);
         assert_ne!(cpu.cpsr & Z, 0);
         assert_ne!(cpu.cpsr & C, 0);
+    }
+
+    #[test]
+    fn logical_shift_left_uses_the_last_shifted_bit_for_carry() {
+        let mut bus = TestBus::new(&[
+            0xe1b0_ce02, // MOVS r12, r2, LSL #28
+            0x23a0_3001, // MOVHS r3, #1
+        ]);
+        let mut cpu = running_cpu();
+        cpu.r[2] = 0xffff_ffe4;
+        cpu.run(&mut bus, 2).unwrap();
+        assert_eq!(cpu.r[12], 0x4000_0000);
+        assert_eq!(cpu.cpsr & C, 0);
+        assert_eq!(cpu.r[3], 0);
     }
 
     #[test]
