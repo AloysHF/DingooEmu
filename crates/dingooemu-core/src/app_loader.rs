@@ -318,10 +318,68 @@ impl PackageImage {
 
         data
     }
+
+    pub(crate) fn get_embedded_file_data(&self, name: &str) -> Option<Vec<u8>> {
+        if !name
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("pkg"))
+        {
+            return None;
+        }
+        let raw_end = self.rawd.base.offset.checked_add(self.rawd.base.size)? as usize;
+        let range = appended_zip_range(&self.data, raw_end)?;
+        Some(self.data[range].to_vec())
+    }
 }
 
 /// Backward-compatible name for callers that only handle APP content.
 pub type AppImage = PackageImage;
+
+fn appended_zip_range(data: &[u8], search_start: usize) -> Option<std::ops::Range<usize>> {
+    const LOCAL_HEADER: &[u8; 4] = b"PK\x03\x04";
+    const CENTRAL_HEADER: &[u8; 4] = b"PK\x01\x02";
+    const END_HEADER: &[u8; 4] = b"PK\x05\x06";
+    const END_SIZE: usize = 22;
+
+    let tail = data.get(search_start..)?;
+    let end_offset = tail
+        .windows(END_HEADER.len())
+        .rposition(|bytes| bytes == END_HEADER)?;
+    let end_header = search_start.checked_add(end_offset)?;
+    let archive_end =
+        end_header
+            .checked_add(END_SIZE)?
+            .checked_add(usize::from(read_u16_checked(
+                data,
+                end_header.checked_add(20)?,
+            )?))?;
+    if archive_end > data.len() {
+        return None;
+    }
+    let central_size = read_u32_checked(data, end_header.checked_add(12)?)? as usize;
+    let central_offset = read_u32_checked(data, end_header.checked_add(16)?)? as usize;
+    let archive_start = end_header.checked_sub(central_size.checked_add(central_offset)?)?;
+    let central_start = archive_start.checked_add(central_offset)?;
+    if archive_start < search_start
+        || data.get(archive_start..archive_start.checked_add(4)?)? != LOCAL_HEADER
+        || data.get(central_start..central_start.checked_add(4)?)? != CENTRAL_HEADER
+    {
+        return None;
+    }
+    Some(archive_start..archive_end)
+}
+
+fn read_u16_checked(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        data.get(offset..offset.checked_add(2)?)?.try_into().ok()?,
+    ))
+}
+
+fn read_u32_checked(data: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        data.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
 
 fn validate_guest_metadata(format: ContentFormat, rawd: &RawdHeader) -> Result<()> {
     let program_end = rawd
@@ -925,6 +983,21 @@ mod tests {
         PackageImage::parse_with_format(&minimal_package_data(origin), format).unwrap()
     }
 
+    fn minimal_appended_zip() -> Vec<u8> {
+        let mut data = b"PK\x03\x04".to_vec();
+        let central_offset = data.len() as u32;
+        data.extend_from_slice(b"PK\x01\x02");
+        data.extend_from_slice(b"PK\x05\x06");
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&central_offset.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data
+    }
+
     #[test]
     fn test_read_chunk_header() {
         let mut data = vec![0u8; 64];
@@ -1009,6 +1082,33 @@ mod tests {
         package.data[0x2C..0x30].copy_from_slice(&0x20u32.to_le_bytes());
 
         assert!(PackageImage::parse(&package.data).is_err());
+    }
+
+    #[test]
+    fn test_appended_zip_range_uses_central_directory_offsets() {
+        let archive = minimal_appended_zip();
+        let mut data = vec![0xAA; 32];
+        let archive_start = data.len();
+        data.extend_from_slice(&archive);
+
+        let range = appended_zip_range(&data, 16).unwrap();
+
+        assert_eq!(range, archive_start..data.len());
+        assert_eq!(&data[range], archive);
+        assert!(appended_zip_range(&data, archive_start + 1).is_none());
+    }
+
+    #[test]
+    fn test_embedded_file_data_exposes_appended_pkg_only() {
+        let archive = minimal_appended_zip();
+        let mut package = minimal_package(ArmProfile::HOMEBREW_ORIGIN, ContentFormat::C2s);
+        package.data.extend_from_slice(&archive);
+
+        assert_eq!(
+            package.get_embedded_file_data(r".\assets.PKG"),
+            Some(archive)
+        );
+        assert!(package.get_embedded_file_data("assets.wad").is_none());
     }
 
     #[test]

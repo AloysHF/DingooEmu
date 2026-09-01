@@ -688,6 +688,9 @@ impl RuntimeBus<'_> {
                 if let Some(resource) = self.package.find_resource(name) {
                     log::trace!("ARM file open package resource: {name:?}");
                     self.package.get_resource_data(resource)
+                } else if let Some(data) = self.package.get_embedded_file_data(name) {
+                    log::trace!("ARM file open appended package payload: {name:?}");
+                    data
                 } else if let Some(data) =
                     self.firmware_archive.and_then(|archive| archive.read(name))
                 {
