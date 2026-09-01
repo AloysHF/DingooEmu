@@ -354,6 +354,9 @@ struct RuntimeBus<'a> {
 
 impl RuntimeBus<'_> {
     fn dispatch(&mut self, cpu: &mut ArmCpu, immediate: u32) -> Result<()> {
+        if immediate == 0x0012_3456 {
+            return self.dispatch_semihosting(cpu);
+        }
         let (symbol_name, symbol_address) = if immediate & 0x0080_0000 != 0 {
             let index = (immediate & 0x007f_ffff) as usize;
             let name = self
@@ -663,6 +666,37 @@ impl RuntimeBus<'_> {
         }
         if self.profile == ArmProfile::Homebrew {
             cpu.r[15] = cpu.r[14] & !1;
+        }
+        Ok(())
+    }
+
+    fn dispatch_semihosting(&mut self, cpu: &mut ArmCpu) -> Result<()> {
+        match cpu.r[0] {
+            0x03 => {
+                let value = self.memory.read8(cpu.r[1])?;
+                log::trace!("ARM semihosting SYS_WRITEC: {:?}", char::from(value));
+                cpu.r[0] = 0;
+            }
+            0x04 => {
+                let value = self.read_c_string(cpu.r[1], 4096)?;
+                log::trace!("ARM semihosting SYS_WRITE0: {value:?}");
+                cpu.r[0] = 0;
+            }
+            0x18 | 0x20 => {
+                log::trace!(
+                    "ARM semihosting exit operation={:#04x}, reason={:#010x}",
+                    cpu.r[0],
+                    cpu.r[1]
+                );
+                self.stop_requested = true;
+                cpu.r[0] = 0;
+            }
+            operation => {
+                return Err(SimulatorError::SdkHleError(format!(
+                    "unsupported ARM semihosting operation {operation:#010x} with parameter {:#010x}",
+                    cpu.r[1]
+                )));
+            }
         }
         Ok(())
     }
@@ -1194,6 +1228,13 @@ mod tests {
         }
     }
 
+    fn semihosting_package() -> PackageImage {
+        let mut package = svc_package("unused");
+        package.data[0x80..0x84].copy_from_slice(&0xef12_3456u32.to_le_bytes());
+        package.imports.clear();
+        package
+    }
+
     #[test]
     fn scheduler_dispatches_svc_and_stops_at_return_sentinel() {
         let mut runtime =
@@ -1202,6 +1243,33 @@ mod tests {
         runtime.tick().unwrap();
         assert_eq!(runtime.cpu.r[0], SCREEN_WIDTH);
         assert_eq!(runtime.cpu.instruction_count, 2);
+        assert!(!runtime.is_running());
+    }
+
+    #[test]
+    fn semihosting_console_output_returns_to_the_next_instruction() {
+        let mut runtime = A330Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
+        runtime.memory.write8(STACK_BASE, b'X').unwrap();
+        runtime.cpu.r[0] = 0x03;
+        runtime.cpu.r[1] = STACK_BASE;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.cpu.r[0], 0);
+        assert_eq!(runtime.cpu.instruction_count, 2);
+        assert!(!runtime.is_running());
+    }
+
+    #[test]
+    fn semihosting_exit_stops_the_runtime() {
+        let mut runtime = A330Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
+        runtime.cpu.r[0] = 0x18;
+        runtime.cpu.r[1] = 0x0002_0026;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.cpu.r[0], 0);
+        assert_eq!(runtime.cpu.instruction_count, 1);
         assert!(!runtime.is_running());
     }
 
