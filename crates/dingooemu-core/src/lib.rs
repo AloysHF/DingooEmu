@@ -14,6 +14,7 @@ pub mod content;
 pub mod cpu;
 pub mod emulator;
 pub mod error;
+mod firmware_archive;
 pub mod input;
 #[cfg(feature = "jit")]
 mod jit;

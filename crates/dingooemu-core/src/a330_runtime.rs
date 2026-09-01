@@ -8,6 +8,7 @@ use crate::audio::{Audio, AudioConfig};
 use crate::content::{ArmProfile, ContentFormat};
 use crate::emulator::{UnknownHleCall, UnknownHlePolicy};
 use crate::error::{Result, SimulatorError};
+use crate::firmware_archive::FirmwareArchive;
 use crate::input::{
     Input, BUTTON_A, BUTTON_B, BUTTON_DOWN, BUTTON_L, BUTTON_LEFT, BUTTON_R, BUTTON_RIGHT,
     BUTTON_SELECT, BUTTON_START, BUTTON_UP, BUTTON_X, BUTTON_Y,
@@ -51,6 +52,7 @@ pub(crate) struct A330Runtime {
     semaphores: BTreeMap<u32, u32>,
     active_framebuffer: u32,
     framebuffer_bits: u32,
+    firmware_archive: Option<FirmwareArchive>,
 }
 
 impl A330Runtime {
@@ -80,6 +82,7 @@ impl A330Runtime {
             .find(|symbol| symbol.name == "AppMain")
             .map(|symbol| symbol.address);
         let content_directory = _path.parent().map(PathBuf::from).unwrap_or_default();
+        let firmware_archive = FirmwareArchive::discover(&content_directory);
         Ok(Self {
             package,
             cpu,
@@ -103,6 +106,7 @@ impl A330Runtime {
             semaphores: BTreeMap::new(),
             active_framebuffer: FRAMEBUFFER_BASE,
             framebuffer_bits: 16,
+            firmware_archive,
         })
     }
 
@@ -122,6 +126,7 @@ impl A330Runtime {
         replacement.unknown_hle_policy = policy;
         replacement.unknown_hle_allowlist = allowlist;
         replacement.content_directory = content_directory;
+        replacement.firmware_archive = self.firmware_archive.clone();
         *self = replacement;
         Ok(())
     }
@@ -208,6 +213,7 @@ impl A330Runtime {
                     framebuffer_bits: &mut self.framebuffer_bits,
                     audio: &mut self.audio,
                     input: &mut self.input,
+                    firmware_archive: self.firmware_archive.as_ref(),
                 };
                 let pc = self.cpu.r[15];
                 if let Err(error) = self.cpu.step(&mut bus) {
@@ -317,6 +323,7 @@ struct RuntimeBus<'a> {
     framebuffer_bits: &'a mut u32,
     audio: &'a mut Audio,
     input: &'a mut Input,
+    firmware_archive: Option<&'a FirmwareArchive>,
 }
 
 impl RuntimeBus<'_> {
@@ -665,18 +672,31 @@ impl RuntimeBus<'_> {
 
     fn open_file(&mut self, name: &str, mode: &str) -> u32 {
         if mode.as_bytes().first().copied().unwrap_or(b'r') != b'r' {
+            log::trace!("ARM file open rejected write mode: {name:?} ({mode:?})");
             return 0;
         }
         let Some(path) = resolve_guest_path(self.content_directory, name) else {
+            log::trace!("ARM file open rejected path: {name:?}");
             return 0;
         };
-        let data = match std::fs::read(path) {
-            Ok(data) => data,
-            Err(_) => {
-                let Some(resource) = self.package.find_resource(name) else {
+        let data = match std::fs::read(&path) {
+            Ok(data) => {
+                log::trace!("ARM file open host path: {name:?} -> {}", path.display());
+                data
+            }
+            Err(error) => {
+                if let Some(resource) = self.package.find_resource(name) {
+                    log::trace!("ARM file open package resource: {name:?}");
+                    self.package.get_resource_data(resource)
+                } else if let Some(data) =
+                    self.firmware_archive.and_then(|archive| archive.read(name))
+                {
+                    log::trace!("ARM file open firmware resource: {name:?}");
+                    data
+                } else {
+                    log::trace!("ARM file open failed: {name:?} ({error})");
                     return 0;
-                };
-                self.package.get_resource_data(resource)
+                }
             }
         };
         let handle = *self.next_file_handle;
