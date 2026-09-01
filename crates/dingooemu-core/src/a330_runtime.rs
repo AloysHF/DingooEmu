@@ -391,7 +391,7 @@ impl RuntimeBus<'_> {
             }
             "fsys_fopenW" => {
                 let name = self.read_wide_string(cpu.r[0], 1024)?;
-                let mode = self.read_wide_string(cpu.r[1], 16)?;
+                let mode = self.read_c_string(cpu.r[1], 16)?;
                 cpu.r[0] = self.open_file(&name, &mode);
             }
             "fclose" | "fsys_fclose" | "fsys_fcloseW" => {
@@ -1233,6 +1233,36 @@ mod tests {
             runtime.memory.read_bytes(STACK_BASE + 64, 4).unwrap(),
             [1, 2, 3, 4]
         );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn wide_guest_file_paths_use_an_ansi_mode_string() {
+        let directory =
+            std::env::temp_dir().join(format!("dingooemu-arm-wide-files-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("asset.bin"), [1, 2, 3, 4]).unwrap();
+
+        let mut runtime =
+            A330Runtime::from_package(svc_package("fsys_fopenW"), directory.join("game.c2s"))
+                .unwrap();
+        let mut wide_name = Vec::new();
+        for value in "asset.bin".encode_utf16().chain(std::iter::once(0)) {
+            wide_name.extend_from_slice(&value.to_le_bytes());
+        }
+        runtime.memory.write_bytes(STACK_BASE, &wide_name).unwrap();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE + 64, b"rb\0")
+            .unwrap();
+        runtime.cpu.r[0] = STACK_BASE;
+        runtime.cpu.r[1] = STACK_BASE + 64;
+        runtime.start();
+        runtime.tick().unwrap();
+        let handle = runtime.cpu.r[0];
+        assert_ne!(handle, 0);
+        assert_eq!(runtime.files[&handle].data, [1, 2, 3, 4]);
 
         std::fs::remove_dir_all(directory).unwrap();
     }
