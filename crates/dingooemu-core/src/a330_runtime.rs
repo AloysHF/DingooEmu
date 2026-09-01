@@ -22,7 +22,6 @@ const APP_PATH_ADDRESS: u32 = STACK_BASE + 0x200;
 const LOCALE_ADDRESS: u32 = STACK_BASE + 0x600;
 const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
 const LEGACY_GRAPHICS_SURFACE: u32 = 0x0930_201c;
-const GUEST_FILE_MAGIC: u32 = 0x4653_5953;
 
 struct GuestFile {
     data: Vec<u8>,
@@ -769,16 +768,16 @@ impl RuntimeBus<'_> {
         writable: bool,
         dirty: bool,
     ) -> u32 {
+        let stream = *self.next_file_handle;
+        *self.next_file_handle = stream.wrapping_add(1).max(1);
         let handle = if self.profile == ArmProfile::Homebrew {
             let address = self.allocate(16);
-            if address == 0 || self.memory.write32(address, GUEST_FILE_MAGIC).is_err() {
+            if address == 0 || self.memory.write32(address, stream).is_err() {
                 return 0;
             }
             address
         } else {
-            let handle = *self.next_file_handle;
-            *self.next_file_handle = handle.wrapping_add(1).max(1);
-            handle
+            stream
         };
         self.files.insert(
             handle,
@@ -1411,7 +1410,7 @@ mod tests {
         let handle = runtime.cpu.r[0];
 
         assert!(handle >= runtime.memory.heap_base());
-        assert_eq!(runtime.memory.read32(handle).unwrap(), GUEST_FILE_MAGIC);
+        assert_eq!(runtime.memory.read32(handle).unwrap(), 1);
         assert_eq!(runtime.files[&handle].data, [1, 2, 3, 4]);
 
         std::fs::remove_dir_all(directory).unwrap();
