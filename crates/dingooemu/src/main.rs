@@ -109,15 +109,15 @@ mod screen {
     }
 }
 
-/// Dingoo A320 Emulator
+/// Dingoo A320 and Gemei A330 emulator
 #[derive(Parser, Debug)]
 #[command(
     name = "dingoo-emu",
     version,
-    about = "A Dingoo A320 emulator written in Rust"
+    about = "A Dingoo A320 and Gemei A330 emulator written in Rust"
 )]
 struct Args {
-    /// Path to the .app game file
+    /// Path to an .app, .cc, .c2s, or .c3s game file
     path: String,
 
     /// Window scale factor

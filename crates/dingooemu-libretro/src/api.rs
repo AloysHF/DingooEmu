@@ -83,7 +83,7 @@ pub extern "C" fn retro_get_system_info(info: *mut RetroSystemInfo) {
 
     info.library_name = c"DingooEmu".as_ptr();
     info.library_version = c"0.2.0".as_ptr();
-    info.valid_extensions = c"app".as_ptr();
+    info.valid_extensions = c"app|cc|c2s|c3s".as_ptr();
     info.need_fullpath = true;
     info.block_extract = false;
 }
@@ -756,7 +756,7 @@ fn query_joypad_buttons(mut pressed: impl FnMut(u32) -> bool) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::CString;
+    use std::ffi::{CStr, CString};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Mutex;
 
@@ -858,6 +858,17 @@ mod tests {
             id,
             RETRO_DEVICE_ID_JOYPAD_A | RETRO_DEVICE_ID_JOYPAD_START
         ))
+    }
+
+    #[test]
+    fn advertises_every_supported_content_extension() {
+        let mut info = std::mem::MaybeUninit::<RetroSystemInfo>::zeroed();
+        retro_get_system_info(info.as_mut_ptr());
+        let info = unsafe { info.assume_init() };
+        let extensions = unsafe { CStr::from_ptr(info.valid_extensions) };
+
+        assert_eq!(extensions.to_str().unwrap(), "app|cc|c2s|c3s");
+        assert!(info.need_fullpath);
     }
 
     fn minimal_app_bytes() -> Vec<u8> {
