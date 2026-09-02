@@ -32,6 +32,157 @@ struct GuestFile {
     dirty: bool,
 }
 
+#[derive(Clone, Copy)]
+struct HeapBlock {
+    address: u32,
+    size: u32,
+    free: bool,
+}
+
+struct GuestHeap {
+    base: u32,
+    cursor: u32,
+    blocks: Vec<HeapBlock>,
+}
+
+impl GuestHeap {
+    fn new(base: u32) -> Self {
+        Self {
+            base,
+            cursor: base,
+            blocks: Vec::new(),
+        }
+    }
+
+    fn allocate(&mut self, requested: u32) -> u32 {
+        let Some(size) = requested.max(1).checked_add(7).map(|size| size & !7) else {
+            return 0;
+        };
+        if let Some(index) = self
+            .blocks
+            .iter()
+            .position(|block| block.free && block.size >= size)
+        {
+            let address = self.blocks[index].address;
+            let remaining = self.blocks[index].size - size;
+            self.blocks[index].size = size;
+            self.blocks[index].free = false;
+            if remaining >= 8 {
+                self.blocks.insert(
+                    index + 1,
+                    HeapBlock {
+                        address: address + size,
+                        size: remaining,
+                        free: true,
+                    },
+                );
+            } else {
+                self.blocks[index].size += remaining;
+            }
+            return address;
+        }
+
+        let heap_end = self.base.saturating_add(HEAP_SIZE as u32);
+        let Some(end) = self.cursor.checked_add(size) else {
+            return 0;
+        };
+        if end > heap_end {
+            return 0;
+        }
+        let address = self.cursor;
+        self.cursor = end;
+        self.blocks.push(HeapBlock {
+            address,
+            size,
+            free: false,
+        });
+        address
+    }
+
+    fn deallocate(&mut self, address: u32) {
+        let Some(mut index) = self
+            .blocks
+            .iter()
+            .position(|block| block.address == address && !block.free)
+        else {
+            return;
+        };
+        self.blocks[index].free = true;
+        if index + 1 < self.blocks.len() && self.blocks[index + 1].free {
+            let next = self.blocks.remove(index + 1);
+            self.blocks[index].size += next.size;
+        }
+        if index > 0 && self.blocks[index - 1].free {
+            let current = self.blocks.remove(index);
+            index -= 1;
+            self.blocks[index].size += current.size;
+        }
+        while self.blocks.last().is_some_and(|block| {
+            block.free && block.address.checked_add(block.size) == Some(self.cursor)
+        }) {
+            let block = self.blocks.pop().unwrap();
+            self.cursor = block.address;
+        }
+    }
+
+    fn reallocate(&mut self, memory: &mut A330Memory, address: u32, requested: u32) -> Result<u32> {
+        if address == 0 {
+            return Ok(self.allocate(requested));
+        }
+        if requested == 0 {
+            self.deallocate(address);
+            return Ok(0);
+        }
+        let Some(size) = requested.checked_add(7).map(|size| size & !7) else {
+            return Ok(0);
+        };
+        let Some(index) = self
+            .blocks
+            .iter()
+            .position(|block| block.address == address && !block.free)
+        else {
+            return Ok(0);
+        };
+        if self.blocks[index].size >= size {
+            return Ok(address);
+        }
+        if index + 1 < self.blocks.len() && self.blocks[index + 1].free {
+            let combined = self.blocks[index]
+                .size
+                .saturating_add(self.blocks[index + 1].size);
+            if combined >= size {
+                self.blocks.remove(index + 1);
+                let remaining = combined - size;
+                self.blocks[index].size = size;
+                if remaining >= 8 {
+                    self.blocks.insert(
+                        index + 1,
+                        HeapBlock {
+                            address: address + size,
+                            size: remaining,
+                            free: true,
+                        },
+                    );
+                } else {
+                    self.blocks[index].size = combined;
+                }
+                return Ok(address);
+            }
+        }
+
+        let old_size = self.blocks[index].size;
+        let new_address = self.allocate(requested);
+        if new_address == 0 {
+            return Ok(0);
+        }
+        let length = old_size.min(requested) as usize;
+        let data = memory.read_bytes(address, length)?.to_vec();
+        memory.write_bytes(new_address, &data)?;
+        self.deallocate(address);
+        Ok(new_address)
+    }
+}
+
 pub(crate) struct A330Runtime {
     package: PackageImage,
     pub(crate) cpu: ArmCpu,
@@ -42,7 +193,7 @@ pub(crate) struct A330Runtime {
     unknown_hle_calls: BTreeMap<String, UnknownHleCall>,
     unknown_hle_policy: UnknownHlePolicy,
     unknown_hle_allowlist: BTreeSet<String>,
-    next_heap: u32,
+    heap: GuestHeap,
     running: bool,
     boot_complete: bool,
     app_main: Option<u32>,
@@ -67,7 +218,7 @@ impl A330Runtime {
             STACK_BASE + STACK_SIZE as u32 - 0x1000,
             EXIT_ADDRESS,
         );
-        let next_heap = memory.heap_base();
+        let heap = GuestHeap::new(memory.heap_base());
         let file_name = _path
             .file_name()
             .and_then(|name| name.to_str())
@@ -99,7 +250,7 @@ impl A330Runtime {
             unknown_hle_calls: BTreeMap::new(),
             unknown_hle_policy: UnknownHlePolicy::default(),
             unknown_hle_allowlist: BTreeSet::new(),
-            next_heap,
+            heap,
             running: false,
             boot_complete: false,
             app_main,
@@ -221,7 +372,7 @@ impl A330Runtime {
                     unknown_hle_calls: &mut self.unknown_hle_calls,
                     unknown_hle_policy: self.unknown_hle_policy,
                     unknown_hle_allowlist: &self.unknown_hle_allowlist,
-                    next_heap: &mut self.next_heap,
+                    heap: &mut self.heap,
                     frame_address: &mut frame_address,
                     stop_requested: false,
                     dynamic_imports: &mut self.dynamic_imports,
@@ -332,7 +483,7 @@ struct RuntimeBus<'a> {
     unknown_hle_calls: &'a mut BTreeMap<String, UnknownHleCall>,
     unknown_hle_policy: UnknownHlePolicy,
     unknown_hle_allowlist: &'a BTreeSet<String>,
-    next_heap: &'a mut u32,
+    heap: &'a mut GuestHeap,
     frame_address: &'a mut Option<u32>,
     stop_requested: bool,
     dynamic_imports: &'a mut Vec<String>,
@@ -394,8 +545,17 @@ impl RuntimeBus<'_> {
                 cpu.r[0] = 0;
             }
             "malloc" | "OSMalloc" | "jmalloc" => cpu.r[0] = self.allocate(cpu.r[0]),
-            "calloc" => cpu.r[0] = self.allocate(cpu.r[0].saturating_mul(cpu.r[1])),
-            "free" | "OSFree" | "jfree" => cpu.r[0] = 0,
+            "calloc" => {
+                cpu.r[0] = match cpu.r[0].checked_mul(cpu.r[1]) {
+                    Some(size) => self.allocate_zeroed(size)?,
+                    None => 0,
+                };
+            }
+            "realloc" => cpu.r[0] = self.reallocate(cpu.r[0], cpu.r[1])?,
+            "free" | "OSFree" | "jfree" => {
+                self.deallocate(cpu.r[0]);
+                cpu.r[0] = 0;
+            }
             "memset" => {
                 let data = vec![cpu.r[1] as u8; cpu.r[2] as usize];
                 self.memory.write_bytes(cpu.r[0], &data)?;
@@ -453,7 +613,10 @@ impl RuntimeBus<'_> {
                 cpu.r[0] = self.read_resource(cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3])?;
             }
             "dl_res_close" => {
-                self.files.remove(&cpu.r[0]);
+                let handle = cpu.r[0];
+                if self.files.remove(&handle).is_some() {
+                    self.deallocate(handle);
+                }
                 cpu.r[0] = 0;
             }
             "_kbd_get_status" | "kbd_get_status" | "_rmt_get_status" | "rmt_get_status" => {
@@ -696,16 +859,23 @@ impl RuntimeBus<'_> {
     }
 
     fn allocate(&mut self, size: u32) -> u32 {
-        let size = size.max(1).saturating_add(7) & !7;
-        let address = *self.next_heap;
-        let heap_end = self.memory.heap_base().saturating_add(HEAP_SIZE as u32);
-        match address.checked_add(size) {
-            Some(end) if end <= heap_end => {
-                *self.next_heap = end;
-                address
-            }
-            _ => 0,
+        self.heap.allocate(size)
+    }
+
+    fn allocate_zeroed(&mut self, size: u32) -> Result<u32> {
+        let address = self.allocate(size);
+        if address != 0 && size != 0 {
+            self.memory.write_bytes(address, &vec![0; size as usize])?;
         }
+        Ok(address)
+    }
+
+    fn deallocate(&mut self, address: u32) {
+        self.heap.deallocate(address);
+    }
+
+    fn reallocate(&mut self, address: u32, size: u32) -> Result<u32> {
+        self.heap.reallocate(self.memory, address, size)
     }
 
     fn dynamic_import(&mut self, name_address: u32) -> Result<u32> {
@@ -800,7 +970,11 @@ impl RuntimeBus<'_> {
         *self.next_file_handle = stream.wrapping_add(1).max(1);
         let handle = if self.profile == ArmProfile::Homebrew {
             let address = self.allocate(16);
-            if address == 0 || self.memory.write32(address, stream).is_err() {
+            if address == 0 {
+                return 0;
+            }
+            if self.memory.write32(address, stream).is_err() {
+                self.deallocate(address);
                 return 0;
             }
             address
@@ -962,6 +1136,7 @@ impl RuntimeBus<'_> {
         };
         let result = flush_guest_file(file);
         self.files.remove(&handle);
+        self.deallocate(handle);
         if let Err(error) = result {
             log::error!("Failed to close ARM guest save file {handle}: {error}");
             u32::MAX
@@ -1227,6 +1402,47 @@ mod tests {
         package.data[0x80..0x84].copy_from_slice(&0xef12_3456u32.to_le_bytes());
         package.imports.clear();
         package
+    }
+
+    #[test]
+    fn a330_heap_reuses_and_coalesces_freed_blocks() {
+        let mut heap = GuestHeap::new(0x2100_0000);
+        let first = heap.allocate(16);
+        let second = heap.allocate(16);
+        let third = heap.allocate(16);
+
+        heap.deallocate(second);
+        assert_eq!(heap.allocate(8), second);
+        heap.deallocate(first);
+        heap.deallocate(second);
+        heap.deallocate(third);
+
+        assert_eq!(heap.allocate(48), first);
+    }
+
+    #[test]
+    fn a330_realloc_preserves_data_and_the_original_on_failure() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("realloc"), PathBuf::new()).unwrap();
+        let first = runtime.heap.allocate(8);
+        runtime.memory.write32(first, 0x1234_5678).unwrap();
+        runtime.heap.allocate(8);
+
+        let moved = runtime
+            .heap
+            .reallocate(&mut runtime.memory, first, 16)
+            .unwrap();
+        assert_ne!(moved, first);
+        assert_eq!(runtime.memory.read32(moved).unwrap(), 0x1234_5678);
+
+        assert_eq!(
+            runtime
+                .heap
+                .reallocate(&mut runtime.memory, moved, u32::MAX)
+                .unwrap(),
+            0
+        );
+        assert_eq!(runtime.memory.read32(moved).unwrap(), 0x1234_5678);
     }
 
     #[test]
