@@ -24,6 +24,7 @@ const LOCALE_ADDRESS: u32 = STACK_BASE + 0x600;
 const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
 const LEGACY_GRAPHICS_SURFACE: u32 = 0x0930_201c;
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct GuestFile {
     data: Vec<u8>,
     position: usize,
@@ -33,13 +34,14 @@ struct GuestFile {
     dirty: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct HeapBlock {
     address: u32,
     size: u32,
     free: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct GuestHeap {
     base: u32,
     cursor: u32,
@@ -182,6 +184,72 @@ impl GuestHeap {
         self.deallocate(address);
         Ok(new_address)
     }
+
+    fn snapshot_layout_is_valid(&self, base: u32) -> bool {
+        if self.base != base || self.cursor < base || self.cursor > base + HEAP_SIZE as u32 {
+            return false;
+        }
+        let mut expected_address = base;
+        let mut previous_was_free = false;
+        for block in &self.blocks {
+            if block.address != expected_address
+                || block.size < 8
+                || block.size % 8 != 0
+                || previous_was_free && block.free
+            {
+                return false;
+            }
+            let Some(end) = block.address.checked_add(block.size) else {
+                return false;
+            };
+            if end > self.cursor {
+                return false;
+            }
+            expected_address = end;
+            previous_was_free = block.free;
+        }
+        expected_address == self.cursor
+    }
+}
+
+#[derive(serde::Serialize)]
+struct A330StateRef<'a> {
+    cpu: &'a ArmCpu,
+    memory: &'a A330Memory,
+    video: &'a Video,
+    audio: &'a Audio,
+    input: &'a Input,
+    heap: &'a GuestHeap,
+    running: bool,
+    boot_complete: bool,
+    dynamic_imports: &'a [String],
+    tasks: &'a VecDeque<(ArmCpu, u32)>,
+    current_priority: u32,
+    files: BTreeMap<u32, GuestFile>,
+    next_file_handle: u32,
+    semaphores: &'a BTreeMap<u32, u32>,
+    active_framebuffer: u32,
+    framebuffer_bits: u32,
+}
+
+#[derive(serde::Deserialize)]
+struct A330State {
+    cpu: ArmCpu,
+    memory: A330Memory,
+    video: Video,
+    audio: Audio,
+    input: Input,
+    heap: GuestHeap,
+    running: bool,
+    boot_complete: bool,
+    dynamic_imports: Vec<String>,
+    tasks: VecDeque<(ArmCpu, u32)>,
+    current_priority: u32,
+    files: BTreeMap<u32, GuestFile>,
+    next_file_handle: u32,
+    semaphores: BTreeMap<u32, u32>,
+    active_framebuffer: u32,
+    framebuffer_bits: u32,
 }
 
 pub(crate) struct A330Runtime {
@@ -337,6 +405,107 @@ impl A330Runtime {
     pub(crate) fn set_save_directory<P: Into<PathBuf>>(&mut self, directory: P) {
         self.flush_save_files();
         self.save_directory = Some(directory.into());
+    }
+
+    pub(crate) fn serialized_state_size(&self) -> usize {
+        crate::save_state::A330_SERIALIZED_SIZE
+    }
+
+    pub(crate) fn serialize_state(&self, output: &mut [u8]) -> anyhow::Result<()> {
+        let mut files = self.files.clone();
+        for file in files.values_mut() {
+            let Some(path) = file.save_path.take() else {
+                continue;
+            };
+            let root = self
+                .save_directory
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("save file has no configured save directory"))?;
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| anyhow::anyhow!("save file is outside the configured directory"))?;
+            if !safe_relative_path(relative) {
+                anyhow::bail!("save file has an unsafe relative path");
+            }
+            file.save_path = Some(relative.to_path_buf());
+        }
+        let state = A330StateRef {
+            cpu: &self.cpu,
+            memory: &self.memory,
+            video: &self.video,
+            audio: &self.audio,
+            input: &self.input,
+            heap: &self.heap,
+            running: self.running,
+            boot_complete: self.boot_complete,
+            dynamic_imports: &self.dynamic_imports,
+            tasks: &self.tasks,
+            current_priority: self.current_priority,
+            files,
+            next_file_handle: self.next_file_handle,
+            semaphores: &self.semaphores,
+            active_framebuffer: self.active_framebuffer,
+            framebuffer_bits: self.framebuffer_bits,
+        };
+        crate::save_state::encode_a330(&state, crc32fast::hash(&self.package.data), output)
+    }
+
+    pub(crate) fn unserialize_state(&mut self, input: &[u8]) -> anyhow::Result<()> {
+        let mut state: A330State =
+            crate::save_state::decode_a330(input, crc32fast::hash(&self.package.data))?;
+        let profile = self.profile();
+        if !state.memory.snapshot_layout_is_valid(profile)
+            || !state.video.snapshot_layout_is_valid()
+            || !state
+                .heap
+                .snapshot_layout_is_valid(state.memory.heap_base())
+        {
+            anyhow::bail!("save state has an incompatible A330 memory layout");
+        }
+        let max_dynamic_imports = (EXIT_ADDRESS - DYNAMIC_THUNK_BASE) as usize / 8;
+        if state.dynamic_imports.len() > max_dynamic_imports {
+            anyhow::bail!("save state has too many dynamic imports");
+        }
+        if !matches!(state.framebuffer_bits, 16 | 32) {
+            anyhow::bail!("save state has an invalid framebuffer depth");
+        }
+        for file in state.files.values_mut() {
+            let Some(relative) = file.save_path.take() else {
+                continue;
+            };
+            if !safe_relative_path(&relative) {
+                anyhow::bail!("save state contains an unsafe save path");
+            }
+            let root = self
+                .save_directory
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("save state requires a save directory"))?;
+            file.save_path = Some(root.join(relative));
+        }
+
+        #[cfg(feature = "standalone")]
+        let host_audio_output_enabled = self.audio.host_output_enabled();
+        self.cpu = state.cpu;
+        self.memory = state.memory;
+        self.video = state.video;
+        self.audio = state.audio;
+        #[cfg(feature = "standalone")]
+        self.audio
+            .set_host_output_enabled(host_audio_output_enabled);
+        self.audio.resume_after_state_load();
+        self.input = state.input;
+        self.heap = state.heap;
+        self.running = state.running;
+        self.boot_complete = state.boot_complete;
+        self.dynamic_imports = state.dynamic_imports;
+        self.tasks = state.tasks;
+        self.current_priority = state.current_priority;
+        self.files = state.files;
+        self.next_file_handle = state.next_file_handle;
+        self.semaphores = state.semaphores;
+        self.active_framebuffer = state.active_framebuffer;
+        self.framebuffer_bits = state.framebuffer_bits;
+        Ok(())
     }
 
     pub(crate) fn set_cheat(
@@ -1303,6 +1472,16 @@ fn resolve_guest_path(root: &std::path::Path, name: &str) -> Option<PathBuf> {
     (!relative.as_os_str().is_empty()).then(|| root.join(relative))
 }
 
+fn safe_relative_path(path: &std::path::Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
 fn map_a330_input(profile: ArmProfile, input: u32) -> u32 {
     const POWER: u32 = 0x80;
 
@@ -1519,6 +1698,109 @@ mod tests {
         runtime.start();
         runtime.tick().unwrap();
         assert_eq!(runtime.memory.read32(STACK_BASE).unwrap(), 0);
+    }
+
+    #[test]
+    fn a330_save_state_round_trip_is_complete_and_transactional() {
+        let save_directory =
+            std::env::temp_dir().join(format!("dingooemu-a330-state-{}", std::process::id()));
+        let mut runtime =
+            A330Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
+        runtime.set_save_directory(&save_directory);
+        runtime.cpu.r[4] = 0x1234_5678;
+        runtime
+            .memory
+            .write32(STACK_BASE + 0x100, 0xaabb_ccdd)
+            .unwrap();
+        runtime.video.framebuffer_mut()[..2].copy_from_slice(&0xf800u16.to_le_bytes());
+        runtime.input.set_buttons(BUTTON_A | BUTTON_START);
+        let audio_config = AudioConfig::new(16_000, 16, 1, 40).unwrap();
+        assert!(runtime.audio.open(audio_config));
+        let allocation = runtime.heap.allocate(16);
+        runtime.memory.write32(allocation, 0xfeed_beef).unwrap();
+        runtime.running = true;
+        runtime.cpu.start();
+        runtime.boot_complete = true;
+        runtime.dynamic_imports.push("dynamic_call".into());
+        let mut task = ArmCpu::new(0x1010_1000, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
+        task.r[5] = 0x55aa_55aa;
+        task.start();
+        runtime.tasks.push_back((task, 7));
+        runtime.current_priority = 3;
+        runtime.files.insert(
+            17,
+            GuestFile {
+                data: vec![1, 2, 3, 4],
+                position: 2,
+                data_address: allocation,
+                save_path: Some(save_directory.join("slot.dat")),
+                writable: true,
+                dirty: true,
+            },
+        );
+        runtime.next_file_handle = 18;
+        runtime.semaphores.insert(9, 2);
+        runtime.active_framebuffer = FRAMEBUFFER_BASE + 0x1000;
+        runtime.framebuffer_bits = 32;
+
+        let mut state = vec![0; runtime.serialized_state_size()];
+        runtime.serialize_state(&mut state).unwrap();
+
+        runtime.cpu.r[4] = 0;
+        runtime.memory.write32(STACK_BASE + 0x100, 0).unwrap();
+        runtime.video.framebuffer_mut()[..2].fill(0);
+        runtime.input.set_buttons(0);
+        runtime.audio.close();
+        runtime.heap = GuestHeap::new(runtime.memory.heap_base());
+        runtime.running = false;
+        runtime.cpu.stop();
+        runtime.boot_complete = false;
+        runtime.dynamic_imports.clear();
+        runtime.tasks.clear();
+        runtime.current_priority = 0;
+        runtime.files.clear();
+        runtime.next_file_handle = 1;
+        runtime.semaphores.clear();
+        runtime.active_framebuffer = FRAMEBUFFER_BASE;
+        runtime.framebuffer_bits = 16;
+
+        runtime.unserialize_state(&state).unwrap();
+        assert_eq!(runtime.cpu.r[4], 0x1234_5678);
+        assert_eq!(
+            runtime.memory.read32(STACK_BASE + 0x100).unwrap(),
+            0xaabb_ccdd
+        );
+        assert_eq!(&runtime.video.framebuffer()[..2], &0xf800u16.to_le_bytes());
+        assert_eq!(runtime.input.buttons(), BUTTON_A | BUTTON_START);
+        assert_eq!(runtime.audio.config(), Some(audio_config));
+        assert_eq!(runtime.memory.read32(allocation).unwrap(), 0xfeed_beef);
+        assert!(runtime.is_running());
+        assert!(runtime.boot_complete);
+        assert_eq!(runtime.dynamic_imports, ["dynamic_call"]);
+        assert_eq!(runtime.tasks[0].0.r[5], 0x55aa_55aa);
+        assert_eq!(runtime.tasks[0].1, 7);
+        assert_eq!(runtime.current_priority, 3);
+        assert_eq!(runtime.files[&17].data, [1, 2, 3, 4]);
+        assert_eq!(runtime.files[&17].position, 2);
+        assert_eq!(
+            runtime.files[&17].save_path.as_deref(),
+            Some(save_directory.join("slot.dat").as_path())
+        );
+        assert_eq!(runtime.next_file_handle, 18);
+        assert_eq!(runtime.semaphores[&9], 2);
+        assert_eq!(runtime.active_framebuffer, FRAMEBUFFER_BASE + 0x1000);
+        assert_eq!(runtime.framebuffer_bits, 32);
+
+        runtime
+            .memory
+            .write32(STACK_BASE + 0x100, 0xdead_beef)
+            .unwrap();
+        state[32] ^= 1;
+        assert!(runtime.unserialize_state(&state).is_err());
+        assert_eq!(
+            runtime.memory.read32(STACK_BASE + 0x100).unwrap(),
+            0xdead_beef
+        );
     }
 
     #[test]

@@ -11,36 +11,64 @@ const HEADER_SIZE: usize = 32;
 // therefore exceed the original 64 MiB ceiling even though their LZ4 payload
 // still fits in the fixed libretro serialization buffer.
 const MAX_DECODED_SIZE: usize = 128 * 1024 * 1024;
+const A330_MAX_DECODED_SIZE: usize = 256 * 1024 * 1024;
 
 /// Fixed capacity required by the libretro serialization API.
 pub const SERIALIZED_SIZE: usize = 48 * 1024 * 1024;
+pub const A330_SERIALIZED_SIZE: usize = 128 * 1024 * 1024;
 
 pub fn encode<T: Serialize>(value: &T, content_crc32: u32, output: &mut [u8]) -> Result<()> {
-    if output.len() < SERIALIZED_SIZE {
+    encode_with_limits(
+        value,
+        content_crc32,
+        output,
+        SERIALIZED_SIZE,
+        MAX_DECODED_SIZE,
+    )
+}
+
+pub fn encode_a330<T: Serialize>(value: &T, content_crc32: u32, output: &mut [u8]) -> Result<()> {
+    encode_with_limits(
+        value,
+        content_crc32,
+        output,
+        A330_SERIALIZED_SIZE,
+        A330_MAX_DECODED_SIZE,
+    )
+}
+
+fn encode_with_limits<T: Serialize>(
+    value: &T,
+    content_crc32: u32,
+    output: &mut [u8],
+    serialized_size: usize,
+    max_decoded_size: usize,
+) -> Result<()> {
+    if output.len() < serialized_size {
         bail!(
             "save-state buffer is too small: got {}, need {}",
             output.len(),
-            SERIALIZED_SIZE
+            serialized_size
         );
     }
 
     let decoded = codec()
         .serialize(value)
         .context("failed to encode save-state payload")?;
-    if decoded.len() > MAX_DECODED_SIZE {
+    if decoded.len() > max_decoded_size {
         bail!(
             "save-state decoded payload is {} bytes; limit is {} bytes",
             decoded.len(),
-            MAX_DECODED_SIZE
+            max_decoded_size
         );
     }
 
     let payload = lz4_flex::compress(&decoded);
-    if payload.len() > SERIALIZED_SIZE - HEADER_SIZE {
+    if payload.len() > serialized_size - HEADER_SIZE {
         bail!(
             "save-state compressed payload is {} bytes; fixed capacity is {} bytes",
             payload.len(),
-            SERIALIZED_SIZE - HEADER_SIZE
+            serialized_size - HEADER_SIZE
         );
     }
 
@@ -56,6 +84,29 @@ pub fn encode<T: Serialize>(value: &T, content_crc32: u32, output: &mut [u8]) ->
 }
 
 pub fn decode<T: DeserializeOwned>(input: &[u8], expected_content_crc32: u32) -> Result<T> {
+    decode_with_limits(
+        input,
+        expected_content_crc32,
+        SERIALIZED_SIZE,
+        MAX_DECODED_SIZE,
+    )
+}
+
+pub fn decode_a330<T: DeserializeOwned>(input: &[u8], expected_content_crc32: u32) -> Result<T> {
+    decode_with_limits(
+        input,
+        expected_content_crc32,
+        A330_SERIALIZED_SIZE,
+        A330_MAX_DECODED_SIZE,
+    )
+}
+
+fn decode_with_limits<T: DeserializeOwned>(
+    input: &[u8],
+    expected_content_crc32: u32,
+    serialized_size: usize,
+    max_decoded_size: usize,
+) -> Result<T> {
     if input.len() < HEADER_SIZE {
         bail!("save state is truncated");
     }
@@ -73,16 +124,16 @@ pub fn decode<T: DeserializeOwned>(input: &[u8], expected_content_crc32: u32) ->
 
     let payload_len = read_u32(input, 16) as usize;
     let decoded_len = read_u32(input, 20) as usize;
-    if decoded_len > MAX_DECODED_SIZE {
+    if decoded_len > max_decoded_size {
         bail!(
             "save-state declares {} decoded bytes; limit is {} bytes",
             decoded_len,
-            MAX_DECODED_SIZE
+            max_decoded_size
         );
     }
     let payload_end = HEADER_SIZE
         .checked_add(payload_len)
-        .filter(|&end| end <= input.len() && end <= SERIALIZED_SIZE)
+        .filter(|&end| end <= input.len() && end <= serialized_size)
         .context("invalid save-state payload length")?;
     let payload = &input[HEADER_SIZE..payload_end];
     if crc32fast::hash(payload) != read_u32(input, 24) {
@@ -92,7 +143,7 @@ pub fn decode<T: DeserializeOwned>(input: &[u8], expected_content_crc32: u32) ->
     let decoded =
         lz4_flex::decompress(payload, decoded_len).context("failed to decompress save state")?;
     codec()
-        .with_limit(MAX_DECODED_SIZE as u64)
+        .with_limit(max_decoded_size as u64)
         .deserialize(&decoded)
         .context("failed to decode save state")
 }

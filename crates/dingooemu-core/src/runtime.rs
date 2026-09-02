@@ -124,21 +124,21 @@ impl Emulator {
     pub fn serialized_state_size(&self) -> usize {
         match &self.runtime {
             Runtime::App(runtime) => runtime.serialized_state_size(),
-            Runtime::Arm(_) => 128 * 1024 * 1024,
+            Runtime::Arm(runtime) => runtime.serialized_state_size(),
         }
     }
 
     pub fn serialize_state(&self, output: &mut [u8]) -> anyhow::Result<()> {
         match &self.runtime {
             Runtime::App(runtime) => runtime.serialize_state(output),
-            Runtime::Arm(_) => Err(anyhow::anyhow!("ARM save states are not available yet")),
+            Runtime::Arm(runtime) => runtime.serialize_state(output),
         }
     }
 
     pub fn unserialize_state(&mut self, input: &[u8]) -> anyhow::Result<()> {
         match &mut self.runtime {
             Runtime::App(runtime) => runtime.unserialize_state(input),
-            Runtime::Arm(_) => Err(anyhow::anyhow!("ARM save states are not available yet")),
+            Runtime::Arm(runtime) => runtime.unserialize_state(input),
         }
     }
 

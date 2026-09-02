@@ -125,6 +125,18 @@ impl A330Memory {
             || region_range(address, size, FRAMEBUFFER_BASE, self.framebuffer.len()).is_some()
     }
 
+    pub(crate) fn snapshot_layout_is_valid(&self, profile: ArmProfile) -> bool {
+        self.profile == profile
+            && self.system_ram.len() == SYSTEM_RAM_SIZE
+            && self.stack.len() == STACK_SIZE
+            && self.heap.len() == HEAP_SIZE
+            && self.framebuffer.len() == FRAMEBUFFER_SIZE
+            && self.low_memory.len() == LEGACY_LOW_MEMORY_SIZE
+            && self.legacy_mmio.len() == LEGACY_MMIO_SIZE
+            && self.legacy_audio_mmio.len() == LEGACY_AUDIO_MMIO_SIZE
+            && self.legacy_system_mmio.len() == LEGACY_SYSTEM_MMIO_SIZE
+    }
+
     pub fn read8(&self, address: u32) -> Result<u8> {
         Ok(self.read_bytes(address, 1)?[0])
     }
