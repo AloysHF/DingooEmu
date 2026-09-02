@@ -338,10 +338,7 @@ impl Emulator {
     ) -> std::result::Result<(), CheatParseError> {
         match &mut self.runtime {
             Runtime::App(runtime) => runtime.set_cheat(index, enabled, code),
-            Runtime::Arm(_) => {
-                let _: CheatRule = code.parse()?;
-                Ok(())
-            }
+            Runtime::Arm(runtime) => runtime.set_cheat(index, enabled, code),
         }
     }
 
@@ -353,13 +350,14 @@ impl Emulator {
     ) -> std::result::Result<(), CheatParseError> {
         match &mut self.runtime {
             Runtime::App(runtime) => runtime.set_parsed_cheat(index, enabled, rule),
-            Runtime::Arm(_) => Ok(()),
+            Runtime::Arm(runtime) => runtime.set_parsed_cheat(index, enabled, rule),
         }
     }
 
     pub fn clear_cheats(&mut self) {
-        if let Runtime::App(runtime) = &mut self.runtime {
-            runtime.clear_cheats();
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.clear_cheats(),
+            Runtime::Arm(runtime) => runtime.clear_cheats(),
         }
     }
 

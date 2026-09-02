@@ -118,6 +118,13 @@ impl A330Memory {
         &mut self.framebuffer
     }
 
+    pub(crate) fn is_cheat_writable_range(&self, address: u32, size: usize) -> bool {
+        region_range(address, size, SYSTEM_RAM_BASE, self.system_ram.len()).is_some()
+            || region_range(address, size, STACK_BASE, self.stack.len()).is_some()
+            || region_range(address, size, self.heap_base(), self.heap.len()).is_some()
+            || region_range(address, size, FRAMEBUFFER_BASE, self.framebuffer.len()).is_some()
+    }
+
     pub fn read8(&self, address: u32) -> Result<u8> {
         Ok(self.read_bytes(address, 1)?[0])
     }

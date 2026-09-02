@@ -5,6 +5,7 @@ use crate::a330_memory::{
 use crate::app_loader::PackageImage;
 use crate::arm_cpu::{ArmBus, ArmCpu};
 use crate::audio::{Audio, AudioConfig};
+use crate::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::content::{ArmProfile, ContentFormat};
 use crate::emulator::{UnknownHleCall, UnknownHlePolicy};
 use crate::error::{Result, SimulatorError};
@@ -190,6 +191,7 @@ pub(crate) struct A330Runtime {
     pub(crate) video: Video,
     pub(crate) audio: Audio,
     pub(crate) input: Input,
+    cheats: CheatManager,
     unknown_hle_calls: BTreeMap<String, UnknownHleCall>,
     unknown_hle_policy: UnknownHlePolicy,
     unknown_hle_allowlist: BTreeSet<String>,
@@ -247,6 +249,7 @@ impl A330Runtime {
             video: Video::new(),
             audio: Audio::new(),
             input: Input::new(),
+            cheats: CheatManager::default(),
             unknown_hle_calls: BTreeMap::new(),
             unknown_hle_policy: UnknownHlePolicy::default(),
             unknown_hle_allowlist: BTreeSet::new(),
@@ -283,12 +286,14 @@ impl A330Runtime {
         let allowlist = self.unknown_hle_allowlist.clone();
         let content_directory = self.content_directory.clone();
         let save_directory = self.save_directory.clone();
+        let cheats = self.cheats.clone();
         let mut replacement = Self::from_package(self.package.clone(), PathBuf::new())?;
         replacement.unknown_hle_policy = policy;
         replacement.unknown_hle_allowlist = allowlist;
         replacement.content_directory = content_directory;
         replacement.save_directory = save_directory;
         replacement.firmware_archive = self.firmware_archive.clone();
+        replacement.cheats = cheats;
         *self = replacement;
         Ok(())
     }
@@ -334,10 +339,34 @@ impl A330Runtime {
         self.save_directory = Some(directory.into());
     }
 
+    pub(crate) fn set_cheat(
+        &mut self,
+        index: u32,
+        enabled: bool,
+        code: &str,
+    ) -> std::result::Result<(), CheatParseError> {
+        self.cheats.set_arm_slot(index, enabled, code, &self.memory)
+    }
+
+    pub(crate) fn set_parsed_cheat(
+        &mut self,
+        index: u32,
+        enabled: bool,
+        rule: CheatRule,
+    ) -> std::result::Result<(), CheatParseError> {
+        self.cheats
+            .set_parsed_arm_rule(index, enabled, rule, &self.memory)
+    }
+
+    pub(crate) fn clear_cheats(&mut self) {
+        self.cheats.clear();
+    }
+
     pub(crate) fn tick(&mut self) -> Result<()> {
         if !self.is_running() {
             return Ok(());
         }
+        self.cheats.apply_arm(&mut self.memory, &mut self.cpu);
         let profile = self.memory.profile();
         let mut frame_address = None;
         let initial = self.cpu.instruction_count;
@@ -1443,6 +1472,53 @@ mod tests {
             0
         );
         assert_eq!(runtime.memory.read32(moved).unwrap(), 0x1234_5678);
+    }
+
+    #[test]
+    fn a330_cheats_apply_enabled_rules_and_survive_reset() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
+        runtime
+            .set_cheat(0, true, "mem32:0x1ff00000=0x12345678")
+            .unwrap();
+        runtime.set_cheat(1, true, "reg:r4=0xfeedbeef").unwrap();
+        runtime
+            .set_cheat(2, false, "mem16:0x1ff00004=0xabcd")
+            .unwrap();
+
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.memory.read32(STACK_BASE).unwrap(), 0x1234_5678);
+        assert_eq!(runtime.memory.read16(STACK_BASE + 4).unwrap(), 0);
+        assert_eq!(runtime.cpu.r[4], 0xfeed_beef);
+
+        runtime.reset().unwrap();
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.memory.read32(STACK_BASE).unwrap(), 0x1234_5678);
+        assert_eq!(runtime.cpu.r[4], 0xfeed_beef);
+    }
+
+    #[test]
+    fn a330_cheats_validate_targets_and_can_be_removed() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
+        assert!(matches!(
+            runtime.set_cheat(0, true, "mem32:0x04000000=1"),
+            Err(CheatParseError::InvalidMemoryRange { .. })
+        ));
+        assert!(matches!(
+            runtime.set_cheat(0, true, "reg:r16=1"),
+            Err(CheatParseError::InvalidRegister(_))
+        ));
+
+        runtime
+            .set_cheat(0, true, "mem32:0x1ff00000=0x12345678")
+            .unwrap();
+        runtime.set_cheat(0, true, "").unwrap();
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.memory.read32(STACK_BASE).unwrap(), 0);
     }
 
     #[test]

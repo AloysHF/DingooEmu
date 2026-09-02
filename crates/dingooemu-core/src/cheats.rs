@@ -3,6 +3,8 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
+use crate::a330_memory::A330Memory;
+use crate::arm_cpu::ArmCpu;
 use crate::cpu::Cpu;
 use crate::memory::Memory;
 
@@ -22,7 +24,7 @@ pub enum CheatParseError {
     MisalignedAddress(u32, u32),
     #[error("memory range 0x{address:08X}..0x{end:08X} is not writable RAM or framebuffer")]
     InvalidMemoryRange { address: u32, end: u32 },
-    #[error("unknown MIPS register '{0}'")]
+    #[error("unknown guest register '{0}'")]
     InvalidRegister(String),
 }
 
@@ -104,6 +106,49 @@ impl CheatRule {
         };
         if let Err(error) = result {
             log::warn!("Failed to apply cheat: {error}");
+        }
+    }
+
+    fn validate_arm(&self, memory: &A330Memory) -> Result<(), CheatParseError> {
+        match self {
+            Self::Memory { width, address, .. } => {
+                let bytes = width.bytes();
+                if address % bytes != 0 {
+                    return Err(CheatParseError::MisalignedAddress(width.bits(), *address));
+                }
+                if !memory.is_cheat_writable_range(*address, bytes as usize) {
+                    return Err(CheatParseError::InvalidMemoryRange {
+                        address: *address,
+                        end: address.saturating_add(bytes - 1),
+                    });
+                }
+            }
+            Self::Register { index, .. } if *index >= 16 => {
+                return Err(CheatParseError::InvalidRegister(index.to_string()));
+            }
+            Self::Register { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn apply_arm(&self, memory: &mut A330Memory, cpu: &mut ArmCpu) {
+        let result = match *self {
+            Self::Memory {
+                width,
+                address,
+                value,
+            } => match width {
+                MemoryWidth::U8 => memory.write8(address, value as u8),
+                MemoryWidth::U16 => memory.write16(address, value as u16),
+                MemoryWidth::U32 => memory.write32(address, value),
+            },
+            Self::Register { index, value } => {
+                cpu.r[index] = value;
+                Ok(())
+            }
+        };
+        if let Err(error) = result {
+            log::warn!("Failed to apply ARM cheat: {error}");
         }
     }
 }
@@ -225,6 +270,58 @@ impl CheatManager {
     pub fn apply(&self, memory: &mut Memory, cpu: &mut Cpu) {
         for slot in self.slots.values().filter(|slot| slot.enabled) {
             slot.rule.apply(memory, cpu);
+        }
+    }
+
+    pub(crate) fn set_arm_slot(
+        &mut self,
+        index: u32,
+        enabled: bool,
+        code: &str,
+        memory: &A330Memory,
+    ) -> Result<(), CheatParseError> {
+        let code = code.trim();
+        if code.is_empty() {
+            self.slots.remove(&index);
+            return Ok(());
+        }
+        let rule = CheatRule::from_str(code)?;
+        self.set_arm_rule(index, enabled, code.to_string(), rule, memory)
+    }
+
+    pub(crate) fn set_parsed_arm_rule(
+        &mut self,
+        index: u32,
+        enabled: bool,
+        rule: CheatRule,
+        memory: &A330Memory,
+    ) -> Result<(), CheatParseError> {
+        self.set_arm_rule(index, enabled, String::new(), rule, memory)
+    }
+
+    fn set_arm_rule(
+        &mut self,
+        index: u32,
+        enabled: bool,
+        code: String,
+        rule: CheatRule,
+        memory: &A330Memory,
+    ) -> Result<(), CheatParseError> {
+        rule.validate_arm(memory)?;
+        self.slots.insert(
+            index,
+            CheatSlot {
+                enabled,
+                code,
+                rule,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn apply_arm(&self, memory: &mut A330Memory, cpu: &mut ArmCpu) {
+        for slot in self.slots.values().filter(|slot| slot.enabled) {
+            slot.rule.apply_arm(memory, cpu);
         }
     }
 }
