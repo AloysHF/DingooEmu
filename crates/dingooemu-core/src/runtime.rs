@@ -205,8 +205,9 @@ impl Emulator {
     }
 
     pub fn set_unknown_instruction_policy(&mut self, policy: UnknownInstructionPolicy) {
-        if let Runtime::App(runtime) = &mut self.runtime {
-            runtime.set_unknown_instruction_policy(policy);
+        match &mut self.runtime {
+            Runtime::App(runtime) => runtime.set_unknown_instruction_policy(policy),
+            Runtime::Arm(runtime) => runtime.set_unknown_instruction_policy(policy),
         }
     }
 

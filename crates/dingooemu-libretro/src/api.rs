@@ -576,7 +576,7 @@ fn core_option_variables() -> Vec<RetroVariable> {
         },
         RetroVariable {
             key: c"dingooemu_unknown_instruction".as_ptr(),
-            value: c"Unknown MIPS Instruction Policy; skip|stop".as_ptr(),
+            value: c"Unknown Guest Instruction Policy; skip|stop".as_ptr(),
         },
     ];
     #[cfg(all(

@@ -7,6 +7,7 @@ use crate::arm_cpu::{ArmBus, ArmCpu};
 use crate::audio::{Audio, AudioConfig};
 use crate::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::content::{ArmProfile, ContentFormat};
+use crate::cpu::UnknownInstructionPolicy;
 use crate::emulator::{UnknownHleCall, UnknownHlePolicy};
 use crate::error::{Result, SimulatorError};
 use crate::firmware_archive::FirmwareArchive;
@@ -355,6 +356,7 @@ impl A330Runtime {
         let content_directory = self.content_directory.clone();
         let save_directory = self.save_directory.clone();
         let cheats = self.cheats.clone();
+        let instruction_policy = self.cpu.unknown_instruction_policy();
         let mut replacement = Self::from_package(self.package.clone(), PathBuf::new())?;
         replacement.unknown_hle_policy = policy;
         replacement.unknown_hle_allowlist = allowlist;
@@ -362,6 +364,9 @@ impl A330Runtime {
         replacement.save_directory = save_directory;
         replacement.firmware_archive = self.firmware_archive.clone();
         replacement.cheats = cheats;
+        replacement
+            .cpu
+            .set_unknown_instruction_policy(instruction_policy);
         *self = replacement;
         Ok(())
     }
@@ -392,6 +397,13 @@ impl A330Runtime {
         S: Into<String>,
     {
         self.unknown_hle_allowlist = names.into_iter().map(Into::into).collect();
+    }
+
+    pub(crate) fn set_unknown_instruction_policy(&mut self, policy: UnknownInstructionPolicy) {
+        self.cpu.set_unknown_instruction_policy(policy);
+        for (cpu, _) in &mut self.tasks {
+            cpu.set_unknown_instruction_policy(policy);
+        }
     }
 
     pub(crate) fn flush_save_files(&mut self) {
@@ -887,6 +899,7 @@ impl RuntimeBus<'_> {
             "OSTaskCreate" => {
                 if cpu.r[0] != 0 && cpu.r[2] != 0 {
                     let mut task = ArmCpu::new(cpu.r[0], cpu.r[2], EXIT_ADDRESS);
+                    task.set_unknown_instruction_policy(cpu.unknown_instruction_policy());
                     task.r[0] = cpu.r[1];
                     task.start();
                     self.tasks.push_back((task, cpu.r[3] & 0xff));
@@ -1698,6 +1711,31 @@ mod tests {
         runtime.start();
         runtime.tick().unwrap();
         assert_eq!(runtime.memory.read32(STACK_BASE).unwrap(), 0);
+    }
+
+    #[test]
+    fn a330_unknown_instruction_policy_updates_tasks_and_survives_reset() {
+        let mut runtime =
+            A330Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
+        let mut task = ArmCpu::new(0x1010_1000, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
+        task.start();
+        runtime.tasks.push_back((task, 7));
+
+        runtime.set_unknown_instruction_policy(UnknownInstructionPolicy::Stop);
+        assert_eq!(
+            runtime.cpu.unknown_instruction_policy(),
+            UnknownInstructionPolicy::Stop
+        );
+        assert_eq!(
+            runtime.tasks[0].0.unknown_instruction_policy(),
+            UnknownInstructionPolicy::Stop
+        );
+
+        runtime.reset().unwrap();
+        assert_eq!(
+            runtime.cpu.unknown_instruction_policy(),
+            UnknownInstructionPolicy::Stop
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::cpu::UnknownInstructionPolicy;
 use crate::error::{Result, SimulatorError};
 
 const N: u32 = 1 << 31;
@@ -38,6 +39,7 @@ pub struct ArmCpu {
     pub instruction_count: u64,
     state: ArmExecutionState,
     running: bool,
+    unknown_instruction_policy: UnknownInstructionPolicy,
 }
 
 impl ArmCpu {
@@ -64,6 +66,7 @@ impl ArmCpu {
             instruction_count: 0,
             state,
             running: false,
+            unknown_instruction_policy: UnknownInstructionPolicy::default(),
         }
     }
 
@@ -83,22 +86,44 @@ impl ArmCpu {
         self.state
     }
 
+    pub fn set_unknown_instruction_policy(&mut self, policy: UnknownInstructionPolicy) {
+        self.unknown_instruction_policy = policy;
+    }
+
+    pub fn unknown_instruction_policy(&self) -> UnknownInstructionPolicy {
+        self.unknown_instruction_policy
+    }
+
     pub fn step<B: ArmBus>(&mut self, bus: &mut B) -> Result<()> {
         if !self.running {
             return Ok(());
         }
         let pc = self.r[15];
-        match self.state {
+        let result = match self.state {
             ArmExecutionState::Arm => {
                 let instruction = bus.fetch32(pc)?;
                 self.r[15] = pc.wrapping_add(4);
-                self.execute_arm(instruction, pc, bus)?;
+                self.execute_arm(instruction, pc, bus)
             }
             ArmExecutionState::Thumb => {
                 let instruction = bus.fetch16(pc)?;
                 self.r[15] = pc.wrapping_add(2);
-                self.execute_thumb(instruction, pc, bus)?;
+                self.execute_thumb(instruction, pc, bus)
             }
+        };
+        match result {
+            Ok(()) => {}
+            Err(SimulatorError::InvalidInstruction { pc, instr }) => {
+                match self.unknown_instruction_policy {
+                    UnknownInstructionPolicy::Stop => {
+                        return Err(SimulatorError::InvalidInstruction { pc, instr });
+                    }
+                    UnknownInstructionPolicy::Skip => log::warn!(
+                        "Skipping unimplemented ARM instruction {instr:#010x} at PC={pc:#010x}"
+                    ),
+                }
+            }
+            Err(error) => return Err(error),
         }
         self.instruction_count = self.instruction_count.wrapping_add(1);
         Ok(())
@@ -1099,10 +1124,16 @@ mod tests {
     fn invalid_instruction_and_memory_errors_are_reported() {
         let mut bus = TestBus::new(&[0xee00_0010]);
         let mut cpu = running_cpu();
+        cpu.set_unknown_instruction_policy(UnknownInstructionPolicy::Stop);
         assert!(matches!(
             cpu.step(&mut bus),
             Err(SimulatorError::InvalidInstruction { .. })
         ));
+
+        let mut skip_cpu = running_cpu();
+        skip_cpu.step(&mut bus).unwrap();
+        assert_eq!(skip_cpu.r[15], 4);
+        assert_eq!(skip_cpu.instruction_count, 1);
 
         cpu.r[15] = 0x1000;
         assert!(matches!(

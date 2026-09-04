@@ -165,11 +165,11 @@ struct Args {
     #[arg(long = "repeat-period", default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..))]
     repeat_period: u32,
 
-    /// Freeze a memory address or MIPS register using TARGET=VALUE syntax
+    /// Freeze a memory address or guest register using TARGET=VALUE syntax
     #[arg(long = "cheat", value_name = "RULE")]
     cheats: Vec<CheatRule>,
 
-    /// Behavior when an unknown MIPS instruction is encountered
+    /// Behavior when an unknown guest instruction is encountered
     #[arg(long, value_enum, default_value_t = UnknownInstructionMode::Skip)]
     unknown_instruction_policy: UnknownInstructionMode,
 
@@ -274,7 +274,7 @@ fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
         };
 
         let mut window = Window::new(
-            "Dingoo A320 Emulator",
+            "Dingoo A320 / Gemei A330 Emulator",
             width,
             height,
             WindowOptions {
