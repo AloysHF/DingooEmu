@@ -32,7 +32,7 @@ and guest architecture must agree before content is loaded.
 
 ## Features
 
-- **Two guest architectures** — Cached MIPS32 interpretation for A320 software and a pure Rust ARM32/Thumb interpreter for A330 software
+- **Two guest architectures** — Cached MIPS32 interpretation for A320 software and a pure Rust ARM32/Thumb interpreter with ARMv5TE fixed-point multiply support for A330 software
 - **Optional MIPS JIT** — Native translation of hot A320 blocks on 64-bit Android; A330 content always uses the ARM interpreter
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
 - **HLE (High-Level Emulation)** — Architecture-specific SDK bridges for graphics, input, audio, timing, files, resources, tasks, and synchronization

@@ -5,6 +5,7 @@ const N: u32 = 1 << 31;
 const Z: u32 = 1 << 30;
 const C: u32 = 1 << 29;
 const V: u32 = 1 << 28;
+const Q: u32 = 1 << 27;
 const T: u32 = 1 << 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -186,6 +187,13 @@ impl ArmCpu {
         pc: u32,
         bus: &mut B,
     ) -> Result<()> {
+        let signed_halfword_multiply = instruction & 0x0ff0_0090;
+        if matches!(
+            signed_halfword_multiply,
+            0x0100_0080 | 0x0140_0080 | 0x0160_0080
+        ) {
+            return self.execute_signed_halfword_multiply(instruction, pc);
+        }
         if instruction & 0x0fc0_00f0 == 0x0000_0090 {
             return self.execute_multiply(instruction, pc);
         }
@@ -231,6 +239,61 @@ impl ArmCpu {
             if matches!(opcode, 2..=7 | 10 | 11) {
                 self.set_flag(V, overflow);
             }
+        }
+        Ok(())
+    }
+
+    fn execute_signed_halfword_multiply(&mut self, instruction: u32, pc: u32) -> Result<()> {
+        let operation = instruction & 0x0ff0_0090;
+        let destination_high = ((instruction >> 16) & 0xf) as usize;
+        let accumulator_or_low = ((instruction >> 12) & 0xf) as usize;
+        let right_register = ((instruction >> 8) & 0xf) as usize;
+        let left_register = (instruction & 0xf) as usize;
+        if [
+            destination_high,
+            accumulator_or_low,
+            right_register,
+            left_register,
+        ]
+        .contains(&15)
+            || (operation == 0x0140_0080 && destination_high == accumulator_or_low)
+        {
+            return Err(SimulatorError::InvalidInstruction {
+                pc,
+                instr: instruction,
+            });
+        }
+
+        let selected_half = |value: u32, top: bool| -> i64 {
+            i64::from(if top {
+                (value >> 16) as i16
+            } else {
+                value as i16
+            })
+        };
+        let left = selected_half(self.r[left_register], instruction & (1 << 5) != 0);
+        let right = selected_half(self.r[right_register], instruction & (1 << 6) != 0);
+        let product = left * right;
+
+        match operation {
+            0x0100_0080 => {
+                let accumulator = i64::from(self.r[accumulator_or_low] as i32);
+                let result = product + accumulator;
+                self.r[destination_high] = result as u32;
+                if result < i64::from(i32::MIN) || result > i64::from(i32::MAX) {
+                    self.cpsr |= Q;
+                }
+            }
+            0x0140_0080 => {
+                let accumulator = ((u64::from(self.r[destination_high]) << 32)
+                    | u64::from(self.r[accumulator_or_low]))
+                    as i64;
+                let result = accumulator.wrapping_add(product);
+                self.r[accumulator_or_low] = result as u32;
+                self.r[destination_high] = (result as u64 >> 32) as u32;
+            }
+            0x0160_0080 => self.r[destination_high] = product as u32,
+            _ => unreachable!(),
         }
         Ok(())
     }
@@ -1109,6 +1172,59 @@ mod tests {
         assert_eq!(cpu.r[3], 1);
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.r[4], 31);
+    }
+
+    #[test]
+    fn signed_halfword_multiply_variants_use_selected_halves() {
+        let mut bus = TestBus::new(&[
+            0xe163_0281, // SMULBB r3, r1, r2
+            0xe163_02c1, // SMULBT r3, r1, r2
+            0xe163_02a1, // SMULTB r3, r1, r2
+            0xe163_02e1, // SMULTT r3, r1, r2
+            0xe105_4281, // SMLABB r5, r1, r2, r4
+            0xe142_1480, // SMLALBB r1, r2, r0, r4
+        ]);
+        let mut cpu = running_cpu();
+        cpu.r[0] = 2;
+        cpu.r[1] = 0xfffe_0003;
+        cpu.r[2] = 0x0004_fffd;
+        cpu.r[4] = 10;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[3], (-9_i32) as u32);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[3], 12);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[3], 6);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[3], (-8_i32) as u32);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[5], 1);
+
+        cpu.r[1] = u32::MAX;
+        cpu.r[2] = u32::MAX;
+        cpu.r[4] = 3;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[1], 5);
+        assert_eq!(cpu.r[2], 0);
+    }
+
+    #[test]
+    fn signed_halfword_multiply_accumulate_sets_sticky_q_on_overflow() {
+        let mut bus = TestBus::new(&[0xe105_4281, 0xe105_4281]);
+        let mut cpu = running_cpu();
+        cpu.r[1] = 0x0000_8000;
+        cpu.r[2] = 0x0000_8000;
+        cpu.r[4] = 0x4000_0000;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[5], 0x8000_0000);
+        assert_ne!(cpu.cpsr & Q, 0);
+
+        cpu.r[1] = 1;
+        cpu.r[2] = 1;
+        cpu.r[4] = 1;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.r[5], 2);
+        assert_ne!(cpu.cpsr & Q, 0);
     }
 
     #[test]
