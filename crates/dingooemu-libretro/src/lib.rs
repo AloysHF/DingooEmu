@@ -1,4 +1,4 @@
-//! RetroArch libretro core for Dingoo A320 software.
+//! RetroArch libretro core for Dingoo A320 and Gemei A330 software.
 
 #![allow(dead_code)]
 #![allow(static_mut_refs)]

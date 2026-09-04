@@ -3,6 +3,11 @@
 Compatibility is still experimental. The results below cover startup and
 initial rendering only and do not imply complete gameplay support.
 
+This published matrix currently covers Dingoo A320 `.app` content. DingooEmu
+also accepts Gemei A330 `.cc`, `.c2s`, and `.c3s` content, but those formats do
+not yet have an equivalent public per-game compatibility matrix. Format support
+must not be interpreted as a claim that every title is playable.
+
 The current sample set contains 39 distinct `.app` entries, including alternate
 builds of several games. On August 13, 2026, all 39 entries completed the release
 batch screenshot process and rendered a non-black frame. The newer Hell Striker

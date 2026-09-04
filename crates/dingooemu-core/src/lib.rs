@@ -1,4 +1,4 @@
-//! dingooemu-core: Platform-independent Dingoo A320 emulator engine
+//! dingooemu-core: Platform-independent Dingoo A320 and Gemei A330 emulator engine
 //!
 //! This crate contains all emulation logic with no dependency on any windowing
 //! or audio output device. Both front-ends (standalone and libretro) link

@@ -328,7 +328,7 @@ impl Emulator {
     pub(crate) fn from_app_with_path(app: AppImage, app_path: String) -> Result<Self> {
         if app.architecture() != GuestArchitecture::Mips32 {
             return Err(SimulatorError::UnsupportedContentFormat(format!(
-                ".{} requires the ARM runtime, which is not available yet",
+                ".{} requires the ARM runtime; use the format-neutral Emulator facade",
                 app.format()
             )));
         }

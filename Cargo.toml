@@ -14,7 +14,7 @@ default-members = ["crates/dingooemu-libretro"]
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-description = "A Dingoo A320 emulator written in Rust"
+description = "A Dingoo A320 and Gemei A330 emulator written in Rust"
 license = "BSD-3-Clause"
 
 [workspace.dependencies]
