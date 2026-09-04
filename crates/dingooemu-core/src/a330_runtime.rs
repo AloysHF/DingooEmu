@@ -367,6 +367,8 @@ impl A330Runtime {
         replacement
             .cpu
             .set_unknown_instruction_policy(instruction_policy);
+        self.memory.copy_state_from(&replacement.memory);
+        std::mem::swap(&mut replacement.memory, &mut self.memory);
         *self = replacement;
         Ok(())
     }
@@ -1717,6 +1719,8 @@ mod tests {
     fn a330_unknown_instruction_policy_updates_tasks_and_survives_reset() {
         let mut runtime =
             A330Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
+        let system_ram_pointer = runtime.memory.system_ram().as_ptr();
+        let video_ram_pointer = runtime.memory.framebuffer().as_ptr();
         let mut task = ArmCpu::new(0x1010_1000, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
         task.start();
         runtime.tasks.push_back((task, 7));
@@ -1732,6 +1736,8 @@ mod tests {
         );
 
         runtime.reset().unwrap();
+        assert_eq!(runtime.memory.system_ram().as_ptr(), system_ram_pointer);
+        assert_eq!(runtime.memory.framebuffer().as_ptr(), video_ram_pointer);
         assert_eq!(
             runtime.cpu.unknown_instruction_policy(),
             UnknownInstructionPolicy::Stop
