@@ -296,6 +296,13 @@ impl Emulator {
         }
     }
 
+    pub fn system_ram_guest_address(&self) -> u32 {
+        match &self.runtime {
+            Runtime::App(_) => 0,
+            Runtime::Arm(_) => crate::a330_memory::SYSTEM_RAM_BASE,
+        }
+    }
+
     pub fn system_ram_mut(&mut self) -> &mut [u8] {
         match &mut self.runtime {
             Runtime::App(runtime) => runtime.system_ram_mut(),
@@ -307,6 +314,13 @@ impl Emulator {
         match &self.runtime {
             Runtime::App(runtime) => runtime.video_ram(),
             Runtime::Arm(runtime) => runtime.memory.framebuffer(),
+        }
+    }
+
+    pub fn video_ram_guest_address(&self) -> u32 {
+        match &self.runtime {
+            Runtime::App(_) => crate::video::VM_LCD_FB_ADDRESS,
+            Runtime::Arm(_) => crate::a330_memory::FRAMEBUFFER_BASE,
         }
     }
 
@@ -416,6 +430,11 @@ mod tests {
         assert_eq!(emulator.content_format(), ContentFormat::App);
         assert_eq!(emulator.guest_architecture(), GuestArchitecture::Mips32);
         assert_eq!(emulator.arm_profile(), None);
+        assert_eq!(emulator.system_ram_guest_address(), 0);
+        assert_eq!(
+            emulator.video_ram_guest_address(),
+            crate::video::VM_LCD_FB_ADDRESS
+        );
     }
 
     #[test]
@@ -429,5 +448,13 @@ mod tests {
         assert_eq!(emulator.content_format(), ContentFormat::Cc);
         assert_eq!(emulator.guest_architecture(), GuestArchitecture::Arm32);
         assert_eq!(emulator.arm_profile(), Some(ArmProfile::Retail));
+        assert_eq!(
+            emulator.system_ram_guest_address(),
+            crate::a330_memory::SYSTEM_RAM_BASE
+        );
+        assert_eq!(
+            emulator.video_ram_guest_address(),
+            crate::a330_memory::FRAMEBUFFER_BASE
+        );
     }
 }

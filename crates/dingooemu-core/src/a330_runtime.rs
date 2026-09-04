@@ -351,6 +351,7 @@ impl A330Runtime {
     }
     pub(crate) fn reset(&mut self) -> Result<()> {
         self.flush_save_files();
+        let was_running = self.is_running();
         let policy = self.unknown_hle_policy;
         let allowlist = self.unknown_hle_allowlist.clone();
         let content_directory = self.content_directory.clone();
@@ -369,6 +370,9 @@ impl A330Runtime {
             .set_unknown_instruction_policy(instruction_policy);
         self.memory.copy_state_from(&replacement.memory);
         std::mem::swap(&mut replacement.memory, &mut self.memory);
+        if was_running {
+            replacement.start();
+        }
         *self = replacement;
         Ok(())
     }

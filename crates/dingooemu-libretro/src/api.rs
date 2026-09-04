@@ -485,12 +485,14 @@ fn frontend_directory(command: u32) -> Option<std::path::PathBuf> {
 fn register_memory_maps(emulator: &mut Emulator) {
     let system_ram_len = emulator.system_ram().len();
     let video_ram_len = emulator.video_ram().len();
+    let system_ram_start = emulator.system_ram_guest_address() as usize;
+    let video_ram_start = emulator.video_ram_guest_address() as usize;
     let descriptors = [
         RetroMemoryDescriptor {
             flags: RETRO_MEMDESC_SYSTEM_RAM,
             ptr: emulator.system_ram_mut().as_mut_ptr().cast(),
             offset: 0,
-            start: 0,
+            start: system_ram_start,
             select: 0,
             disconnect: 0,
             len: system_ram_len,
@@ -500,7 +502,7 @@ fn register_memory_maps(emulator: &mut Emulator) {
             flags: RETRO_MEMDESC_VIDEO_RAM,
             ptr: emulator.video_ram_mut().as_mut_ptr().cast(),
             offset: 0,
-            start: dingooemu_core::video::VM_LCD_FB_ADDRESS as usize,
+            start: video_ram_start,
             select: 0,
             disconnect: 0,
             len: video_ram_len,
@@ -757,7 +759,7 @@ fn query_joypad_buttons(mut pressed: impl FnMut(u32) -> bool) -> u32 {
 #[cfg(test)]
 mod tests {
     use std::ffi::{CStr, CString};
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use super::*;
@@ -773,6 +775,8 @@ mod tests {
     static ASYNC_AUDIO_CALLBACK: Mutex<RetroAudioCallbackFn> = Mutex::new(None);
     static AUDIO_LATENCY_REQUESTED: AtomicBool = AtomicBool::new(false);
     static MEMORY_MAPS_SET: AtomicBool = AtomicBool::new(false);
+    static SYSTEM_RAM_MAP_START: AtomicUsize = AtomicUsize::new(usize::MAX);
+    static VIDEO_RAM_MAP_START: AtomicUsize = AtomicUsize::new(usize::MAX);
     static SAVE_DIRECTORY: Mutex<Option<CString>> = Mutex::new(None);
 
     unsafe extern "C" fn test_environment(command: u32, data: *mut c_void) -> bool {
@@ -811,10 +815,13 @@ mod tests {
             }
             RETRO_ENVIRONMENT_SET_MEMORY_MAPS => {
                 let memory_map = &*data.cast::<RetroMemoryMap>();
-                MEMORY_MAPS_SET.store(
-                    memory_map.num_descriptors == 2 && !memory_map.descriptors.is_null(),
-                    Ordering::SeqCst,
-                );
+                let valid = memory_map.num_descriptors == 2 && !memory_map.descriptors.is_null();
+                MEMORY_MAPS_SET.store(valid, Ordering::SeqCst);
+                if valid {
+                    let descriptors = std::slice::from_raw_parts(memory_map.descriptors, 2);
+                    SYSTEM_RAM_MAP_START.store(descriptors[0].start, Ordering::SeqCst);
+                    VIDEO_RAM_MAP_START.store(descriptors[1].start, Ordering::SeqCst);
+                }
                 true
             }
             RETRO_ENVIRONMENT_SET_VARIABLES => true,
@@ -882,6 +889,14 @@ mod tests {
         data[0x74..0x78].copy_from_slice(&0x8000_0000u32.to_le_bytes());
         data[0x78..0x7c].copy_from_slice(&0x8000_0000u32.to_le_bytes());
         data[0x7c..0x80].copy_from_slice(&4u32.to_le_bytes());
+        data
+    }
+
+    fn minimal_arm_bytes(origin: u32) -> Vec<u8> {
+        let mut data = minimal_app_bytes();
+        data[0x74..0x78].copy_from_slice(&origin.to_le_bytes());
+        data[0x78..0x7c].copy_from_slice(&origin.to_le_bytes());
+        data[0x80..0x84].copy_from_slice(&0xeaff_fffeu32.to_le_bytes());
         data
     }
 
@@ -1042,6 +1057,8 @@ mod tests {
         *ASYNC_AUDIO_CALLBACK.lock().unwrap() = None;
         AUDIO_LATENCY_REQUESTED.store(false, Ordering::SeqCst);
         MEMORY_MAPS_SET.store(false, Ordering::SeqCst);
+        SYSTEM_RAM_MAP_START.store(usize::MAX, Ordering::SeqCst);
+        VIDEO_RAM_MAP_START.store(usize::MAX, Ordering::SeqCst);
 
         let test_directory = std::env::temp_dir().join(format!(
             "dingooemu-libretro-test-{}-{}",
@@ -1077,6 +1094,11 @@ mod tests {
         );
         assert!(INPUT_DESCRIPTORS_SET.load(Ordering::SeqCst));
         assert!(MEMORY_MAPS_SET.load(Ordering::SeqCst));
+        assert_eq!(SYSTEM_RAM_MAP_START.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            VIDEO_RAM_MAP_START.load(Ordering::SeqCst),
+            dingooemu_core::video::VM_LCD_FB_ADDRESS as usize
+        );
         assert_eq!(
             retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM),
             32 * 1024 * 1024
@@ -1156,6 +1178,159 @@ mod tests {
         unsafe { assert!(EMULATOR.is_none()) };
         retro_deinit();
         assert!(!test_directory.join("dingooemu-diagnostic.txt").exists());
+        *SAVE_DIRECTORY.lock().unwrap() = None;
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(test_directory).unwrap();
+    }
+
+    #[test]
+    fn loads_arm_content_through_the_frontend_lifecycle() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        PIXEL_FORMAT.store(u32::MAX, Ordering::SeqCst);
+        INPUT_DESCRIPTORS_SET.store(false, Ordering::SeqCst);
+        INPUT_POLLED.store(false, Ordering::SeqCst);
+        VIDEO_WIDTH.store(0, Ordering::SeqCst);
+        AUDIO_BATCH_CALLED.store(false, Ordering::SeqCst);
+        AUDIO_BUFFER_STATUS_REGISTERED.store(false, Ordering::SeqCst);
+        DIAGNOSTIC_AUDIO_BUFFER_REGISTERED.store(false, Ordering::SeqCst);
+        *ASYNC_AUDIO_CALLBACK.lock().unwrap() = None;
+        AUDIO_LATENCY_REQUESTED.store(false, Ordering::SeqCst);
+        MEMORY_MAPS_SET.store(false, Ordering::SeqCst);
+        SYSTEM_RAM_MAP_START.store(usize::MAX, Ordering::SeqCst);
+        VIDEO_RAM_MAP_START.store(usize::MAX, Ordering::SeqCst);
+
+        let test_directory = std::env::temp_dir().join(format!(
+            "dingooemu-libretro-arm-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&test_directory).unwrap();
+        let path = test_directory.join("content.c2s");
+        std::fs::write(
+            &path,
+            minimal_arm_bytes(dingooemu_core::ArmProfile::HOMEBREW_ORIGIN),
+        )
+        .unwrap();
+        let path_string = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        *SAVE_DIRECTORY.lock().unwrap() =
+            Some(CString::new(test_directory.to_string_lossy().as_bytes()).unwrap());
+        let info = RetroGameInfo {
+            path: path_string.as_ptr(),
+            data: ptr::null(),
+            size: 0,
+            meta: ptr::null(),
+        };
+
+        retro_set_environment(Some(test_environment));
+        retro_set_video_refresh(Some(test_video_refresh));
+        retro_set_audio_sample_batch(Some(test_audio_batch));
+        retro_set_input_poll(Some(test_input_poll));
+        retro_set_input_state(Some(test_input_state));
+        retro_init();
+        assert!(retro_load_game(&info));
+        unsafe {
+            let emulator = EMULATOR.as_ref().unwrap();
+            assert_eq!(
+                emulator.content_format(),
+                dingooemu_core::ContentFormat::C2s
+            );
+            assert_eq!(
+                emulator.guest_architecture(),
+                dingooemu_core::GuestArchitecture::Arm32
+            );
+            assert_eq!(
+                emulator.arm_profile(),
+                Some(dingooemu_core::ArmProfile::Homebrew)
+            );
+            assert!(emulator.is_running());
+        }
+        assert_eq!(
+            retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM),
+            dingooemu_core::a330_memory::SYSTEM_RAM_SIZE
+        );
+        assert_eq!(
+            retro_get_memory_size(RETRO_MEMORY_VIDEO_RAM),
+            dingooemu_core::a330_memory::FRAMEBUFFER_SIZE
+        );
+        assert_eq!(
+            SYSTEM_RAM_MAP_START.load(Ordering::SeqCst),
+            dingooemu_core::a330_memory::SYSTEM_RAM_BASE as usize
+        );
+        assert_eq!(
+            VIDEO_RAM_MAP_START.load(Ordering::SeqCst),
+            dingooemu_core::a330_memory::FRAMEBUFFER_BASE as usize
+        );
+        let system_ram = retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+        let video_ram = retro_get_memory_data(RETRO_MEMORY_VIDEO_RAM);
+        assert!(!system_ram.is_null());
+        assert!(!video_ram.is_null());
+
+        let cheat = CString::new("mem32:0x10000000=0xfeedbeef").unwrap();
+        retro_cheat_set(0, true, cheat.as_ptr());
+        retro_run();
+        assert!(INPUT_POLLED.load(Ordering::SeqCst));
+        assert_eq!(VIDEO_WIDTH.load(Ordering::SeqCst), SCREEN_WIDTH);
+        unsafe {
+            let emulator = EMULATOR.as_mut().unwrap();
+            assert_eq!(emulator.buttons(), BUTTON_A | BUTTON_START);
+            assert_eq!(
+                emulator
+                    .read_memory_u32(dingooemu_core::a330_memory::SYSTEM_RAM_BASE)
+                    .unwrap(),
+                0xfeed_beef
+            );
+            emulator
+                .write_memory_u32(dingooemu_core::a330_memory::SYSTEM_RAM_BASE, 0x1234_5678)
+                .unwrap();
+        }
+
+        assert_eq!(retro_serialize_size(), 128 * 1024 * 1024);
+        let mut state = vec![0u8; retro_serialize_size()];
+        assert!(retro_serialize(state.as_mut_ptr().cast(), state.len()));
+        unsafe {
+            EMULATOR
+                .as_mut()
+                .unwrap()
+                .write_memory_u32(dingooemu_core::a330_memory::SYSTEM_RAM_BASE, 0)
+                .unwrap();
+        }
+        assert!(retro_unserialize(state.as_ptr().cast(), state.len()));
+        assert_eq!(retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM), system_ram);
+        assert_eq!(retro_get_memory_data(RETRO_MEMORY_VIDEO_RAM), video_ram);
+        unsafe {
+            assert_eq!(
+                EMULATOR
+                    .as_ref()
+                    .unwrap()
+                    .read_memory_u32(dingooemu_core::a330_memory::SYSTEM_RAM_BASE)
+                    .unwrap(),
+                0x1234_5678
+            );
+        }
+
+        retro_cheat_reset();
+        retro_reset();
+        assert_eq!(retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM), system_ram);
+        assert_eq!(retro_get_memory_data(RETRO_MEMORY_VIDEO_RAM), video_ram);
+        unsafe {
+            let emulator = EMULATOR.as_ref().unwrap();
+            assert!(emulator.is_running());
+            assert_eq!(
+                emulator
+                    .read_memory_u32(dingooemu_core::a330_memory::SYSTEM_RAM_BASE)
+                    .unwrap(),
+                0
+            );
+        }
+
+        retro_unload_game();
+        assert!(retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM).is_null());
+        assert_eq!(retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM), 0);
+        unsafe { assert!(EMULATOR.is_none()) };
+        retro_deinit();
         *SAVE_DIRECTORY.lock().unwrap() = None;
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(test_directory).unwrap();
