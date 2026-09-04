@@ -289,6 +289,10 @@ impl A330Runtime {
             STACK_BASE + STACK_SIZE as u32 - 0x1000,
             EXIT_ADDRESS,
         );
+        let framebuffer_bits = match memory.profile() {
+            ArmProfile::Retail => 16,
+            ArmProfile::Homebrew => 32,
+        };
         let heap = GuestHeap::new(memory.heap_base());
         let file_name = _path
             .file_name()
@@ -335,7 +339,7 @@ impl A330Runtime {
             next_file_handle: 1,
             semaphores: BTreeMap::new(),
             active_framebuffer: FRAMEBUFFER_BASE,
-            framebuffer_bits: 16,
+            framebuffer_bits,
             firmware_archive,
         })
     }
@@ -2270,6 +2274,25 @@ mod tests {
         runtime.cpu.r[0] = LEGACY_FRAMEBUFFER_ADDRESS;
         runtime.start();
         runtime.tick().unwrap();
+        assert_eq!(&runtime.video.framebuffer()[..2], &[0x00, 0xf8]);
+    }
+
+    #[test]
+    fn homebrew_frames_default_to_xrgb8888() {
+        let mut package = svc_package("FlushDCache");
+        package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
+        package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
+        package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
+        let mut runtime = A330Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime
+            .memory
+            .write32(APP_PATH_ADDRESS, 0x00ff_0000)
+            .unwrap();
+        runtime.cpu.r[0] = APP_PATH_ADDRESS;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.framebuffer_bits, 32);
         assert_eq!(&runtime.video.framebuffer()[..2], &[0x00, 0xf8]);
     }
 
