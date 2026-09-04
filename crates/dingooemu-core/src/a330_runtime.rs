@@ -498,7 +498,7 @@ impl A330Runtime {
         #[cfg(feature = "standalone")]
         let host_audio_output_enabled = self.audio.host_output_enabled();
         self.cpu = state.cpu;
-        self.memory = state.memory;
+        self.memory.copy_state_from(&state.memory);
         self.video = state.video;
         self.audio = state.audio;
         #[cfg(feature = "standalone")]
@@ -1781,6 +1781,8 @@ mod tests {
         runtime.active_framebuffer = FRAMEBUFFER_BASE + 0x1000;
         runtime.framebuffer_bits = 32;
 
+        let system_ram_pointer = runtime.memory.system_ram().as_ptr();
+        let video_ram_pointer = runtime.memory.framebuffer().as_ptr();
         let mut state = vec![0; runtime.serialized_state_size()];
         runtime.serialize_state(&mut state).unwrap();
 
@@ -1803,6 +1805,8 @@ mod tests {
         runtime.framebuffer_bits = 16;
 
         runtime.unserialize_state(&state).unwrap();
+        assert_eq!(runtime.memory.system_ram().as_ptr(), system_ram_pointer);
+        assert_eq!(runtime.memory.framebuffer().as_ptr(), video_ram_pointer);
         assert_eq!(runtime.cpu.r[4], 0x1234_5678);
         assert_eq!(
             runtime.memory.read32(STACK_BASE + 0x100).unwrap(),

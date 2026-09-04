@@ -137,6 +137,19 @@ impl A330Memory {
             && self.legacy_system_mmio.len() == LEGACY_SYSTEM_MMIO_SIZE
     }
 
+    pub(crate) fn copy_state_from(&mut self, source: &Self) {
+        self.system_ram.copy_from_slice(&source.system_ram);
+        self.stack.copy_from_slice(&source.stack);
+        self.heap.copy_from_slice(&source.heap);
+        self.framebuffer.copy_from_slice(&source.framebuffer);
+        self.low_memory.copy_from_slice(&source.low_memory);
+        self.legacy_mmio.copy_from_slice(&source.legacy_mmio);
+        self.legacy_audio_mmio
+            .copy_from_slice(&source.legacy_audio_mmio);
+        self.legacy_system_mmio
+            .copy_from_slice(&source.legacy_system_mmio);
+    }
+
     pub fn read8(&self, address: u32) -> Result<u8> {
         Ok(self.read_bytes(address, 1)?[0])
     }
