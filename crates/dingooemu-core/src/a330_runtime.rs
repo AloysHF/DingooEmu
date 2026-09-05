@@ -24,6 +24,8 @@ const APP_PATH_ADDRESS: u32 = STACK_BASE + 0x200;
 const LOCALE_ADDRESS: u32 = STACK_BASE + 0x600;
 const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
 const FRAMEBUFFER_BITS_EXPLICIT: u32 = 1 << 31;
+const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
+const FILE_SEARCH_NAME_CAPACITY: usize = 256;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct GuestFile {
@@ -33,6 +35,12 @@ struct GuestFile {
     save_path: Option<PathBuf>,
     writable: bool,
     dirty: bool,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct FileSearch {
+    entries: Vec<String>,
+    next_index: usize,
 }
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -227,6 +235,7 @@ struct A330StateRef<'a> {
     tasks: &'a VecDeque<(ArmCpu, u32)>,
     current_priority: u32,
     files: BTreeMap<u32, GuestFile>,
+    file_searches: &'a BTreeMap<u32, FileSearch>,
     next_file_handle: u32,
     semaphores: &'a BTreeMap<u32, u32>,
     active_framebuffer: u32,
@@ -247,6 +256,7 @@ struct A330State {
     tasks: VecDeque<(ArmCpu, u32)>,
     current_priority: u32,
     files: BTreeMap<u32, GuestFile>,
+    file_searches: BTreeMap<u32, FileSearch>,
     next_file_handle: u32,
     semaphores: BTreeMap<u32, u32>,
     active_framebuffer: u32,
@@ -274,6 +284,7 @@ pub(crate) struct A330Runtime {
     content_directory: PathBuf,
     save_directory: Option<PathBuf>,
     files: BTreeMap<u32, GuestFile>,
+    file_searches: BTreeMap<u32, FileSearch>,
     next_file_handle: u32,
     semaphores: BTreeMap<u32, u32>,
     active_framebuffer: u32,
@@ -336,6 +347,7 @@ impl A330Runtime {
             content_directory,
             save_directory,
             files: BTreeMap::new(),
+            file_searches: BTreeMap::new(),
             next_file_handle: 1,
             semaphores: BTreeMap::new(),
             active_framebuffer: FRAMEBUFFER_BASE,
@@ -464,6 +476,7 @@ impl A330Runtime {
             tasks: &self.tasks,
             current_priority: self.current_priority,
             files,
+            file_searches: &self.file_searches,
             next_file_handle: self.next_file_handle,
             semaphores: &self.semaphores,
             active_framebuffer: self.active_framebuffer,
@@ -525,6 +538,7 @@ impl A330Runtime {
         self.tasks = state.tasks;
         self.current_priority = state.current_priority;
         self.files = state.files;
+        self.file_searches = state.file_searches;
         self.next_file_handle = state.next_file_handle;
         self.semaphores = state.semaphores;
         self.active_framebuffer = state.active_framebuffer;
@@ -605,6 +619,7 @@ impl A330Runtime {
                     content_directory: &self.content_directory,
                     save_directory: self.save_directory.as_deref(),
                     files: &mut self.files,
+                    file_searches: &mut self.file_searches,
                     next_file_handle: &mut self.next_file_handle,
                     semaphores: &mut self.semaphores,
                     active_framebuffer: &mut self.active_framebuffer,
@@ -718,6 +733,7 @@ struct RuntimeBus<'a> {
     content_directory: &'a std::path::Path,
     save_directory: Option<&'a std::path::Path>,
     files: &'a mut BTreeMap<u32, GuestFile>,
+    file_searches: &'a mut BTreeMap<u32, FileSearch>,
     next_file_handle: &'a mut u32,
     semaphores: &'a mut BTreeMap<u32, u32>,
     active_framebuffer: &'a mut u32,
@@ -826,6 +842,15 @@ impl RuntimeBus<'_> {
                     .map_or(1, |file| u32::from(file.position >= file.data.len()));
             }
             "ferror" | "fsys_ferror" => cpu.r[0] = u32::from(!self.files.contains_key(&cpu.r[0])),
+            "fsys_findfirst" => {
+                let pattern = self.read_c_string(cpu.r[0], 1024)?;
+                cpu.r[0] = self.begin_file_search(&pattern, cpu.r[1], cpu.r[2])?;
+            }
+            "fsys_findnext" => cpu.r[0] = self.next_file_search(cpu.r[0])?,
+            "fsys_findclose" => {
+                self.file_searches.remove(&cpu.r[0]);
+                cpu.r[0] = 0;
+            }
             "dl_res_open" => cpu.r[0] = self.open_resource([cpu.r[2], cpu.r[1], cpu.r[0]]),
             "dl_res_get_size" => {
                 cpu.r[0] = self
@@ -1370,6 +1395,94 @@ impl RuntimeBus<'_> {
         }
     }
 
+    fn begin_file_search(
+        &mut self,
+        pattern: &str,
+        attributes: u32,
+        data_address: u32,
+    ) -> Result<u32> {
+        self.file_searches.remove(&data_address);
+        if data_address == 0 {
+            return Ok(u32::MAX);
+        }
+        let Some(entries) = self.collect_file_search_entries(pattern, attributes) else {
+            return Ok(u32::MAX);
+        };
+        let Some(first) = entries.first().cloned() else {
+            return Ok(u32::MAX);
+        };
+        self.write_file_search_name(data_address, &first)?;
+        self.file_searches.insert(
+            data_address,
+            FileSearch {
+                entries,
+                next_index: 1,
+            },
+        );
+        Ok(0)
+    }
+
+    fn next_file_search(&mut self, data_address: u32) -> Result<u32> {
+        let Some(name) = self
+            .file_searches
+            .get_mut(&data_address)
+            .and_then(|search| {
+                let name = search.entries.get(search.next_index)?.clone();
+                search.next_index += 1;
+                Some(name)
+            })
+        else {
+            return Ok(u32::MAX);
+        };
+        self.write_file_search_name(data_address, &name)?;
+        Ok(0)
+    }
+
+    fn collect_file_search_entries(&self, pattern: &str, attributes: u32) -> Option<Vec<String>> {
+        let (directory, file_pattern) = normalize_guest_search_pattern(pattern)?;
+        let root = self.content_directory.canonicalize().ok()?;
+        let search_directory = if directory.as_os_str().is_empty() {
+            root.clone()
+        } else {
+            root.join(directory).canonicalize().ok()?
+        };
+        if !search_directory.starts_with(&root) {
+            return None;
+        }
+
+        let include_directories = attributes & 0x10 != 0;
+        let include_files = attributes & 0x20 != 0 || !include_directories;
+        let mut entries = std::fs::read_dir(search_directory)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let file_type = entry.file_type().ok()?;
+                if (file_type.is_dir() && !include_directories)
+                    || (file_type.is_file() && !include_files)
+                    || (!file_type.is_dir() && !file_type.is_file())
+                {
+                    return None;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                wildcard_matches(&file_pattern, &name).then_some(name)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.to_ascii_lowercase()
+                .cmp(&right.to_ascii_lowercase())
+                .then_with(|| left.cmp(right))
+        });
+        Some(entries)
+    }
+
+    fn write_file_search_name(&mut self, data_address: u32, name: &str) -> Result<()> {
+        let name = name.as_bytes();
+        let length = name.len().min(FILE_SEARCH_NAME_CAPACITY - 1);
+        let destination = data_address.wrapping_add(FILE_SEARCH_NAME_OFFSET);
+        self.memory.write_bytes(destination, &name[..length])?;
+        self.memory.write8(destination + length as u32, 0)
+    }
+
     fn seek_file(&mut self, handle: u32, offset: i32, origin: u32) -> u32 {
         let Some(file) = self.files.get_mut(&handle) else {
             return u32::MAX;
@@ -1497,6 +1610,81 @@ fn resolve_guest_path(root: &std::path::Path, name: &str) -> Option<PathBuf> {
         relative.push(component);
     }
     (!relative.as_os_str().is_empty()).then(|| root.join(relative))
+}
+
+fn normalize_guest_search_pattern(pattern: &str) -> Option<(PathBuf, String)> {
+    let mut normalized = pattern.replace('\\', "/");
+    if normalized.as_bytes().get(1) == Some(&b':')
+        && normalized
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+    {
+        normalized.drain(..2);
+    }
+    let mut components = normalized
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>();
+    if components
+        .iter()
+        .any(|component| *component == ".." || component.contains(['\0', ':']))
+    {
+        return None;
+    }
+    let file_pattern = components.pop().unwrap_or("*");
+    if components
+        .first()
+        .is_some_and(|component| component.eq_ignore_ascii_case("GAME"))
+    {
+        components.remove(0);
+    }
+    let directory = components.iter().collect::<PathBuf>();
+    Some((
+        directory,
+        if file_pattern.is_empty() {
+            "*".to_string()
+        } else {
+            file_pattern.to_string()
+        },
+    ))
+}
+
+fn wildcard_matches(pattern: &str, name: &str) -> bool {
+    let pattern = if pattern.eq_ignore_ascii_case("*.*") {
+        "*"
+    } else {
+        pattern
+    };
+    let pattern = pattern.as_bytes();
+    let name = name.as_bytes();
+    let (mut pattern_index, mut name_index) = (0, 0);
+    let (mut star_index, mut retry_name_index) = (None, 0);
+
+    while name_index < name.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?'
+                || pattern[pattern_index].eq_ignore_ascii_case(&name[name_index]))
+        {
+            pattern_index += 1;
+            name_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            retry_name_index = name_index;
+        } else if let Some(star) = star_index {
+            retry_name_index += 1;
+            name_index = retry_name_index;
+            pattern_index = star + 1;
+        } else {
+            return false;
+        }
+    }
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
 }
 
 fn safe_relative_path(path: &std::path::Path) -> bool {
@@ -1648,6 +1836,14 @@ mod tests {
         package.data[0x80..0x84].copy_from_slice(&0xef12_3456u32.to_le_bytes());
         package.imports.clear();
         package
+    }
+
+    fn memory_c_string(memory: &A330Memory, address: u32) -> String {
+        let bytes = (0..256)
+            .map(|offset| memory.read8(address + offset).unwrap())
+            .take_while(|&byte| byte != 0)
+            .collect::<Vec<_>>();
+        String::from_utf8(bytes).unwrap()
     }
 
     fn legacy_stride_package(stride: u32) -> PackageImage {
@@ -2108,6 +2304,61 @@ mod tests {
             runtime.memory.read_bytes(STACK_BASE + 64, 4).unwrap(),
             [1, 2, 3, 4]
         );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn arm_file_search_enumerates_device_game_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("dingooemu-arm-file-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("Alpha.gb"), b"first").unwrap();
+        std::fs::write(directory.join("beta.GB"), b"second").unwrap();
+        std::fs::write(directory.join("ignore.txt"), b"ignored").unwrap();
+
+        let mut package = svc_package("fsys_findfirst");
+        package.format = ContentFormat::C2s;
+        package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
+        package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
+        package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
+        let mut runtime = A330Runtime::from_package(package, directory.join("game.c2s")).unwrap();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE, b"A:\\GAME\\*.gb\0")
+            .unwrap();
+        let search_data = STACK_BASE + 0x100;
+        runtime.cpu.r[0] = STACK_BASE;
+        runtime.cpu.r[1] = 0x8000_0037;
+        runtime.cpu.r[2] = search_data;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.cpu.r[0], 0);
+        assert_eq!(
+            memory_c_string(&runtime.memory, search_data + FILE_SEARCH_NAME_OFFSET),
+            "Alpha.gb"
+        );
+
+        runtime.package.imports[0].name = "fsys_findnext".into();
+        for expected in [Some("beta.GB"), None] {
+            runtime.cpu = ArmCpu::new(ArmProfile::HOMEBREW_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+            runtime.cpu.r[0] = search_data;
+            runtime.cpu.start();
+            runtime.running = true;
+            runtime.boot_complete = true;
+            runtime.tick().unwrap();
+            if let Some(name) = expected {
+                assert_eq!(runtime.cpu.r[0], 0);
+                assert_eq!(
+                    memory_c_string(&runtime.memory, search_data + FILE_SEARCH_NAME_OFFSET),
+                    name
+                );
+            } else {
+                assert_eq!(runtime.cpu.r[0], u32::MAX);
+            }
+        }
 
         std::fs::remove_dir_all(directory).unwrap();
     }
