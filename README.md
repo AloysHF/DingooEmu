@@ -118,25 +118,28 @@ crates/
 ├── dingooemu-core/              # Platform-independent emulator engine (library)
 │   └── src/
 │       ├── lib.rs               # Crate root (module declarations)
-│       ├── runtime.rs           # Format-neutral runtime facade
+│       ├── emulator.rs          # Device-neutral lifecycle facade and dispatch
 │       ├── content.rs           # Content format and architecture detection
 │       ├── package.rs           # Shared CCDL package parser
-│       ├── common/              # Cross-device policies and diagnostics
+│       ├── common/              # Cross-device services and policies
+│       │   ├── audio.rs         # Shared PCM audio engine
+│       │   ├── video.rs         # Shared framebuffer conversion and dimensions
+│       │   ├── input.rs         # Shared logical input state
+│       │   ├── cheats.rs        # Shared cheat syntax and slot storage
+│       │   └── save_state.rs    # Shared versioned state codec
 │       ├── a320/
 │       │   ├── runtime.rs       # Dingoo A320 APP runtime
 │       │   ├── cpu.rs           # Cached-block MIPS32 interpreter
 │       │   ├── jit.rs           # Optional native translator for hot MIPS32 blocks
 │       │   ├── memory.rs        # A320 memory bus
+│       │   ├── cheats.rs        # A320 cheat validation and application
 │       │   └── runtime/sdk_hle/ # A320 SDK dispatch and implementations
 │       ├── a330/
 │       │   ├── runtime.rs       # Gemei A330 lifecycle, scheduler, and SDK bridge
 │       │   ├── cpu.rs           # ARM32/Thumb interpreter
 │       │   ├── memory.rs        # A330 memory map and package loader
+│       │   ├── cheats.rs        # A330 cheat validation and application
 │       │   └── firmware_archive.rs # Adjacent A330 firmware reader
-│       ├── save_state.rs        # Versioned compressed state container
-│       ├── video.rs             # Framebuffer and screen rendering
-│       ├── audio.rs             # Audio engine (PCM output)
-│       ├── input.rs             # Button state management
 │       └── error.rs             # Error types
 ├── dingooemu/                   # Standalone binary (-> dingoo-emu)
 │   └── src/

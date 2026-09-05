@@ -1,7 +1,7 @@
 #[cfg(not(feature = "standalone"))]
-use dingooemu_core::audio::{AudioConfig, SampleFormat};
+use dingooemu_core::common::audio::{AudioConfig, SampleFormat};
 #[cfg(not(feature = "standalone"))]
-use dingooemu_core::input::{BUTTON_A, BUTTON_DOWN};
+use dingooemu_core::common::input::{BUTTON_A, BUTTON_DOWN};
 use dingooemu_core::Emulator;
 use std::path::PathBuf;
 

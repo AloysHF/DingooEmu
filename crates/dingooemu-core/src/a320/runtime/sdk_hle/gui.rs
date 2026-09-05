@@ -114,17 +114,17 @@ fn execute_gui(emu: &mut Runtime) -> Result<HandlerResult> {
 }
 
 fn gui_key_code(buttons: u32) -> u32 {
-    if buttons & crate::input::BUTTON_LEFT != 0 {
+    if buttons & crate::common::input::BUTTON_LEFT != 0 {
         GUI_KEY_LEFT
-    } else if buttons & crate::input::BUTTON_UP != 0 {
+    } else if buttons & crate::common::input::BUTTON_UP != 0 {
         GUI_KEY_UP
-    } else if buttons & crate::input::BUTTON_RIGHT != 0 {
+    } else if buttons & crate::common::input::BUTTON_RIGHT != 0 {
         GUI_KEY_RIGHT
-    } else if buttons & crate::input::BUTTON_DOWN != 0 {
+    } else if buttons & crate::common::input::BUTTON_DOWN != 0 {
         GUI_KEY_DOWN
-    } else if buttons & crate::input::BUTTON_A != 0 {
+    } else if buttons & crate::common::input::BUTTON_A != 0 {
         GUI_KEY_ENTER
-    } else if buttons & crate::input::BUTTON_B != 0 {
+    } else if buttons & crate::common::input::BUTTON_B != 0 {
         GUI_KEY_ESCAPE
     } else {
         0

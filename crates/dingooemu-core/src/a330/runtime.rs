@@ -4,18 +4,18 @@ use super::memory::{
     Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE, LEGACY_GRAPHICS_STRIDE,
     LEGACY_GRAPHICS_SURFACE, STACK_BASE, STACK_SIZE,
 };
-use crate::audio::{Audio, AudioConfig};
-use crate::cheats::{CheatManager, CheatParseError, CheatRule};
+use crate::common::audio::{Audio, AudioConfig};
+use crate::common::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::common::execution::UnknownInstructionPolicy;
 use crate::common::hle::{UnknownHleCall, UnknownHlePolicy};
-use crate::content::{ArmProfile, ContentFormat};
-use crate::error::{Result, SimulatorError};
-use crate::input::{
+use crate::common::input::{
     Input, BUTTON_A, BUTTON_B, BUTTON_DOWN, BUTTON_L, BUTTON_LEFT, BUTTON_R, BUTTON_RIGHT,
     BUTTON_SELECT, BUTTON_START, BUTTON_UP, BUTTON_X, BUTTON_Y,
 };
+use crate::common::video::{Video, FRAMEBUFFER_SIZE, SCREEN_HEIGHT, SCREEN_WIDTH};
+use crate::content::{ArmProfile, ContentFormat};
+use crate::error::{Result, SimulatorError};
 use crate::package::PackageImage;
-use crate::video::{Video, FRAMEBUFFER_SIZE, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
@@ -460,7 +460,7 @@ impl Runtime {
     }
 
     pub(crate) fn serialized_state_size(&self) -> usize {
-        crate::save_state::A330_SERIALIZED_SIZE
+        crate::common::save_state::A330_SERIALIZED_SIZE
     }
 
     pub(crate) fn serialize_state(&self, output: &mut [u8]) -> anyhow::Result<()> {
@@ -500,12 +500,12 @@ impl Runtime {
             active_framebuffer: self.active_framebuffer,
             framebuffer_bits: self.framebuffer_bits,
         };
-        crate::save_state::encode_a330(&state, crc32fast::hash(&self.package.data), output)
+        crate::common::save_state::encode_a330(&state, crc32fast::hash(&self.package.data), output)
     }
 
     pub(crate) fn unserialize_state(&mut self, input: &[u8]) -> anyhow::Result<()> {
         let mut state: A330State =
-            crate::save_state::decode_a330(input, crc32fast::hash(&self.package.data))?;
+            crate::common::save_state::decode_a330(input, crc32fast::hash(&self.package.data))?;
         let profile = self.profile();
         if !state.memory.snapshot_layout_is_valid(profile)
             || !state.video.snapshot_layout_is_valid()
@@ -571,8 +571,7 @@ impl Runtime {
         enabled: bool,
         code: &str,
     ) -> std::result::Result<(), CheatParseError> {
-        self.cheats
-            .set_a330_slot(index, enabled, code, &self.memory)
+        super::cheats::set_slot(&mut self.cheats, index, enabled, code, &self.memory)
     }
 
     pub(crate) fn set_parsed_cheat(
@@ -581,8 +580,7 @@ impl Runtime {
         enabled: bool,
         rule: CheatRule,
     ) -> std::result::Result<(), CheatParseError> {
-        self.cheats
-            .set_parsed_a330_rule(index, enabled, rule, &self.memory)
+        super::cheats::set_parsed_rule(&mut self.cheats, index, enabled, rule, &self.memory)
     }
 
     pub(crate) fn clear_cheats(&mut self) {
@@ -593,7 +591,7 @@ impl Runtime {
         if !self.is_running() {
             return Ok(());
         }
-        self.cheats.apply_a330(&mut self.memory, &mut self.cpu);
+        super::cheats::apply(&self.cheats, &mut self.memory, &mut self.cpu);
         let profile = self.memory.profile();
         let mut frame_address = None;
         let initial = self.cpu.instruction_count;

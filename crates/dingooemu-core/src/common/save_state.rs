@@ -14,15 +14,15 @@ const MAX_DECODED_SIZE: usize = 128 * 1024 * 1024;
 const A330_MAX_DECODED_SIZE: usize = 256 * 1024 * 1024;
 
 /// Fixed capacity required by the libretro serialization API.
-pub const SERIALIZED_SIZE: usize = 48 * 1024 * 1024;
+pub const A320_SERIALIZED_SIZE: usize = 48 * 1024 * 1024;
 pub const A330_SERIALIZED_SIZE: usize = 128 * 1024 * 1024;
 
-pub fn encode<T: Serialize>(value: &T, content_crc32: u32, output: &mut [u8]) -> Result<()> {
+pub fn encode_a320<T: Serialize>(value: &T, content_crc32: u32, output: &mut [u8]) -> Result<()> {
     encode_with_limits(
         value,
         content_crc32,
         output,
-        SERIALIZED_SIZE,
+        A320_SERIALIZED_SIZE,
         MAX_DECODED_SIZE,
     )
 }
@@ -83,11 +83,11 @@ fn encode_with_limits<T: Serialize>(
     Ok(())
 }
 
-pub fn decode<T: DeserializeOwned>(input: &[u8], expected_content_crc32: u32) -> Result<T> {
+pub fn decode_a320<T: DeserializeOwned>(input: &[u8], expected_content_crc32: u32) -> Result<T> {
     decode_with_limits(
         input,
         expected_content_crc32,
-        SERIALIZED_SIZE,
+        A320_SERIALIZED_SIZE,
         MAX_DECODED_SIZE,
     )
 }

@@ -1,3 +1,4 @@
+mod cheats;
 pub mod cpu;
 mod diagnostics;
 #[cfg(feature = "jit")]

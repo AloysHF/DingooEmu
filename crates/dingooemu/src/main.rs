@@ -3,9 +3,12 @@ mod keyboard;
 mod scaler;
 
 use clap::{Parser, ValueEnum};
-use dingooemu_core::cheats::CheatRule;
+use dingooemu_core::common::cheats::CheatRule;
 use dingooemu_core::UnknownInstructionPolicy;
-use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator, UnknownHlePolicy};
+use dingooemu_core::{
+    common::video::{SCREEN_HEIGHT, SCREEN_WIDTH},
+    Emulator, UnknownHlePolicy,
+};
 use minifb::{Key, Window, WindowOptions};
 use std::path::{Path, PathBuf};
 

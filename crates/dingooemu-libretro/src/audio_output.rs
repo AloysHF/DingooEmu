@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use dingooemu_core::audio::OUTPUT_SAMPLE_RATE;
+use dingooemu_core::common::audio::OUTPUT_SAMPLE_RATE;
 
 use crate::callbacks;
 

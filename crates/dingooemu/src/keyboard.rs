@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use dingooemu_core::input::{
+use dingooemu_core::common::input::{
     BUTTON_A, BUTTON_B, BUTTON_DOWN, BUTTON_L, BUTTON_LEFT, BUTTON_R, BUTTON_RIGHT, BUTTON_SELECT,
     BUTTON_START, BUTTON_UP, BUTTON_X, BUTTON_Y,
 };

@@ -1293,7 +1293,7 @@ fn lower_memory_instruction(
         let alias_in_bounds = builder.ins().icmp_imm_u(
             IntCC::UnsignedLessThanOrEqual,
             alias_offset,
-            (crate::video::FRAMEBUFFER_MAP_SIZE as u32 - width) as i64,
+            (crate::a320::memory::FRAMEBUFFER_MAP_SIZE as u32 - width) as i64,
         );
         let alias_pointer = builder.ins().uextend(types::I64, alias_offset);
         let alias_address = builder.ins().iadd(state.framebuffer, alias_pointer);
@@ -1807,7 +1807,7 @@ mod tests {
         let block = compiler.compile(start, &instructions).unwrap().unwrap();
         let mut registers = Registers::new(start);
         registers.write(8, 0x1234_5678);
-        registers.write(9, crate::video::VM_LCD_FB_ADDRESS);
+        registers.write(9, crate::a320::memory::LCD_FRAMEBUFFER_BASE);
         let mut memory = Memory::new();
         let ram = memory.jit_ram_ptr();
         let framebuffer = memory.jit_framebuffer_ptr();
@@ -1817,7 +1817,9 @@ mod tests {
         assert_eq!(completed, 1);
         assert_eq!(registers.pc, start + 4);
         assert_eq!(
-            memory.read_u32(crate::video::VM_LCD_FB_ADDRESS).unwrap(),
+            memory
+                .read_u32(crate::a320::memory::LCD_FRAMEBUFFER_BASE)
+                .unwrap(),
             0x1234_5678
         );
     }

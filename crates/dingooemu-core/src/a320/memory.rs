@@ -1,20 +1,21 @@
 use crate::error::{Result, SimulatorError};
-use crate::video::FRAMEBUFFER_MAP_SIZE;
 
 /// Dingoo A320 memory regions
 const RAM_BASE: u32 = 0x0000_0000;
 pub(crate) const RAM_SIZE: u32 = 32 * 1024 * 1024; // 32 MB
 
+/// Rounded size of the A320 LCD framebuffer mapping.
+pub const FRAMEBUFFER_MAP_SIZE: usize = 0x0002_6000;
+
+/// Fixed framebuffer address exposed by the A320 SDK.
+pub const LCD_FRAMEBUFFER_BASE: u32 = 0x9400_0000;
+
 /// MIPS KSEG0 mask (strip top 3 bits for cached segment)
 const KSEG0_MASK: u32 = 0x1FFF_FFFF;
 
 /// Guest-visible aliases for the LCD framebuffer mapping.
-pub(crate) const LCD_FRAMEBUFFER_ALIASES: [u32; 4] = [
-    crate::video::VM_LCD_FB_ADDRESS,
-    0x1400_0000,
-    0x9000_0000,
-    0x1000_0000,
-];
+pub(crate) const LCD_FRAMEBUFFER_ALIASES: [u32; 4] =
+    [LCD_FRAMEBUFFER_BASE, 0x1400_0000, 0x9000_0000, 0x1000_0000];
 const IPU_BASE: u32 = 0x1308_0000;
 const IPU_REGISTER_SIZE: usize = 0x100;
 const IPU_CTRL_OFFSET: usize = 0x00;
@@ -689,13 +690,14 @@ mod tests {
     fn test_framebuffer_aliases_share_storage() {
         let mut mem = Memory::new();
 
-        mem.write_u8(crate::video::VM_LCD_FB_ADDRESS, 0x12).unwrap();
+        mem.write_u8(crate::a320::memory::LCD_FRAMEBUFFER_BASE, 0x12)
+            .unwrap();
         assert_eq!(mem.read_u8(0x1400_0000).unwrap(), 0x12);
 
         mem.write_u8(0x9000_0004, 0x34).unwrap();
         assert_eq!(mem.read_u8(0x1000_0004).unwrap(), 0x34);
 
-        mem.write_u32(crate::video::VM_LCD_FB_ADDRESS + 8, 0x1234_5678)
+        mem.write_u32(crate::a320::memory::LCD_FRAMEBUFFER_BASE + 8, 0x1234_5678)
             .unwrap();
         assert_eq!(mem.read_u32(0x1400_0008).unwrap(), 0x1234_5678);
     }

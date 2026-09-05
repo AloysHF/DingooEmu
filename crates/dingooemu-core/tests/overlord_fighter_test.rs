@@ -1,4 +1,4 @@
-use dingooemu_core::input::BUTTON_A;
+use dingooemu_core::common::input::BUTTON_A;
 use dingooemu_core::Emulator;
 use std::path::PathBuf;
 

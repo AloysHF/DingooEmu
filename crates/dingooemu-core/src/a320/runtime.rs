@@ -3,15 +3,15 @@ use super::diagnostics::JitDiagnostics;
 #[cfg(feature = "jit")]
 use super::jit::{CompiledExecution, JitEngine};
 use super::memory::Memory;
-use crate::audio::{Audio, AudioConfig};
-use crate::cheats::{CheatManager, CheatParseError, CheatRule};
+use crate::common::audio::{Audio, AudioConfig};
+use crate::common::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::common::execution::UnknownInstructionPolicy;
 use crate::common::hle::{UnknownHleCall, UnknownHlePolicy};
+use crate::common::input::Input;
+use crate::common::video::Video;
 use crate::content::{ArmProfile, ContentFormat, GuestArchitecture};
 use crate::error::{Result, SimulatorError};
-use crate::input::Input;
 use crate::package::{PackageImage, ResourceKind};
-use crate::video::Video;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
@@ -301,8 +301,8 @@ impl Runtime {
 
         // Map framebuffer at a fixed guest-visible address
         // The game writes directly to this address
-        let fb_addr = crate::video::VM_LCD_FB_ADDRESS;
-        let fb_size = crate::video::FRAMEBUFFER_SIZE;
+        let fb_addr = crate::a320::memory::LCD_FRAMEBUFFER_BASE;
+        let fb_size = crate::common::video::FRAMEBUFFER_SIZE;
         // Reserve space in memory for framebuffer (zero it out)
         for i in 0..fb_size {
             let _ = memory.write_u8(fb_addr + i as u32, 0);
@@ -360,7 +360,7 @@ impl Runtime {
             app.entry_point(),
             load_base,
             physical_addr,
-            crate::video::VM_LCD_FB_ADDRESS,
+            crate::a320::memory::LCD_FRAMEBUFFER_BASE,
             import_addrs.len(),
             hooked_addrs.len()
         );
@@ -550,7 +550,7 @@ impl Runtime {
 
     /// Return the fixed buffer capacity required for a serialized state.
     pub fn serialized_state_size(&self) -> usize {
-        crate::save_state::SERIALIZED_SIZE
+        crate::common::save_state::A320_SERIALIZED_SIZE
     }
 
     /// Serialize the complete mutable runtime state into a fixed-size buffer.
@@ -598,7 +598,7 @@ impl Runtime {
             locale_ansi_buffer: self.locale_ansi_buffer,
             framebuffer_submitted: self.framebuffer_submitted,
         };
-        crate::save_state::encode(&state, crc32fast::hash(&app.data), output)
+        crate::common::save_state::encode_a320(&state, crc32fast::hash(&app.data), output)
     }
 
     /// Restore a serialized state without changing the emulator on failure.
@@ -608,7 +608,7 @@ impl Runtime {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("cannot load state without loaded content"))?;
         let mut state: EmulatorState =
-            crate::save_state::decode(input, crc32fast::hash(&app.data))?;
+            crate::common::save_state::decode_a320(input, crc32fast::hash(&app.data))?;
         if !state.memory.snapshot_layout_is_valid() || !state.video.snapshot_layout_is_valid() {
             anyhow::bail!("save state has an incompatible memory layout");
         }
@@ -680,7 +680,7 @@ impl Runtime {
         #[cfg(feature = "jit")]
         self.jit.begin_frame();
         self.framebuffer_submitted = false;
-        self.cheats.apply(&mut self.memory, &mut self.cpu);
+        super::cheats::apply(&self.cheats, &mut self.memory, &mut self.cpu);
 
         let mut remaining_cycles = CYCLES_PER_FRAME;
         let mut idle_contexts = 0usize;
@@ -1823,7 +1823,7 @@ impl Runtime {
     /// Sync framebuffer from guest memory to video subsystem
     /// The game writes directly to the fixed framebuffer address
     fn sync_framebuffer(&mut self) {
-        let fb_data = &self.memory.framebuffer()[..crate::video::FRAMEBUFFER_SIZE];
+        let fb_data = &self.memory.framebuffer()[..crate::common::video::FRAMEBUFFER_SIZE];
 
         self.framebuffer_submitted = true;
         let dst = self.video.framebuffer_mut();
@@ -1968,7 +1968,7 @@ impl Runtime {
         enabled: bool,
         code: &str,
     ) -> std::result::Result<(), CheatParseError> {
-        self.cheats.set_slot(index, enabled, code, &self.memory)?;
+        super::cheats::set_slot(&mut self.cheats, index, enabled, code, &self.memory)?;
         self.clear_instruction_cache();
         Ok(())
     }
@@ -1980,8 +1980,7 @@ impl Runtime {
         enabled: bool,
         rule: CheatRule,
     ) -> std::result::Result<(), CheatParseError> {
-        self.cheats
-            .set_parsed_rule(index, enabled, rule, &self.memory)?;
+        super::cheats::set_parsed_rule(&mut self.cheats, index, enabled, rule, &self.memory)?;
         self.clear_instruction_cache();
         Ok(())
     }
@@ -1999,7 +1998,7 @@ impl Runtime {
 
     /// Get the fixed frontend audio sample rate.
     pub fn audio_sample_rate(&self) -> u32 {
-        crate::audio::OUTPUT_SAMPLE_RATE
+        crate::common::audio::OUTPUT_SAMPLE_RATE
     }
 
     /// Get the current frame count
@@ -2251,7 +2250,7 @@ mod tests {
         let mut emu = Runtime::from_package(minimal_app()).unwrap();
         emu.start();
         emu.memory.write_u32(0x1000, 0x1234_5678).unwrap();
-        emu.set_buttons(crate::input::BUTTON_A);
+        emu.set_buttons(crate::common::input::BUTTON_A);
         emu.frame_count = 42;
         emu.cycle_count = 123;
 
@@ -2529,11 +2528,11 @@ mod tests {
         assert_eq!(emu.cpu.regs.pc, return_address);
 
         invoke_sdk_import(&mut emu, 0x1004, "LCD_GetXSize");
-        assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_WIDTH);
+        assert_eq!(emu.cpu.regs.read(2), crate::common::video::SCREEN_WIDTH);
 
-        emu.set_buttons(crate::input::BUTTON_A);
+        emu.set_buttons(crate::common::input::BUTTON_A);
         invoke_sdk_import(&mut emu, 0x1008, "kbd_get_key");
-        assert_eq!(emu.cpu.regs.read(2), crate::input::BUTTON_A);
+        assert_eq!(emu.cpu.regs.read(2), crate::common::input::BUTTON_A);
 
         invoke_sdk_import(&mut emu, 0x100c, "pcm_ioctl");
         assert_eq!(emu.cpu.regs.read(2), 0);
@@ -2564,7 +2563,7 @@ mod tests {
         invoke_sdk_import(&mut emu, 0x1104, "WM_SetFocus");
         invoke_sdk_import(&mut emu, 0x1108, "open_gui_key_msg");
 
-        emu.set_buttons(crate::input::BUTTON_RIGHT);
+        emu.set_buttons(crate::common::input::BUTTON_RIGHT);
         invoke_sdk_import(&mut emu, 0x110c, "GUI_Exec");
         assert_eq!(emu.cpu.regs.pc, callback);
         assert_eq!(emu.cpu.regs.read(31), return_address);
@@ -2788,10 +2787,10 @@ mod tests {
         let mut emu = Runtime::default();
 
         invoke_sdk_import(&mut emu, 0, "LCD_GetXSize");
-        assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_WIDTH);
+        assert_eq!(emu.cpu.regs.read(2), crate::common::video::SCREEN_WIDTH);
 
         invoke_sdk_import(&mut emu, 0, "LCD_GetYSize");
-        assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_HEIGHT);
+        assert_eq!(emu.cpu.regs.read(2), crate::common::video::SCREEN_HEIGHT);
     }
 
     #[cfg(not(feature = "standalone"))]
@@ -3049,7 +3048,7 @@ mod tests {
         emu.start();
         emu.cpu.regs.write(8, 0x1234_5678);
         emu.memory.write_u32(0x2000, 0xaabb_ccdd).unwrap();
-        emu.input.set_buttons(crate::input::BUTTON_A);
+        emu.input.set_buttons(crate::common::input::BUTTON_A);
         emu.frame_count = 42;
         emu.cycle_count = 987_654;
         emu.open_files.insert(
@@ -3091,7 +3090,7 @@ mod tests {
         emu.unserialize_state(&state).unwrap();
         assert_eq!(emu.cpu.regs.read(8), 0x1234_5678);
         assert_eq!(emu.memory.read_u32(0x2000).unwrap(), 0xaabb_ccdd);
-        assert_eq!(emu.input.buttons(), crate::input::BUTTON_A);
+        assert_eq!(emu.input.buttons(), crate::common::input::BUTTON_A);
         assert_eq!(emu.frame_count, 42);
         assert_eq!(emu.cycle_count, 987_654);
         assert!(emu.is_running());

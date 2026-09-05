@@ -1,3 +1,4 @@
+mod cheats;
 pub mod cpu;
 mod firmware_archive;
 pub mod memory;

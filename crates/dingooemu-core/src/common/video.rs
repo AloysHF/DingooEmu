@@ -1,13 +1,7 @@
-/// Video constants for Dingoo A320
+/// Display dimensions shared by the supported devices.
 pub const SCREEN_WIDTH: u32 = 320;
 pub const SCREEN_HEIGHT: u32 = 240;
 pub const FRAMEBUFFER_SIZE: usize = (SCREEN_WIDTH * SCREEN_HEIGHT * 2) as usize; // RGB565
-
-/// Rounded LCD framebuffer mapping size.
-pub const FRAMEBUFFER_MAP_SIZE: usize = 0x0002_6000;
-
-/// Fixed framebuffer address returned by the SDK.
-pub const VM_LCD_FB_ADDRESS: u32 = 0x9400_0000;
 
 /// Video subsystem
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -28,11 +22,6 @@ impl Video {
             fb_dirty: false,
             frame_count: 0,
         }
-    }
-
-    /// Get the fixed framebuffer address
-    pub fn framebuffer_addr(&self) -> u32 {
-        VM_LCD_FB_ADDRESS
     }
 
     /// Get a reference to the framebuffer
@@ -142,7 +131,6 @@ mod tests {
     #[test]
     fn test_video_creation() {
         let video = Video::new();
-        assert_eq!(video.framebuffer_addr(), VM_LCD_FB_ADDRESS);
         assert_eq!(video.framebuffer().len(), FRAMEBUFFER_SIZE);
     }
 

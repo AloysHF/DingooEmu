@@ -1,7 +1,7 @@
 use crate::a320::{runtime::Runtime as A320Runtime, JitDiagnostics};
 use crate::a330::runtime::Runtime as A330Runtime;
-use crate::audio::AudioConfig;
-use crate::cheats::{CheatParseError, CheatRule};
+use crate::common::audio::AudioConfig;
+use crate::common::cheats::{CheatParseError, CheatRule};
 use crate::common::execution::UnknownInstructionPolicy;
 use crate::common::hle::{UnknownHleCall, UnknownHlePolicy};
 use crate::content::{ArmProfile, ContentFormat, GuestArchitecture, TargetDevice};
@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::package::PackageImage;
 use std::path::{Path, PathBuf};
 
-/// Architecture-specific runtime selected by the content probe.
+/// Device-specific runtime selected from package metadata.
 enum Runtime {
     A320(Box<A320Runtime>),
     A330(Box<A330Runtime>),
@@ -320,7 +320,7 @@ impl Emulator {
 
     pub fn video_ram_guest_address(&self) -> u32 {
         match &self.runtime {
-            Runtime::A320(_) => crate::video::VM_LCD_FB_ADDRESS,
+            Runtime::A320(_) => crate::a320::memory::LCD_FRAMEBUFFER_BASE,
             Runtime::A330(_) => crate::a330::memory::FRAMEBUFFER_BASE,
         }
     }
@@ -387,7 +387,7 @@ impl Emulator {
     pub fn audio_sample_rate(&self) -> u32 {
         match &self.runtime {
             Runtime::A320(runtime) => runtime.audio_sample_rate(),
-            Runtime::A330(_) => crate::audio::OUTPUT_SAMPLE_RATE,
+            Runtime::A330(_) => crate::common::audio::OUTPUT_SAMPLE_RATE,
         }
     }
 
@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(emulator.system_ram_guest_address(), 0);
         assert_eq!(
             emulator.video_ram_guest_address(),
-            crate::video::VM_LCD_FB_ADDRESS
+            crate::a320::memory::LCD_FRAMEBUFFER_BASE
         );
     }
 
