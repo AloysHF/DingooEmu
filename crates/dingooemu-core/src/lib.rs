@@ -5,15 +5,12 @@
 //! against this crate.
 
 pub mod a320;
-pub mod a330_memory;
-mod a330_runtime;
-pub mod arm_cpu;
+pub mod a330;
 pub mod audio;
 pub mod cheats;
 mod common;
 pub mod content;
 pub mod error;
-mod firmware_archive;
 pub mod input;
 pub mod package;
 mod runtime;

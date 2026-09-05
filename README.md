@@ -128,9 +128,11 @@ crates/
 │       │   ├── jit.rs           # Optional native translator for hot MIPS32 blocks
 │       │   ├── memory.rs        # A320 memory bus
 │       │   └── runtime/sdk_hle/ # A320 SDK dispatch and implementations
-│       ├── a330_runtime.rs      # A330 lifecycle, scheduler, and SDK bridge
-│       ├── arm_cpu.rs           # ARM32/Thumb interpreter
-│       ├── a330_memory.rs       # A330 memory map and package loader
+│       ├── a330/
+│       │   ├── runtime.rs       # Gemei A330 lifecycle, scheduler, and SDK bridge
+│       │   ├── cpu.rs           # ARM32/Thumb interpreter
+│       │   ├── memory.rs        # A330 memory map and package loader
+│       │   └── firmware_archive.rs # Adjacent A330 firmware reader
 │       ├── save_state.rs        # Versioned compressed state container
 │       ├── video.rs             # Framebuffer and screen rendering
 │       ├── audio.rs             # Audio engine (PCM output)

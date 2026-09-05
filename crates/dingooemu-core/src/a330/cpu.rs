@@ -9,20 +9,20 @@ const Q: u32 = 1 << 27;
 const T: u32 = 1 << 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ArmExecutionState {
+pub enum ExecutionState {
     #[default]
     Arm,
     Thumb,
 }
 
-pub trait ArmBus {
+pub trait Bus {
     fn read8(&mut self, address: u32) -> Result<u8>;
     fn read16(&mut self, address: u32) -> Result<u16>;
     fn read32(&mut self, address: u32) -> Result<u32>;
     fn write8(&mut self, address: u32, value: u8) -> Result<()>;
     fn write16(&mut self, address: u32, value: u16) -> Result<()>;
     fn write32(&mut self, address: u32, value: u32) -> Result<()>;
-    fn svc(&mut self, cpu: &mut ArmCpu, immediate: u32) -> Result<()>;
+    fn svc(&mut self, cpu: &mut Cpu, immediate: u32) -> Result<()>;
 
     fn fetch16(&mut self, address: u32) -> Result<u16> {
         self.read16(address)
@@ -34,36 +34,32 @@ pub trait ArmBus {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ArmCpu {
+pub struct Cpu {
     pub r: [u32; 16],
     pub cpsr: u32,
     pub instruction_count: u64,
-    state: ArmExecutionState,
+    state: ExecutionState,
     running: bool,
     unknown_instruction_policy: UnknownInstructionPolicy,
 }
 
-impl ArmCpu {
+impl Cpu {
     pub fn new(entry: u32, stack: u32, link_register: u32) -> Self {
         let state = if entry & 1 != 0 {
-            ArmExecutionState::Thumb
+            ExecutionState::Thumb
         } else {
-            ArmExecutionState::Arm
+            ExecutionState::Arm
         };
         let mut r = [0; 16];
         r[13] = stack;
         r[14] = link_register;
         r[15] = match state {
-            ArmExecutionState::Arm => entry & !3,
-            ArmExecutionState::Thumb => entry & !1,
+            ExecutionState::Arm => entry & !3,
+            ExecutionState::Thumb => entry & !1,
         };
         Self {
             r,
-            cpsr: if state == ArmExecutionState::Thumb {
-                T
-            } else {
-                0
-            },
+            cpsr: if state == ExecutionState::Thumb { T } else { 0 },
             instruction_count: 0,
             state,
             running: false,
@@ -83,7 +79,7 @@ impl ArmCpu {
         self.running
     }
 
-    pub fn execution_state(&self) -> ArmExecutionState {
+    pub fn execution_state(&self) -> ExecutionState {
         self.state
     }
 
@@ -95,18 +91,18 @@ impl ArmCpu {
         self.unknown_instruction_policy
     }
 
-    pub fn step<B: ArmBus>(&mut self, bus: &mut B) -> Result<()> {
+    pub fn step<B: Bus>(&mut self, bus: &mut B) -> Result<()> {
         if !self.running {
             return Ok(());
         }
         let pc = self.r[15];
         let result = match self.state {
-            ArmExecutionState::Arm => {
+            ExecutionState::Arm => {
                 let instruction = bus.fetch32(pc)?;
                 self.r[15] = pc.wrapping_add(4);
                 self.execute_arm(instruction, pc, bus)
             }
-            ArmExecutionState::Thumb => {
+            ExecutionState::Thumb => {
                 let instruction = bus.fetch16(pc)?;
                 self.r[15] = pc.wrapping_add(2);
                 self.execute_thumb(instruction, pc, bus)
@@ -130,7 +126,7 @@ impl ArmCpu {
         Ok(())
     }
 
-    pub fn run<B: ArmBus>(&mut self, bus: &mut B, limit: u64) -> Result<u64> {
+    pub fn run<B: Bus>(&mut self, bus: &mut B, limit: u64) -> Result<u64> {
         let initial = self.instruction_count;
         while self.running && self.instruction_count.wrapping_sub(initial) < limit {
             self.step(bus)?;
@@ -138,7 +134,7 @@ impl ArmCpu {
         Ok(self.instruction_count.wrapping_sub(initial))
     }
 
-    fn execute_arm<B: ArmBus>(&mut self, instruction: u32, pc: u32, bus: &mut B) -> Result<()> {
+    fn execute_arm<B: Bus>(&mut self, instruction: u32, pc: u32, bus: &mut B) -> Result<()> {
         let condition = instruction >> 28;
         if condition != 0xf && !self.condition_passed(condition) {
             return Ok(());
@@ -150,7 +146,7 @@ impl ArmCpu {
                 .wrapping_add(offset)
                 .wrapping_add((instruction >> 23) & 2);
             self.r[14] = pc.wrapping_add(4);
-            self.state = ArmExecutionState::Thumb;
+            self.state = ExecutionState::Thumb;
             self.cpsr |= T;
             self.r[15] = target & !1;
             return Ok(());
@@ -181,7 +177,7 @@ impl ArmCpu {
         }
     }
 
-    fn execute_arm_data_or_misc<B: ArmBus>(
+    fn execute_arm_data_or_misc<B: Bus>(
         &mut self,
         instruction: u32,
         pc: u32,
@@ -379,7 +375,7 @@ impl ArmCpu {
         Ok(())
     }
 
-    fn execute_single_transfer<B: ArmBus>(
+    fn execute_single_transfer<B: Bus>(
         &mut self,
         instruction: u32,
         pc: u32,
@@ -429,7 +425,7 @@ impl ArmCpu {
         Ok(())
     }
 
-    fn execute_half_transfer<B: ArmBus>(
+    fn execute_half_transfer<B: Bus>(
         &mut self,
         instruction: u32,
         pc: u32,
@@ -479,7 +475,7 @@ impl ArmCpu {
         Ok(())
     }
 
-    fn execute_block_transfer<B: ArmBus>(
+    fn execute_block_transfer<B: Bus>(
         &mut self,
         instruction: u32,
         pc: u32,
@@ -541,7 +537,7 @@ impl ArmCpu {
         Ok(())
     }
 
-    fn execute_thumb<B: ArmBus>(&mut self, instruction: u16, pc: u32, bus: &mut B) -> Result<()> {
+    fn execute_thumb<B: Bus>(&mut self, instruction: u16, pc: u32, bus: &mut B) -> Result<()> {
         let op = u32::from(instruction);
         let rd = (op & 7) as usize;
         let rs = ((op >> 3) & 7) as usize;
@@ -831,7 +827,7 @@ impl ArmCpu {
             0b11101 => {
                 let target = self.r[14].wrapping_add((op & 0x7ff) << 1) & !3;
                 self.r[14] = pc.wrapping_add(2) | 1;
-                self.state = ArmExecutionState::Arm;
+                self.state = ExecutionState::Arm;
                 self.cpsr &= !T;
                 self.r[15] = target;
             }
@@ -847,11 +843,11 @@ impl ArmCpu {
 
     fn branch_exchange(&mut self, target: u32) -> Result<()> {
         if target & 1 != 0 {
-            self.state = ArmExecutionState::Thumb;
+            self.state = ExecutionState::Thumb;
             self.cpsr |= T;
             self.r[15] = target & !1;
         } else {
-            self.state = ArmExecutionState::Arm;
+            self.state = ExecutionState::Arm;
             self.cpsr &= !T;
             self.r[15] = target & !3;
         }
@@ -863,16 +859,16 @@ impl ArmCpu {
             return self.r[reg];
         }
         match self.state {
-            ArmExecutionState::Arm => pc.wrapping_add(if store { 12 } else { 8 }),
-            ArmExecutionState::Thumb => pc.wrapping_add(4),
+            ExecutionState::Arm => pc.wrapping_add(if store { 12 } else { 8 }),
+            ExecutionState::Thumb => pc.wrapping_add(4),
         }
     }
 
     fn write_reg(&mut self, reg: usize, value: u32) {
         if reg == 15 {
             self.r[15] = match self.state {
-                ArmExecutionState::Arm => value & !3,
-                ArmExecutionState::Thumb => value & !1,
+                ExecutionState::Arm => value & !3,
+                ExecutionState::Thumb => value & !1,
             };
         } else {
             self.r[reg] = value;
@@ -1006,7 +1002,7 @@ mod tests {
         }
     }
 
-    impl ArmBus for TestBus {
+    impl Bus for TestBus {
         fn read8(&mut self, address: u32) -> Result<u8> {
             Ok(self.data[self.range(address, 1)?.start])
         }
@@ -1039,15 +1035,15 @@ mod tests {
             Ok(())
         }
 
-        fn svc(&mut self, cpu: &mut ArmCpu, immediate: u32) -> Result<()> {
+        fn svc(&mut self, cpu: &mut Cpu, immediate: u32) -> Result<()> {
             self.svc = Some(immediate);
             cpu.r[0] = 0x55aa;
             Ok(())
         }
     }
 
-    fn running_cpu() -> ArmCpu {
-        let mut cpu = ArmCpu::new(0, 0xf00, 0xffff_ffff);
+    fn running_cpu() -> Cpu {
+        let mut cpu = Cpu::new(0, 0xf00, 0xffff_ffff);
         cpu.start();
         cpu
     }
@@ -1094,7 +1090,7 @@ mod tests {
         bus.write32(12, 0xe12f_ff10).unwrap();
         cpu.r[0] = 0x101;
         cpu.step(&mut bus).unwrap();
-        assert_eq!(cpu.execution_state(), ArmExecutionState::Thumb);
+        assert_eq!(cpu.execution_state(), ExecutionState::Thumb);
         assert_eq!(cpu.r[15], 0x100);
     }
 
@@ -1146,14 +1142,14 @@ mod tests {
         let mut cpu = running_cpu();
         cpu.r[0] = 0x100;
         cpu.step(&mut bus).unwrap();
-        assert_eq!(cpu.execution_state(), ArmExecutionState::Thumb);
+        assert_eq!(cpu.execution_state(), ExecutionState::Thumb);
         assert_eq!(cpu.r[15], 0x200);
 
         cpu = running_cpu();
         cpu.r[15] = 4;
         cpu.r[0] = 0x100;
         cpu.step(&mut bus).unwrap();
-        assert_eq!(cpu.execution_state(), ArmExecutionState::Thumb);
+        assert_eq!(cpu.execution_state(), ExecutionState::Thumb);
         assert_eq!(cpu.r[15], 0x200);
         assert_eq!(cpu.r[0], 0x104);
     }
@@ -1269,7 +1265,7 @@ mod tests {
     #[test]
     fn thumb_arithmetic_and_conditional_branch_set_flags() {
         let mut bus = TestBus::new_thumb(&[0x2005, 0x3003, 0x2808, 0xd000, 0x2101, 0x2102]);
-        let mut cpu = ArmCpu::new(1, 0xf00, 0xffff_ffff);
+        let mut cpu = Cpu::new(1, 0xf00, 0xffff_ffff);
         cpu.start();
         cpu.run(&mut bus, 3).unwrap();
         assert_eq!(cpu.r[0], 8);
@@ -1281,7 +1277,7 @@ mod tests {
     #[test]
     fn thumb_load_store_and_stack_round_trip() {
         let mut bus = TestBus::new_thumb(&[0x6008, 0x680a, 0xb503, 0xbd0c]);
-        let mut cpu = ArmCpu::new(1, 0xf00, 0x21);
+        let mut cpu = Cpu::new(1, 0xf00, 0x21);
         cpu.r[0] = 0x1234_5678;
         cpu.r[1] = 0x100;
         cpu.start();
@@ -1299,7 +1295,7 @@ mod tests {
     #[test]
     fn thumb_long_branch_and_svc_preserve_return_state() {
         let mut bus = TestBus::new_thumb(&[0xf000, 0xf802, 0x2000, 0x2000, 0xdf42]);
-        let mut cpu = ArmCpu::new(1, 0xf00, 0);
+        let mut cpu = Cpu::new(1, 0xf00, 0);
         cpu.start();
         cpu.run(&mut bus, 3).unwrap();
         assert_eq!(cpu.r[14], 5);
@@ -1313,15 +1309,15 @@ mod tests {
         let mut arm_bus = TestBus::new(&[0xfa00_0000]);
         let mut arm_cpu = running_cpu();
         arm_cpu.step(&mut arm_bus).unwrap();
-        assert_eq!(arm_cpu.execution_state(), ArmExecutionState::Thumb);
+        assert_eq!(arm_cpu.execution_state(), ExecutionState::Thumb);
         assert_eq!(arm_cpu.r[15], 8);
         assert_eq!(arm_cpu.r[14], 4);
 
         let mut thumb_bus = TestBus::new_thumb(&[0xf000, 0xe802]);
-        let mut thumb_cpu = ArmCpu::new(1, 0xf00, 0);
+        let mut thumb_cpu = Cpu::new(1, 0xf00, 0);
         thumb_cpu.start();
         thumb_cpu.run(&mut thumb_bus, 2).unwrap();
-        assert_eq!(thumb_cpu.execution_state(), ArmExecutionState::Arm);
+        assert_eq!(thumb_cpu.execution_state(), ExecutionState::Arm);
         assert_eq!(thumb_cpu.r[15], 8);
         assert_eq!(thumb_cpu.r[14], 5);
     }

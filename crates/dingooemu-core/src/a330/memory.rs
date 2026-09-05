@@ -26,7 +26,7 @@ pub(crate) const LEGACY_GRAPHICS_STATUS: u32 = 0x0930_3054;
 pub(crate) const LEGACY_GRAPHICS_READY: u32 = 1 << 2;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct A330Memory {
+pub struct Memory {
     profile: ArmProfile,
     system_ram: Vec<u8>,
     stack: Vec<u8>,
@@ -38,7 +38,7 @@ pub struct A330Memory {
     legacy_system_mmio: Vec<u8>,
 }
 
-impl A330Memory {
+impl Memory {
     pub fn from_package(package: &PackageImage) -> Result<Self> {
         let profile = package.arm_profile().ok_or_else(|| {
             SimulatorError::InvalidPackageFormat("unsupported ARM memory profile".into())
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn loads_program_zeros_bss_and_patches_retail_import() {
         let package = package(ArmProfile::Retail);
-        let memory = A330Memory::from_package(&package).unwrap();
+        let memory = Memory::from_package(&package).unwrap();
         assert_eq!(memory.read32(package.load_base()).unwrap(), 0x0302_0100);
         assert_eq!(
             memory.read32(package.load_base() + 0x10).unwrap(),
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn homebrew_import_uses_single_instruction_layout() {
         let package = package(ArmProfile::Homebrew);
-        let memory = A330Memory::from_package(&package).unwrap();
+        let memory = Memory::from_package(&package).unwrap();
         assert_eq!(
             memory.read32(package.load_base() + 0x10).unwrap(),
             0xef00_0000
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn homebrew_display_starts_ready() {
-        let memory = A330Memory::from_package(&package(ArmProfile::Homebrew)).unwrap();
+        let memory = Memory::from_package(&package(ArmProfile::Homebrew)).unwrap();
 
         assert_eq!(
             memory.read32(LEGACY_GRAPHICS_STATUS).unwrap() & LEGACY_GRAPHICS_READY,
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn mapped_regions_are_little_endian_and_bounds_checked() {
-        let mut memory = A330Memory::from_package(&package(ArmProfile::Retail)).unwrap();
+        let mut memory = Memory::from_package(&package(ArmProfile::Retail)).unwrap();
         memory.write32(STACK_BASE, 0x4433_2211).unwrap();
         assert_eq!(memory.read16(STACK_BASE + 1).unwrap(), 0x3322);
         memory.write8(FRAMEBUFFER_BASE, 0xaa).unwrap();
@@ -408,7 +408,7 @@ mod tests {
         let mut package = package(ArmProfile::Retail);
         package.imports[0].address = package.load_base() + package.program_size();
         assert!(matches!(
-            A330Memory::from_package(&package),
+            Memory::from_package(&package),
             Err(SimulatorError::InvalidPackageFormat(_))
         ));
     }

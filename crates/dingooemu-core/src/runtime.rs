@@ -1,5 +1,5 @@
 use crate::a320::{runtime::Runtime as A320Runtime, JitDiagnostics};
-use crate::a330_runtime::A330Runtime;
+use crate::a330::runtime::Runtime as A330Runtime;
 use crate::audio::AudioConfig;
 use crate::cheats::{CheatParseError, CheatRule};
 use crate::common::execution::UnknownInstructionPolicy;
@@ -300,7 +300,7 @@ impl Emulator {
     pub fn system_ram_guest_address(&self) -> u32 {
         match &self.runtime {
             Runtime::A320(_) => 0,
-            Runtime::A330(_) => crate::a330_memory::SYSTEM_RAM_BASE,
+            Runtime::A330(_) => crate::a330::memory::SYSTEM_RAM_BASE,
         }
     }
 
@@ -321,7 +321,7 @@ impl Emulator {
     pub fn video_ram_guest_address(&self) -> u32 {
         match &self.runtime {
             Runtime::A320(_) => crate::video::VM_LCD_FB_ADDRESS,
-            Runtime::A330(_) => crate::a330_memory::FRAMEBUFFER_BASE,
+            Runtime::A330(_) => crate::a330::memory::FRAMEBUFFER_BASE,
         }
     }
 
@@ -452,11 +452,11 @@ mod tests {
         assert_eq!(emulator.arm_profile(), Some(ArmProfile::Retail));
         assert_eq!(
             emulator.system_ram_guest_address(),
-            crate::a330_memory::SYSTEM_RAM_BASE
+            crate::a330::memory::SYSTEM_RAM_BASE
         );
         assert_eq!(
             emulator.video_ram_guest_address(),
-            crate::a330_memory::FRAMEBUFFER_BASE
+            crate::a330::memory::FRAMEBUFFER_BASE
         );
     }
 }

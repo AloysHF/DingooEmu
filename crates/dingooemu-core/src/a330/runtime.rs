@@ -1,15 +1,15 @@
-use crate::a330_memory::{
-    A330Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE,
-    LEGACY_GRAPHICS_STRIDE, LEGACY_GRAPHICS_SURFACE, STACK_BASE, STACK_SIZE,
+use super::cpu::{Bus, Cpu};
+use super::firmware_archive::FirmwareArchive;
+use super::memory::{
+    Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE, LEGACY_GRAPHICS_STRIDE,
+    LEGACY_GRAPHICS_SURFACE, STACK_BASE, STACK_SIZE,
 };
-use crate::arm_cpu::{ArmBus, ArmCpu};
 use crate::audio::{Audio, AudioConfig};
 use crate::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::common::execution::UnknownInstructionPolicy;
 use crate::common::hle::{UnknownHleCall, UnknownHlePolicy};
 use crate::content::{ArmProfile, ContentFormat};
 use crate::error::{Result, SimulatorError};
-use crate::firmware_archive::FirmwareArchive;
 use crate::input::{
     Input, BUTTON_A, BUTTON_B, BUTTON_DOWN, BUTTON_L, BUTTON_LEFT, BUTTON_R, BUTTON_RIGHT,
     BUTTON_SELECT, BUTTON_START, BUTTON_UP, BUTTON_X, BUTTON_Y,
@@ -138,7 +138,7 @@ impl GuestHeap {
         }
     }
 
-    fn reallocate(&mut self, memory: &mut A330Memory, address: u32, requested: u32) -> Result<u32> {
+    fn reallocate(&mut self, memory: &mut Memory, address: u32, requested: u32) -> Result<u32> {
         if address == 0 {
             return Ok(self.allocate(requested));
         }
@@ -224,8 +224,8 @@ impl GuestHeap {
 
 #[derive(serde::Serialize)]
 struct A330StateRef<'a> {
-    cpu: &'a ArmCpu,
-    memory: &'a A330Memory,
+    cpu: &'a Cpu,
+    memory: &'a Memory,
     video: &'a Video,
     audio: &'a Audio,
     input: &'a Input,
@@ -233,7 +233,7 @@ struct A330StateRef<'a> {
     running: bool,
     boot_complete: bool,
     dynamic_imports: &'a [String],
-    tasks: &'a VecDeque<(ArmCpu, u32)>,
+    tasks: &'a VecDeque<(Cpu, u32)>,
     current_priority: u32,
     files: BTreeMap<u32, GuestFile>,
     file_searches: &'a BTreeMap<u32, FileSearch>,
@@ -245,8 +245,8 @@ struct A330StateRef<'a> {
 
 #[derive(serde::Deserialize)]
 struct A330State {
-    cpu: ArmCpu,
-    memory: A330Memory,
+    cpu: Cpu,
+    memory: Memory,
     video: Video,
     audio: Audio,
     input: Input,
@@ -254,7 +254,7 @@ struct A330State {
     running: bool,
     boot_complete: bool,
     dynamic_imports: Vec<String>,
-    tasks: VecDeque<(ArmCpu, u32)>,
+    tasks: VecDeque<(Cpu, u32)>,
     current_priority: u32,
     files: BTreeMap<u32, GuestFile>,
     file_searches: BTreeMap<u32, FileSearch>,
@@ -264,10 +264,10 @@ struct A330State {
     framebuffer_bits: u32,
 }
 
-pub(crate) struct A330Runtime {
+pub(crate) struct Runtime {
     package: PackageImage,
-    pub(crate) cpu: ArmCpu,
-    pub(crate) memory: A330Memory,
+    pub(crate) cpu: Cpu,
+    pub(crate) memory: Memory,
     pub(crate) video: Video,
     pub(crate) audio: Audio,
     pub(crate) input: Input,
@@ -280,7 +280,7 @@ pub(crate) struct A330Runtime {
     boot_complete: bool,
     app_main: Option<u32>,
     dynamic_imports: Vec<String>,
-    tasks: VecDeque<(ArmCpu, u32)>,
+    tasks: VecDeque<(Cpu, u32)>,
     current_priority: u32,
     content_directory: PathBuf,
     save_directory: Option<PathBuf>,
@@ -294,10 +294,10 @@ pub(crate) struct A330Runtime {
     console_output: Vec<u8>,
 }
 
-impl A330Runtime {
+impl Runtime {
     pub(crate) fn from_package(package: PackageImage, _path: PathBuf) -> Result<Self> {
-        let mut memory = A330Memory::from_package(&package)?;
-        let cpu = ArmCpu::new(
+        let mut memory = Memory::from_package(&package)?;
+        let cpu = Cpu::new(
             package.entry_point(),
             STACK_BASE + STACK_SIZE as u32 - 0x1000,
             EXIT_ADDRESS,
@@ -571,7 +571,8 @@ impl A330Runtime {
         enabled: bool,
         code: &str,
     ) -> std::result::Result<(), CheatParseError> {
-        self.cheats.set_arm_slot(index, enabled, code, &self.memory)
+        self.cheats
+            .set_a330_slot(index, enabled, code, &self.memory)
     }
 
     pub(crate) fn set_parsed_cheat(
@@ -581,7 +582,7 @@ impl A330Runtime {
         rule: CheatRule,
     ) -> std::result::Result<(), CheatParseError> {
         self.cheats
-            .set_parsed_arm_rule(index, enabled, rule, &self.memory)
+            .set_parsed_a330_rule(index, enabled, rule, &self.memory)
     }
 
     pub(crate) fn clear_cheats(&mut self) {
@@ -592,7 +593,7 @@ impl A330Runtime {
         if !self.is_running() {
             return Ok(());
         }
-        self.cheats.apply_arm(&mut self.memory, &mut self.cpu);
+        self.cheats.apply_a330(&mut self.memory, &mut self.cpu);
         let profile = self.memory.profile();
         let mut frame_address = None;
         let initial = self.cpu.instruction_count;
@@ -604,7 +605,7 @@ impl A330Runtime {
                     self.boot_complete = true;
                     if let Some(entry) = self.app_main {
                         let count = self.cpu.instruction_count;
-                        self.cpu = ArmCpu::new(entry, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+                        self.cpu = Cpu::new(entry, EXIT_ADDRESS - 16, EXIT_ADDRESS);
                         self.cpu.instruction_count = count;
                         self.cpu.r[0] = APP_PATH_ADDRESS;
                         self.cpu.start();
@@ -737,7 +738,7 @@ impl A330Runtime {
 }
 
 struct RuntimeBus<'a> {
-    memory: &'a mut A330Memory,
+    memory: &'a mut Memory,
     package: &'a PackageImage,
     imports: &'a [crate::package::SymbolEntry],
     profile: ArmProfile,
@@ -748,7 +749,7 @@ struct RuntimeBus<'a> {
     frame_address: &'a mut Option<u32>,
     stop_requested: bool,
     dynamic_imports: &'a mut Vec<String>,
-    tasks: &'a mut VecDeque<(ArmCpu, u32)>,
+    tasks: &'a mut VecDeque<(Cpu, u32)>,
     current_priority: u32,
     yield_requested: bool,
     finish_current: bool,
@@ -767,7 +768,7 @@ struct RuntimeBus<'a> {
 }
 
 impl RuntimeBus<'_> {
-    fn dispatch(&mut self, cpu: &mut ArmCpu, immediate: u32) -> Result<()> {
+    fn dispatch(&mut self, cpu: &mut Cpu, immediate: u32) -> Result<()> {
         if immediate == 0x0012_3456 {
             return self.dispatch_semihosting(cpu);
         }
@@ -960,7 +961,7 @@ impl RuntimeBus<'_> {
             "vxGoHome" | "abort" | "av_end_thread" | "av_queue_abort" => self.stop_requested = true,
             "OSTaskCreate" => {
                 if cpu.r[0] != 0 && cpu.r[2] != 0 {
-                    let mut task = ArmCpu::new(cpu.r[0], cpu.r[2], EXIT_ADDRESS);
+                    let mut task = Cpu::new(cpu.r[0], cpu.r[2], EXIT_ADDRESS);
                     task.set_unknown_instruction_policy(cpu.unknown_instruction_policy());
                     task.r[0] = cpu.r[1];
                     task.start();
@@ -1100,7 +1101,7 @@ impl RuntimeBus<'_> {
         Ok(())
     }
 
-    fn dispatch_semihosting(&mut self, cpu: &mut ArmCpu) -> Result<()> {
+    fn dispatch_semihosting(&mut self, cpu: &mut Cpu) -> Result<()> {
         match cpu.r[0] {
             0x03 => {
                 let value = self.memory.read8(cpu.r[1])?;
@@ -1585,7 +1586,7 @@ impl RuntimeBus<'_> {
         Ok(count == value.len())
     }
 
-    fn record_unknown(&mut self, cpu: &mut ArmCpu, name: &str, import_address: u32) -> Result<()> {
+    fn record_unknown(&mut self, cpu: &mut Cpu, name: &str, import_address: u32) -> Result<()> {
         let pc = cpu.r[15].wrapping_sub(4);
         let call = self
             .unknown_hle_calls
@@ -1980,7 +1981,7 @@ fn compare_ascii_case_insensitive(left: &str, right: &str) -> i32 {
     }
 }
 
-impl ArmBus for RuntimeBus<'_> {
+impl Bus for RuntimeBus<'_> {
     fn read8(&mut self, address: u32) -> Result<u8> {
         self.memory.read8(address)
     }
@@ -2015,7 +2016,7 @@ impl ArmBus for RuntimeBus<'_> {
         }
         Ok(())
     }
-    fn svc(&mut self, cpu: &mut ArmCpu, immediate: u32) -> Result<()> {
+    fn svc(&mut self, cpu: &mut Cpu, immediate: u32) -> Result<()> {
         self.dispatch(cpu, immediate)
     }
 }
@@ -2069,7 +2070,7 @@ mod tests {
         package
     }
 
-    fn memory_c_string(memory: &A330Memory, address: u32) -> String {
+    fn memory_c_string(memory: &Memory, address: u32) -> String {
         let bytes = (0..256)
             .map(|offset| memory.read8(address + offset).unwrap())
             .take_while(|&byte| byte != 0)
@@ -2120,8 +2121,7 @@ mod tests {
 
     #[test]
     fn a330_realloc_preserves_data_and_the_original_on_failure() {
-        let mut runtime =
-            A330Runtime::from_package(svc_package("realloc"), PathBuf::new()).unwrap();
+        let mut runtime = Runtime::from_package(svc_package("realloc"), PathBuf::new()).unwrap();
         let first = runtime.heap.allocate(8);
         runtime.memory.write32(first, 0x1234_5678).unwrap();
         runtime.heap.allocate(8);
@@ -2146,7 +2146,7 @@ mod tests {
     #[test]
     fn a330_cheats_apply_enabled_rules_and_survive_reset() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
         runtime
             .set_cheat(0, true, "mem32:0x1ff00000=0x12345678")
             .unwrap();
@@ -2171,7 +2171,7 @@ mod tests {
     #[test]
     fn a330_cheats_validate_targets_and_can_be_removed() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
         assert!(matches!(
             runtime.set_cheat(0, true, "mem32:0x04000000=1"),
             Err(CheatParseError::InvalidMemoryRange { .. })
@@ -2193,10 +2193,10 @@ mod tests {
     #[test]
     fn a330_unknown_instruction_policy_updates_tasks_and_survives_reset() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
         let system_ram_pointer = runtime.memory.system_ram().as_ptr();
         let video_ram_pointer = runtime.memory.framebuffer().as_ptr();
-        let mut task = ArmCpu::new(0x1010_1000, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
+        let mut task = Cpu::new(0x1010_1000, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
         task.start();
         runtime.tasks.push_back((task, 7));
 
@@ -2224,7 +2224,7 @@ mod tests {
         let save_directory =
             std::env::temp_dir().join(format!("dingooemu-a330-state-{}", std::process::id()));
         let mut runtime =
-            A330Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
         runtime.set_save_directory(&save_directory);
         runtime.cpu.r[4] = 0x1234_5678;
         runtime
@@ -2241,7 +2241,7 @@ mod tests {
         runtime.cpu.start();
         runtime.boot_complete = true;
         runtime.dynamic_imports.push("dynamic_call".into());
-        let mut task = ArmCpu::new(0x1010_1000, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
+        let mut task = Cpu::new(0x1010_1000, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
         task.r[5] = 0x55aa_55aa;
         task.start();
         runtime.tasks.push_back((task, 7));
@@ -2329,7 +2329,7 @@ mod tests {
     #[test]
     fn scheduler_dispatches_svc_and_stops_at_return_sentinel() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("LCDGetWidth"), PathBuf::new()).unwrap();
         runtime.start();
         runtime.tick().unwrap();
         assert_eq!(runtime.cpu.r[0], SCREEN_WIDTH);
@@ -2339,7 +2339,7 @@ mod tests {
 
     #[test]
     fn semihosting_console_output_returns_to_the_next_instruction() {
-        let mut runtime = A330Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
+        let mut runtime = Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
         runtime.memory.write8(STACK_BASE, b'X').unwrap();
         runtime.cpu.r[0] = 0x03;
         runtime.cpu.r[1] = STACK_BASE;
@@ -2355,7 +2355,7 @@ mod tests {
 
     #[test]
     fn semihosting_exit_stops_the_runtime() {
-        let mut runtime = A330Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
+        let mut runtime = Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
         runtime.cpu.r[0] = 0x18;
         runtime.cpu.r[1] = 0x0002_0026;
         runtime.start();
@@ -2376,7 +2376,7 @@ mod tests {
 
     #[test]
     fn early_exit_does_not_replace_a_presented_guest_frame() {
-        let mut runtime = A330Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
+        let mut runtime = Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
         runtime.video.framebuffer_mut()[..2].copy_from_slice(&0xf800_u16.to_le_bytes());
         runtime.video.advance_frame();
         let crc = runtime.video.framebuffer_crc32();
@@ -2389,7 +2389,7 @@ mod tests {
 
     #[test]
     fn early_exit_replaces_a_presented_solid_frame() {
-        let mut runtime = A330Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
+        let mut runtime = Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
         runtime.video.advance_frame();
 
         runtime.present_early_exit();
@@ -2439,7 +2439,7 @@ mod tests {
     #[test]
     fn a330_status_poll_writes_translated_edges_and_state() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("kbd_get_status"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("kbd_get_status"), PathBuf::new()).unwrap();
         runtime.input.set_buttons(BUTTON_A | BUTTON_B);
         runtime.cpu.r[0] = STACK_BASE;
         runtime.start();
@@ -2453,13 +2453,13 @@ mod tests {
     #[test]
     fn a330_event_poll_consumes_pending_input_event() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("sys_judge_event"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("sys_judge_event"), PathBuf::new()).unwrap();
         runtime.input.set_buttons(BUTTON_START);
         runtime.start();
         runtime.tick().unwrap();
         assert_eq!(runtime.cpu.r[0], 1);
 
-        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu = Cpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
         runtime.cpu.start();
         runtime.running = true;
         runtime.boot_complete = true;
@@ -2470,7 +2470,7 @@ mod tests {
     #[test]
     fn unknown_imports_are_aggregated_and_strict_mode_stops() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("unknown_call"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("unknown_call"), PathBuf::new()).unwrap();
         runtime.set_unknown_hle_policy(UnknownHlePolicy::Stop);
         runtime.start();
         assert!(matches!(
@@ -2485,7 +2485,7 @@ mod tests {
     #[test]
     fn dynamic_imports_create_reusable_svc_thunks() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("dl_get_proc"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("dl_get_proc"), PathBuf::new()).unwrap();
         runtime
             .memory
             .write_bytes(STACK_BASE, b"dynamic_call\0")
@@ -2503,7 +2503,7 @@ mod tests {
             0xe12f_ff1e
         );
 
-        runtime.cpu = ArmCpu::new(DYNAMIC_THUNK_BASE, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu = Cpu::new(DYNAMIC_THUNK_BASE, EXIT_ADDRESS - 16, EXIT_ADDRESS);
         runtime.cpu.start();
         runtime.running = true;
         runtime.boot_complete = true;
@@ -2517,7 +2517,7 @@ mod tests {
     #[test]
     fn task_create_queues_and_runs_a_guest_task() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("OSTaskCreate"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("OSTaskCreate"), PathBuf::new()).unwrap();
         runtime.cpu.r[0] = ArmProfile::RETAIL_ORIGIN + 4;
         runtime.cpu.r[1] = 0x1234;
         runtime.cpu.r[2] = EXIT_ADDRESS - 0x100;
@@ -2537,8 +2537,7 @@ mod tests {
         std::fs::write(directory.join("asset.bin"), [1, 2, 3, 4]).unwrap();
 
         let mut runtime =
-            A330Runtime::from_package(svc_package("fsys_fopen"), directory.join("game.c2s"))
-                .unwrap();
+            Runtime::from_package(svc_package("fsys_fopen"), directory.join("game.c2s")).unwrap();
         runtime
             .memory
             .write_bytes(STACK_BASE, b"asset.bin\0")
@@ -2556,7 +2555,7 @@ mod tests {
         assert_eq!(runtime.files[&handle].data, [1, 2, 3, 4]);
 
         runtime.package.imports[0].name = "fsys_fread".into();
-        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu = Cpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
         runtime.cpu.r[0] = STACK_BASE + 64;
         runtime.cpu.r[1] = 2;
         runtime.cpu.r[2] = 2;
@@ -2572,7 +2571,7 @@ mod tests {
         );
 
         runtime.package.imports[0].name = "fsys_fseek".into();
-        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu = Cpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
         runtime.cpu.r[0] = handle;
         runtime.cpu.r[1] = 1;
         runtime.cpu.r[2] = 0;
@@ -2583,7 +2582,7 @@ mod tests {
         assert_eq!(runtime.cpu.r[0], 0);
 
         runtime.package.imports[0].name = "fsys_fread".into();
-        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu = Cpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
         runtime.cpu.r[0] = STACK_BASE + 64;
         runtime.cpu.r[1] = 1;
         runtime.cpu.r[2] = 2;
@@ -2617,7 +2616,7 @@ mod tests {
         package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
         package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
         package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
-        let mut runtime = A330Runtime::from_package(package, directory.join("game.c2s")).unwrap();
+        let mut runtime = Runtime::from_package(package, directory.join("game.c2s")).unwrap();
         runtime
             .memory
             .write_bytes(STACK_BASE, b"A:\\GAME\\*.gb\0")
@@ -2637,7 +2636,7 @@ mod tests {
 
         runtime.package.imports[0].name = "fsys_findnext".into();
         for expected in [Some("beta.GB"), None] {
-            runtime.cpu = ArmCpu::new(ArmProfile::HOMEBREW_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+            runtime.cpu = Cpu::new(ArmProfile::HOMEBREW_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
             runtime.cpu.r[0] = search_data;
             runtime.cpu.start();
             runtime.running = true;
@@ -2671,7 +2670,7 @@ mod tests {
         package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
         package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
         package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
-        let mut runtime = A330Runtime::from_package(package, directory.join("game.c2s")).unwrap();
+        let mut runtime = Runtime::from_package(package, directory.join("game.c2s")).unwrap();
         runtime
             .memory
             .write_bytes(STACK_BASE, b"asset.bin\0")
@@ -2705,8 +2704,7 @@ mod tests {
         ));
         let save_directory = directory.join("saves");
         let mut runtime =
-            A330Runtime::from_package(svc_package("fsys_fopen"), directory.join("game.c2s"))
-                .unwrap();
+            Runtime::from_package(svc_package("fsys_fopen"), directory.join("game.c2s")).unwrap();
         runtime.set_save_directory(&save_directory);
         runtime
             .memory
@@ -2728,7 +2726,7 @@ mod tests {
             .memory
             .write_bytes(STACK_BASE + 128, b"language=0\n")
             .unwrap();
-        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu = Cpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
         runtime.cpu.r[0] = STACK_BASE + 128;
         runtime.cpu.r[1] = 1;
         runtime.cpu.r[2] = 11;
@@ -2740,7 +2738,7 @@ mod tests {
         assert_eq!(runtime.cpu.r[0], 11);
 
         runtime.package.imports[0].name = "fsys_fclose".into();
-        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu = Cpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
         runtime.cpu.r[0] = handle;
         runtime.cpu.start();
         runtime.running = true;
@@ -2762,8 +2760,7 @@ mod tests {
         std::fs::write(directory.join("asset.bin"), [1, 2, 3, 4]).unwrap();
 
         let mut runtime =
-            A330Runtime::from_package(svc_package("fsys_fopenW"), directory.join("game.c2s"))
-                .unwrap();
+            Runtime::from_package(svc_package("fsys_fopenW"), directory.join("game.c2s")).unwrap();
         let mut wide_name = Vec::new();
         for value in "asset.bin".encode_utf16().chain(std::iter::once(0)) {
             wide_name.extend_from_slice(&value.to_le_bytes());
@@ -2799,7 +2796,7 @@ mod tests {
     fn semaphore_waits_retry_after_another_task_posts() {
         let origin = ArmProfile::RETAIL_ORIGIN;
         let mut runtime =
-            A330Runtime::from_package(svc_package("OSSemCreate"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("OSSemCreate"), PathBuf::new()).unwrap();
         runtime.cpu.r[0] = 1;
         runtime.start();
         runtime.tick().unwrap();
@@ -2807,7 +2804,7 @@ mod tests {
         assert_eq!(runtime.semaphores[&handle], 1);
 
         runtime.package.imports[0].name = "OSSemPend".into();
-        runtime.cpu = ArmCpu::new(origin, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu = Cpu::new(origin, EXIT_ADDRESS - 16, EXIT_ADDRESS);
         runtime.cpu.r[0] = handle;
         runtime.cpu.start();
         runtime.running = true;
@@ -2815,7 +2812,7 @@ mod tests {
         runtime.tick().unwrap();
         assert_eq!(runtime.semaphores[&handle], 0);
 
-        runtime.cpu = ArmCpu::new(origin, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu = Cpu::new(origin, EXIT_ADDRESS - 16, EXIT_ADDRESS);
         runtime.cpu.r[0] = handle;
         runtime.cpu.start();
         runtime.running = true;
@@ -2824,7 +2821,7 @@ mod tests {
         assert!(runtime.is_running());
 
         runtime.package.imports[0].name = "OSSemPost".into();
-        runtime.cpu = ArmCpu::new(origin, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu = Cpu::new(origin, EXIT_ADDRESS - 16, EXIT_ADDRESS);
         runtime.cpu.r[0] = handle;
         runtime.cpu.start();
         runtime.running = true;
@@ -2835,7 +2832,7 @@ mod tests {
     #[test]
     fn cache_flush_submits_legacy_rgb565_frames() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("FlushDCache"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("FlushDCache"), PathBuf::new()).unwrap();
         runtime
             .memory
             .write16(LEGACY_FRAMEBUFFER_ADDRESS, 0x07e0)
@@ -2851,7 +2848,7 @@ mod tests {
     fn legacy_stride_selects_framebuffer_depth() {
         for (stride, expected_bits) in [(SCREEN_WIDTH * 2, 16), (SCREEN_WIDTH * 4, 32)] {
             let mut runtime =
-                A330Runtime::from_package(legacy_stride_package(stride), PathBuf::new()).unwrap();
+                Runtime::from_package(legacy_stride_package(stride), PathBuf::new()).unwrap();
             runtime.start();
             runtime.tick().unwrap();
 
@@ -2869,7 +2866,7 @@ mod tests {
         package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
         package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
         package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
-        let mut runtime = A330Runtime::from_package(package, PathBuf::new()).unwrap();
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
         runtime
             .memory
             .write16(LEGACY_FRAMEBUFFER_ADDRESS, 0x07e0)
@@ -2885,7 +2882,7 @@ mod tests {
     #[test]
     fn thirty_two_bit_guest_frames_are_converted_to_rgb565() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("FlushDCache"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("FlushDCache"), PathBuf::new()).unwrap();
         runtime.framebuffer_bits = 32 | FRAMEBUFFER_BITS_EXPLICIT;
         runtime
             .memory
@@ -2904,7 +2901,7 @@ mod tests {
         package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
         package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
         package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
-        let mut runtime = A330Runtime::from_package(package, PathBuf::new()).unwrap();
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
         runtime
             .memory
             .write32(APP_PATH_ADDRESS, 0x00ff_0000)
@@ -2920,7 +2917,7 @@ mod tests {
     #[test]
     fn frame_submission_uses_the_configured_framebuffer() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("lcd_set_frame"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("lcd_set_frame"), PathBuf::new()).unwrap();
         runtime.active_framebuffer = LEGACY_FRAMEBUFFER_ADDRESS;
         runtime
             .memory
@@ -2938,7 +2935,7 @@ mod tests {
     #[test]
     fn waveout_open_uses_the_guest_audio_configuration() {
         let mut runtime =
-            A330Runtime::from_package(svc_package("waveout_open"), PathBuf::new()).unwrap();
+            Runtime::from_package(svc_package("waveout_open"), PathBuf::new()).unwrap();
         #[cfg(feature = "standalone")]
         runtime.audio.set_host_output_enabled(false);
         runtime.memory.write32(STACK_BASE, 16_000).unwrap();
@@ -2964,7 +2961,7 @@ mod tests {
             size: 4,
             xor_key: 0x40,
         });
-        let mut runtime = A330Runtime::from_package(package, PathBuf::new()).unwrap();
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
         runtime
             .memory
             .write_bytes(STACK_BASE, b"data\\level.bin\0")

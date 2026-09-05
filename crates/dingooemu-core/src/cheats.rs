@@ -3,10 +3,8 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
-use crate::a320::cpu::Cpu;
-use crate::a320::memory::Memory;
-use crate::a330_memory::A330Memory;
-use crate::arm_cpu::ArmCpu;
+use crate::a320::{cpu::Cpu as A320Cpu, memory::Memory as A320Memory};
+use crate::a330::{cpu::Cpu as A330Cpu, memory::Memory as A330Memory};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CheatParseError {
@@ -71,7 +69,7 @@ pub enum CheatRule {
 }
 
 impl CheatRule {
-    fn validate(&self, memory: &Memory) -> Result<(), CheatParseError> {
+    fn validate(&self, memory: &A320Memory) -> Result<(), CheatParseError> {
         let Self::Memory { width, address, .. } = self else {
             return Ok(());
         };
@@ -88,7 +86,7 @@ impl CheatRule {
         Ok(())
     }
 
-    fn apply(&self, memory: &mut Memory, cpu: &mut Cpu) {
+    fn apply(&self, memory: &mut A320Memory, cpu: &mut A320Cpu) {
         let result = match *self {
             Self::Memory {
                 width,
@@ -109,7 +107,7 @@ impl CheatRule {
         }
     }
 
-    fn validate_arm(&self, memory: &A330Memory) -> Result<(), CheatParseError> {
+    fn validate_a330(&self, memory: &A330Memory) -> Result<(), CheatParseError> {
         match self {
             Self::Memory { width, address, .. } => {
                 let bytes = width.bytes();
@@ -131,7 +129,7 @@ impl CheatRule {
         Ok(())
     }
 
-    fn apply_arm(&self, memory: &mut A330Memory, cpu: &mut ArmCpu) {
+    fn apply_a330(&self, memory: &mut A330Memory, cpu: &mut A330Cpu) {
         let result = match *self {
             Self::Memory {
                 width,
@@ -222,7 +220,7 @@ impl CheatManager {
         index: u32,
         enabled: bool,
         code: &str,
-        memory: &Memory,
+        memory: &A320Memory,
     ) -> Result<(), CheatParseError> {
         let code = code.trim();
         if code.is_empty() {
@@ -238,7 +236,7 @@ impl CheatManager {
         index: u32,
         enabled: bool,
         rule: CheatRule,
-        memory: &Memory,
+        memory: &A320Memory,
     ) -> Result<(), CheatParseError> {
         self.set_rule(index, enabled, String::new(), rule, memory)
     }
@@ -249,7 +247,7 @@ impl CheatManager {
         enabled: bool,
         code: String,
         rule: CheatRule,
-        memory: &Memory,
+        memory: &A320Memory,
     ) -> Result<(), CheatParseError> {
         rule.validate(memory)?;
         self.slots.insert(
@@ -267,13 +265,13 @@ impl CheatManager {
         self.slots.get(&index)
     }
 
-    pub fn apply(&self, memory: &mut Memory, cpu: &mut Cpu) {
+    pub fn apply(&self, memory: &mut A320Memory, cpu: &mut A320Cpu) {
         for slot in self.slots.values().filter(|slot| slot.enabled) {
             slot.rule.apply(memory, cpu);
         }
     }
 
-    pub(crate) fn set_arm_slot(
+    pub(crate) fn set_a330_slot(
         &mut self,
         index: u32,
         enabled: bool,
@@ -286,20 +284,20 @@ impl CheatManager {
             return Ok(());
         }
         let rule = CheatRule::from_str(code)?;
-        self.set_arm_rule(index, enabled, code.to_string(), rule, memory)
+        self.set_a330_rule(index, enabled, code.to_string(), rule, memory)
     }
 
-    pub(crate) fn set_parsed_arm_rule(
+    pub(crate) fn set_parsed_a330_rule(
         &mut self,
         index: u32,
         enabled: bool,
         rule: CheatRule,
         memory: &A330Memory,
     ) -> Result<(), CheatParseError> {
-        self.set_arm_rule(index, enabled, String::new(), rule, memory)
+        self.set_a330_rule(index, enabled, String::new(), rule, memory)
     }
 
-    fn set_arm_rule(
+    fn set_a330_rule(
         &mut self,
         index: u32,
         enabled: bool,
@@ -307,7 +305,7 @@ impl CheatManager {
         rule: CheatRule,
         memory: &A330Memory,
     ) -> Result<(), CheatParseError> {
-        rule.validate_arm(memory)?;
+        rule.validate_a330(memory)?;
         self.slots.insert(
             index,
             CheatSlot {
@@ -319,9 +317,9 @@ impl CheatManager {
         Ok(())
     }
 
-    pub(crate) fn apply_arm(&self, memory: &mut A330Memory, cpu: &mut ArmCpu) {
+    pub(crate) fn apply_a330(&self, memory: &mut A330Memory, cpu: &mut A330Cpu) {
         for slot in self.slots.values().filter(|slot| slot.enabled) {
-            slot.rule.apply_arm(memory, cpu);
+            slot.rule.apply_a330(memory, cpu);
         }
     }
 }
@@ -372,8 +370,8 @@ mod tests {
 
     #[test]
     fn applies_only_enabled_slots() {
-        let mut memory = Memory::new();
-        let mut cpu = Cpu::new(0);
+        let mut memory = A320Memory::new();
+        let mut cpu = A320Cpu::new(0);
         let mut cheats = CheatManager::default();
         cheats
             .set_slot(0, true, "mem32:0x100=0x12345678", &memory)

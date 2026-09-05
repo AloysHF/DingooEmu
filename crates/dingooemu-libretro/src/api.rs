@@ -1249,19 +1249,19 @@ mod tests {
         }
         assert_eq!(
             retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM),
-            dingooemu_core::a330_memory::SYSTEM_RAM_SIZE
+            dingooemu_core::a330::memory::SYSTEM_RAM_SIZE
         );
         assert_eq!(
             retro_get_memory_size(RETRO_MEMORY_VIDEO_RAM),
-            dingooemu_core::a330_memory::FRAMEBUFFER_SIZE
+            dingooemu_core::a330::memory::FRAMEBUFFER_SIZE
         );
         assert_eq!(
             SYSTEM_RAM_MAP_START.load(Ordering::SeqCst),
-            dingooemu_core::a330_memory::SYSTEM_RAM_BASE as usize
+            dingooemu_core::a330::memory::SYSTEM_RAM_BASE as usize
         );
         assert_eq!(
             VIDEO_RAM_MAP_START.load(Ordering::SeqCst),
-            dingooemu_core::a330_memory::FRAMEBUFFER_BASE as usize
+            dingooemu_core::a330::memory::FRAMEBUFFER_BASE as usize
         );
         let system_ram = retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
         let video_ram = retro_get_memory_data(RETRO_MEMORY_VIDEO_RAM);
@@ -1278,12 +1278,12 @@ mod tests {
             assert_eq!(emulator.buttons(), BUTTON_A | BUTTON_START);
             assert_eq!(
                 emulator
-                    .read_memory_u32(dingooemu_core::a330_memory::SYSTEM_RAM_BASE)
+                    .read_memory_u32(dingooemu_core::a330::memory::SYSTEM_RAM_BASE)
                     .unwrap(),
                 0xfeed_beef
             );
             emulator
-                .write_memory_u32(dingooemu_core::a330_memory::SYSTEM_RAM_BASE, 0x1234_5678)
+                .write_memory_u32(dingooemu_core::a330::memory::SYSTEM_RAM_BASE, 0x1234_5678)
                 .unwrap();
         }
 
@@ -1294,7 +1294,7 @@ mod tests {
             EMULATOR
                 .as_mut()
                 .unwrap()
-                .write_memory_u32(dingooemu_core::a330_memory::SYSTEM_RAM_BASE, 0)
+                .write_memory_u32(dingooemu_core::a330::memory::SYSTEM_RAM_BASE, 0)
                 .unwrap();
         }
         assert!(retro_unserialize(state.as_ptr().cast(), state.len()));
@@ -1305,7 +1305,7 @@ mod tests {
                 EMULATOR
                     .as_ref()
                     .unwrap()
-                    .read_memory_u32(dingooemu_core::a330_memory::SYSTEM_RAM_BASE)
+                    .read_memory_u32(dingooemu_core::a330::memory::SYSTEM_RAM_BASE)
                     .unwrap(),
                 0x1234_5678
             );
@@ -1320,7 +1320,7 @@ mod tests {
             assert!(emulator.is_running());
             assert_eq!(
                 emulator
-                    .read_memory_u32(dingooemu_core::a330_memory::SYSTEM_RAM_BASE)
+                    .read_memory_u32(dingooemu_core::a330::memory::SYSTEM_RAM_BASE)
                     .unwrap(),
                 0
             );
