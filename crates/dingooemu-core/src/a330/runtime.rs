@@ -30,6 +30,14 @@ const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
 const FILE_SEARCH_NAME_CAPACITY: usize = 256;
 const CONSOLE_OUTPUT_LIMIT: usize = 4096;
 
+enum SliceEvent {
+    BudgetExhausted,
+    Exit,
+    Stop,
+    Yield,
+    Frame(u32),
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct GuestFile {
     data: Vec<u8>,
@@ -601,64 +609,47 @@ impl Runtime {
         'scheduler: loop {
             let initial = self.cpu.instruction_count;
             let mut previous_pc = self.cpu.r[15];
-            while self.cpu.is_running()
-                && self.cpu.instruction_count - initial < INSTRUCTIONS_PER_SLICE
-            {
-                if self.cpu.r[15] == EXIT_ADDRESS {
-                    if !self.boot_complete {
-                        self.boot_complete = true;
-                        if let Some(entry) = self.app_main {
-                            let count = self.cpu.instruction_count;
-                            self.cpu = Cpu::new(entry, EXIT_ADDRESS - 16, EXIT_ADDRESS);
-                            self.cpu.instruction_count = count;
-                            self.cpu.r[0] = APP_PATH_ADDRESS;
-                            self.cpu.start();
-                            self.current_priority = 0;
-                            continue;
-                        }
+            let event = {
+                let mut bus = RuntimeBus {
+                    memory: &mut self.memory,
+                    package: &self.package,
+                    imports: &self.package.imports,
+                    profile,
+                    unknown_hle_calls: &mut self.unknown_hle_calls,
+                    unknown_hle_policy: self.unknown_hle_policy,
+                    unknown_hle_allowlist: &self.unknown_hle_allowlist,
+                    heap: &mut self.heap,
+                    frame_address: &mut frame_address,
+                    stop_requested: false,
+                    dynamic_imports: &mut self.dynamic_imports,
+                    tasks: &mut self.tasks,
+                    current_priority: self.current_priority,
+                    yield_requested: false,
+                    finish_current: false,
+                    content_directory: &self.content_directory,
+                    save_directory: self.save_directory.as_deref(),
+                    files: &mut self.files,
+                    file_searches: &mut self.file_searches,
+                    next_file_handle: &mut self.next_file_handle,
+                    semaphores: &mut self.semaphores,
+                    active_framebuffer: &mut self.active_framebuffer,
+                    framebuffer_bits: &mut self.framebuffer_bits,
+                    audio: &mut self.audio,
+                    input: &mut self.input,
+                    firmware_archive: self.firmware_archive.as_ref(),
+                    console_output: &mut self.console_output,
+                    event_pending: false,
+                };
+                let mut known_task_count = bus.tasks.len();
+                loop {
+                    if !self.cpu.is_running()
+                        || self.cpu.instruction_count - initial >= INSTRUCTIONS_PER_SLICE
+                    {
+                        break SliceEvent::BudgetExhausted;
                     }
-                    if !self.activate_next_task() {
-                        self.present_early_exit();
-                        self.stop();
-                        break 'scheduler;
+                    if self.cpu.r[15] == EXIT_ADDRESS {
+                        break SliceEvent::Exit;
                     }
-                    slices_remaining -= 1;
-                    if slices_remaining == 0 {
-                        break 'scheduler;
-                    }
-                    continue 'scheduler;
-                }
-                let queued_tasks_before = self.tasks.len();
-                let (stop_requested, yield_requested, finish_current, queued_tasks_after) = {
-                    let mut bus = RuntimeBus {
-                        memory: &mut self.memory,
-                        package: &self.package,
-                        imports: &self.package.imports,
-                        profile,
-                        unknown_hle_calls: &mut self.unknown_hle_calls,
-                        unknown_hle_policy: self.unknown_hle_policy,
-                        unknown_hle_allowlist: &self.unknown_hle_allowlist,
-                        heap: &mut self.heap,
-                        frame_address: &mut frame_address,
-                        stop_requested: false,
-                        dynamic_imports: &mut self.dynamic_imports,
-                        tasks: &mut self.tasks,
-                        current_priority: self.current_priority,
-                        yield_requested: false,
-                        finish_current: false,
-                        content_directory: &self.content_directory,
-                        save_directory: self.save_directory.as_deref(),
-                        files: &mut self.files,
-                        file_searches: &mut self.file_searches,
-                        next_file_handle: &mut self.next_file_handle,
-                        semaphores: &mut self.semaphores,
-                        active_framebuffer: &mut self.active_framebuffer,
-                        framebuffer_bits: &mut self.framebuffer_bits,
-                        audio: &mut self.audio,
-                        input: &mut self.input,
-                        firmware_archive: self.firmware_archive.as_ref(),
-                        console_output: &mut self.console_output,
-                    };
                     let pc = self.cpu.r[15];
                     if let Err(error) = self.cpu.step(&mut bus) {
                         return match error {
@@ -682,29 +673,65 @@ impl Runtime {
                         };
                     }
                     previous_pc = pc;
-                    (
-                        bus.stop_requested,
-                        bus.yield_requested,
-                        bus.finish_current,
-                        bus.tasks.len(),
-                    )
-                };
-                if queued_tasks_after >= queued_tasks_before {
-                    slices_remaining += queued_tasks_after - queued_tasks_before;
-                } else {
-                    slices_remaining = slices_remaining
-                        .saturating_sub(queued_tasks_before - queued_tasks_after)
-                        .max(1);
+                    if !bus.event_pending {
+                        continue;
+                    }
+                    bus.event_pending = false;
+                    let current_task_count = bus.tasks.len();
+                    if current_task_count >= known_task_count {
+                        slices_remaining += current_task_count - known_task_count;
+                    } else {
+                        slices_remaining = slices_remaining
+                            .saturating_sub(known_task_count - current_task_count)
+                            .max(1);
+                    }
+                    known_task_count = current_task_count;
+                    if bus.stop_requested {
+                        break SliceEvent::Stop;
+                    }
+                    if bus.finish_current {
+                        self.cpu.r[15] = EXIT_ADDRESS;
+                        bus.finish_current = false;
+                    }
+                    if bus.yield_requested {
+                        break SliceEvent::Yield;
+                    }
+                    if let Some(address) = bus.frame_address.take() {
+                        break SliceEvent::Frame(address);
+                    }
                 }
-                if stop_requested {
+            };
+            match event {
+                SliceEvent::Exit => {
+                    if !self.boot_complete {
+                        self.boot_complete = true;
+                        if let Some(entry) = self.app_main {
+                            let count = self.cpu.instruction_count;
+                            self.cpu = Cpu::new(entry, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+                            self.cpu.instruction_count = count;
+                            self.cpu.r[0] = APP_PATH_ADDRESS;
+                            self.cpu.start();
+                            self.current_priority = 0;
+                            continue;
+                        }
+                    }
+                    if !self.activate_next_task() {
+                        self.present_early_exit();
+                        self.stop();
+                        break 'scheduler;
+                    }
+                    slices_remaining -= 1;
+                    if slices_remaining == 0 {
+                        break 'scheduler;
+                    }
+                    continue 'scheduler;
+                }
+                SliceEvent::Stop => {
                     self.present_early_exit();
                     self.stop();
                     break 'scheduler;
                 }
-                if finish_current {
-                    self.cpu.r[15] = EXIT_ADDRESS;
-                }
-                if yield_requested {
+                SliceEvent::Yield => {
                     self.rotate_task();
                     slices_remaining -= 1;
                     if slices_remaining == 0 {
@@ -712,7 +739,7 @@ impl Runtime {
                     }
                     continue 'scheduler;
                 }
-                if let Some(address) = frame_address.take() {
+                SliceEvent::Frame(address) => {
                     presented_frame_address = Some(address);
                     self.rotate_task();
                     slices_remaining -= 1;
@@ -721,6 +748,7 @@ impl Runtime {
                     }
                     continue 'scheduler;
                 }
+                SliceEvent::BudgetExhausted => {}
             }
             self.rotate_task();
             slices_remaining -= 1;
@@ -804,6 +832,7 @@ struct RuntimeBus<'a> {
     input: &'a mut Input,
     firmware_archive: Option<&'a FirmwareArchive>,
     console_output: &'a mut Vec<u8>,
+    event_pending: bool,
 }
 
 fn framebuffer_is_solid(framebuffer: &[u8]) -> bool {
