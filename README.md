@@ -120,21 +120,14 @@ crates/
 │       ├── lib.rs               # Crate root (module declarations)
 │       ├── runtime.rs           # Format-neutral runtime facade
 │       ├── content.rs           # Content format and architecture detection
-│       ├── package.rs        # Shared CCDL package parser
-│       ├── emulator.rs          # Dingoo A320 APP/MIPS runtime
-│       ├── emulator/
-│       │   └── sdk_hle/         # A320 SDK dispatch and implementations
-│       │       ├── mod.rs       # Single HLE dispatcher
-│       │       ├── graphics.rs  # LCD and framebuffer calls
-│       │       ├── gui.rs       # Focused-window key message dispatch
-│       │       ├── input.rs     # Buttons and input events
-│       │       ├── audio.rs     # PCM and wave output
-│       │       ├── files.rs     # Resources, files, and saves
-│       │       ├── tasks.rs     # Tasks and semaphores
-│       │       └── system.rs    # Memory, timing, and system calls
-│       ├── cpu.rs               # Cached-block MIPS32 CPU interpreter
-│       ├── jit.rs               # Optional native translator for hot MIPS32 blocks
-│       ├── memory.rs            # A320 memory bus
+│       ├── package.rs           # Shared CCDL package parser
+│       ├── common/              # Cross-device policies and diagnostics
+│       ├── a320/
+│       │   ├── runtime.rs       # Dingoo A320 APP runtime
+│       │   ├── cpu.rs           # Cached-block MIPS32 interpreter
+│       │   ├── jit.rs           # Optional native translator for hot MIPS32 blocks
+│       │   ├── memory.rs        # A320 memory bus
+│       │   └── runtime/sdk_hle/ # A320 SDK dispatch and implementations
 │       ├── a330_runtime.rs      # A330 lifecycle, scheduler, and SDK bridge
 │       ├── arm_cpu.rs           # ARM32/Thumb interpreter
 │       ├── a330_memory.rs       # A330 memory map and package loader

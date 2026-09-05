@@ -5,13 +5,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use dingooemu_core::audio::OUTPUT_SAMPLE_RATE;
-use dingooemu_core::cpu::UnknownInstructionPolicy;
 use dingooemu_core::input::{
     BUTTON_A, BUTTON_B, BUTTON_DOWN, BUTTON_L, BUTTON_LEFT, BUTTON_R, BUTTON_RIGHT, BUTTON_SELECT,
     BUTTON_START, BUTTON_UP, BUTTON_X, BUTTON_Y,
 };
 use dingooemu_core::video::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use dingooemu_core::Emulator;
+use dingooemu_core::UnknownInstructionPolicy;
 
 use crate::callbacks;
 use crate::constants::*;

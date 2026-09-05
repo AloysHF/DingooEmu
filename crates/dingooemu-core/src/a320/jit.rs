@@ -1,5 +1,5 @@
-use crate::cpu::Registers;
-use crate::emulator::JitDiagnostics;
+use super::cpu::Registers;
+use super::diagnostics::JitDiagnostics;
 use cranelift::codegen::ir::{
     types, AbiParam, Function, InstBuilder, MemFlagsData, Signature, Value,
 };
@@ -1271,7 +1271,7 @@ fn lower_memory_instruction(
     let ram_in_bounds = builder.ins().icmp_imm_u(
         IntCC::UnsignedLessThanOrEqual,
         physical,
-        i64::from(crate::memory::RAM_SIZE - width),
+        i64::from(super::memory::RAM_SIZE - width),
     );
     let physical_pointer = builder.ins().uextend(types::I64, physical);
     let ram_address = builder.ins().iadd(state.ram, physical_pointer);
@@ -1288,7 +1288,7 @@ fn lower_memory_instruction(
     builder.seal_block(check_framebuffer);
     let mut framebuffer_address = state.framebuffer;
     let mut mapped = None;
-    for base in crate::memory::LCD_FRAMEBUFFER_ALIASES {
+    for base in super::memory::LCD_FRAMEBUFFER_ALIASES {
         let alias_offset = builder.ins().iadd_imm_s(access_address, -i64::from(base));
         let alias_in_bounds = builder.ins().icmp_imm_u(
             IntCC::UnsignedLessThanOrEqual,
@@ -1558,8 +1558,8 @@ fn iconst_u32(builder: &mut FunctionBuilder<'_>, value: u32) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cpu::Cpu;
-    use crate::memory::Memory;
+    use crate::a320::cpu::Cpu;
+    use crate::a320::memory::Memory;
 
     #[test]
     fn register_layout_matches_jit_offsets() {

@@ -4,27 +4,26 @@
 //! or audio output device. Both front-ends (standalone and libretro) link
 //! against this crate.
 
+pub mod a320;
 pub mod a330_memory;
 mod a330_runtime;
 pub mod arm_cpu;
 pub mod audio;
 pub mod cheats;
+mod common;
 pub mod content;
-pub mod cpu;
-pub mod emulator;
 pub mod error;
 mod firmware_archive;
 pub mod input;
-#[cfg(feature = "jit")]
-mod jit;
-pub mod memory;
 pub mod package;
 mod runtime;
 mod save_state;
 pub mod video;
 
 // Re-export main types for convenience
+pub use a320::JitDiagnostics;
+pub use common::execution::UnknownInstructionPolicy;
+pub use common::hle::{UnknownHleCall, UnknownHlePolicy};
 pub use content::{ArmProfile, ContentFormat, GuestArchitecture, TargetDevice};
-pub use emulator::{JitDiagnostics, UnknownHleCall, UnknownHlePolicy};
 pub use error::{Result, SimulatorError};
 pub use runtime::Emulator;

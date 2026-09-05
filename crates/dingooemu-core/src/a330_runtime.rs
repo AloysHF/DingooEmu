@@ -5,9 +5,9 @@ use crate::a330_memory::{
 use crate::arm_cpu::{ArmBus, ArmCpu};
 use crate::audio::{Audio, AudioConfig};
 use crate::cheats::{CheatManager, CheatParseError, CheatRule};
+use crate::common::execution::UnknownInstructionPolicy;
+use crate::common::hle::{UnknownHleCall, UnknownHlePolicy};
 use crate::content::{ArmProfile, ContentFormat};
-use crate::cpu::UnknownInstructionPolicy;
-use crate::emulator::{UnknownHleCall, UnknownHlePolicy};
 use crate::error::{Result, SimulatorError};
 use crate::firmware_archive::FirmwareArchive;
 use crate::input::{

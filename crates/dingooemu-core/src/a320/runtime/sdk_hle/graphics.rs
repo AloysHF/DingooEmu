@@ -1,7 +1,7 @@
-use super::{Emulator, HandlerResult};
+use super::{HandlerResult, Runtime};
 use crate::error::Result;
 
-pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResult> {
+pub(super) fn handle(emu: &mut Runtime, func_name: &str) -> Result<HandlerResult> {
     match func_name {
         "_lcd_get_frame" | "lcd_get_frame" | "lcd_get_cframe" => {
             let address = crate::video::VM_LCD_FB_ADDRESS;

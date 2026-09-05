@@ -3,10 +3,10 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
+use crate::a320::cpu::Cpu;
+use crate::a320::memory::Memory;
 use crate::a330_memory::A330Memory;
 use crate::arm_cpu::ArmCpu;
-use crate::cpu::Cpu;
-use crate::memory::Memory;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CheatParseError {

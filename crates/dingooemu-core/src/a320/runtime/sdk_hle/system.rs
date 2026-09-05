@@ -1,8 +1,8 @@
-use super::super::{Emulator, CPU_CLOCK_HZ, OS_TICKS_PER_SECOND};
+use super::super::{Runtime, CPU_CLOCK_HZ, OS_TICKS_PER_SECOND};
 use super::HandlerResult;
 use crate::error::Result;
 
-pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResult> {
+pub(super) fn handle(emu: &mut Runtime, func_name: &str) -> Result<HandlerResult> {
     match func_name {
         "malloc" => {
             let size = emu.cpu.regs.read(4);

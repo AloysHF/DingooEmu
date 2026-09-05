@@ -1,4 +1,4 @@
-use crate::cpu::UnknownInstructionPolicy;
+use crate::common::execution::UnknownInstructionPolicy;
 use crate::error::{Result, SimulatorError};
 
 const N: u32 = 1 << 31;

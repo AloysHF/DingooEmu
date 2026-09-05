@@ -1,12 +1,15 @@
+use super::cpu::Cpu;
+use super::diagnostics::JitDiagnostics;
+#[cfg(feature = "jit")]
+use super::jit::{CompiledExecution, JitEngine};
+use super::memory::Memory;
 use crate::audio::{Audio, AudioConfig};
 use crate::cheats::{CheatManager, CheatParseError, CheatRule};
+use crate::common::execution::UnknownInstructionPolicy;
+use crate::common::hle::{UnknownHleCall, UnknownHlePolicy};
 use crate::content::{ArmProfile, ContentFormat, GuestArchitecture};
-use crate::cpu::{Cpu, UnknownInstructionPolicy};
 use crate::error::{Result, SimulatorError};
 use crate::input::Input;
-#[cfg(feature = "jit")]
-use crate::jit::{CompiledExecution, JitEngine};
-use crate::memory::Memory;
 use crate::package::{PackageImage, ResourceKind};
 use crate::video::Video;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -30,49 +33,6 @@ const MAX_INSTRUCTION_BLOCK_LEN: usize = 64;
 const INSTRUCTION_BLOCK_CACHE_SLOTS: usize = 4_096;
 const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
 const FILE_SEARCH_NAME_CAPACITY: usize = 256;
-
-/// Behavior when the guest calls an SDK function without an HLE implementation.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum UnknownHlePolicy {
-    /// Record the call and return zero to preserve compatibility.
-    #[default]
-    Report,
-    /// Record the call and stop unless the function name is allowlisted.
-    Stop,
-}
-
-/// Aggregated diagnostics for one unknown SDK HLE function.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct UnknownHleCall {
-    pub name: String,
-    pub count: u64,
-    pub import_address: u32,
-    pub first_pc: u32,
-    pub first_arguments: [u32; 4],
-}
-
-/// Aggregated native translation counters for performance diagnostics.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct JitDiagnostics {
-    pub feature_available: bool,
-    pub enabled: bool,
-    pub backend_available: bool,
-    pub tracked_blocks: usize,
-    pub compiled_blocks: usize,
-    pub failed_blocks: usize,
-    pub execute_requests: u64,
-    pub native_executions: u64,
-    pub native_instructions: u64,
-    pub interpreter_executions: u64,
-    pub interpreter_instructions: u64,
-    pub compilation_attempts: u64,
-    pub compilation_failures: u64,
-    pub compilation_total_us: u64,
-    pub compilation_max_us: u64,
-    pub cold_fallbacks: u64,
-    pub instruction_limit_fallbacks: u64,
-    pub zero_exit_fallbacks: u64,
-}
 
 fn hook_filter_location(address: u32) -> (usize, u64) {
     let bit_index = (address as usize >> 2) & (HOOK_FILTER_WORDS * u64::BITS as usize - 1);
@@ -239,7 +199,7 @@ fn prepare_resource_file_data(name: &str, kind: ResourceKind, data: Vec<u8>) -> 
 }
 
 /// Main emulator struct that ties all components together
-pub struct Emulator {
+pub struct Runtime {
     /// CPU core
     pub(crate) cpu: Cpu,
     /// Memory system
@@ -312,15 +272,9 @@ pub struct Emulator {
     framebuffer_submitted: bool,
 }
 
-impl Emulator {
-    /// Create the legacy APP runtime from a content path.
-    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
-        let app = PackageImage::from_path(path)?;
-        Self::from_package_with_path(app, path.to_string_lossy().into_owned())
-    }
-
+impl Runtime {
     /// Create the legacy APP runtime from a parsed package.
+    #[cfg(test)]
     pub fn from_package(app: PackageImage) -> Result<Self> {
         Self::from_package_with_path(app, String::new())
     }
@@ -402,7 +356,7 @@ impl Emulator {
         }
 
         log::debug!(
-            "Emulator initialized: entry={:#010x}, base={:#010x}, physical={:#010x}, framebuffer={:#010x}, imports={}, hooked={}",
+            "Runtime initialized: entry={:#010x}, base={:#010x}, physical={:#010x}, framebuffer={:#010x}, imports={}, hooked={}",
             app.entry_point(),
             load_base,
             physical_addr,
@@ -488,7 +442,7 @@ impl Emulator {
     /// Start the emulator
     pub fn start(&mut self) {
         self.cpu.start();
-        log::info!("Emulator started");
+        log::info!("Runtime started");
     }
 
     /// Configure how unknown SDK HLE calls affect execution.
@@ -568,7 +522,7 @@ impl Emulator {
     pub fn stop(&mut self) {
         self.flush_save_files();
         self.cpu.stop();
-        log::info!("Emulator stopped");
+        log::info!("Runtime stopped");
     }
 
     /// Rebuild all mutable runtime state from the loaded app image.
@@ -590,7 +544,7 @@ impl Emulator {
             replacement.start();
         }
         *self = replacement;
-        log::info!("Emulator reset");
+        log::info!("Runtime reset");
         Ok(())
     }
 
@@ -2129,7 +2083,7 @@ fn wildcard_matches(pattern: &str, name: &str) -> bool {
     pattern_index == pattern.len()
 }
 
-impl Default for Emulator {
+impl Default for Runtime {
     fn default() -> Self {
         Self {
             cpu: Cpu::new(0x8000_0000),
@@ -2189,7 +2143,7 @@ mod tests {
         PackageImage::parse(&data, ContentFormat::App).unwrap()
     }
 
-    fn try_invoke_sdk_import(emu: &mut Emulator, address: u32, function_name: &str) -> Result<u64> {
+    fn try_invoke_sdk_import(emu: &mut Runtime, address: u32, function_name: &str) -> Result<u64> {
         emu.hooked_addrs.insert(address, function_name.to_string());
         let (word, mask) = hook_filter_location(address);
         emu.hook_filter[word] |= mask;
@@ -2199,7 +2153,7 @@ mod tests {
         emu.run_active_cpu_slice(CPU_CYCLES_PER_INSTRUCTION)
     }
 
-    fn invoke_sdk_import(emu: &mut Emulator, address: u32, function_name: &str) {
+    fn invoke_sdk_import(emu: &mut Runtime, address: u32, function_name: &str) {
         assert_eq!(
             try_invoke_sdk_import(emu, address, function_name).unwrap(),
             CPU_CYCLES_PER_INSTRUCTION
@@ -2208,14 +2162,14 @@ mod tests {
 
     #[test]
     fn test_emulator_creation() {
-        let emu = Emulator::default();
+        let emu = Runtime::default();
         assert_eq!(emu.frame_count(), 0);
         assert!(!emu.is_running());
     }
 
     #[test]
     fn unknown_hle_calls_are_aggregated_by_name() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         emu.cpu.regs.write(31, 0x8000_1008);
         for (register, value) in (4..=7).zip([1, 2, 3, 4]) {
             emu.cpu.regs.write(register, value);
@@ -2243,7 +2197,7 @@ mod tests {
 
     #[test]
     fn strict_unknown_hle_policy_stops_and_keeps_diagnostics() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         emu.set_unknown_hle_policy(UnknownHlePolicy::Stop);
         emu.cpu.regs.write(31, 0x8000_3008);
         emu.cpu.regs.write(4, 0x1234);
@@ -2263,7 +2217,7 @@ mod tests {
 
     #[test]
     fn strict_unknown_hle_allowlist_is_exact_and_survives_reset() {
-        let mut emu = Emulator::from_package(minimal_app()).unwrap();
+        let mut emu = Runtime::from_package(minimal_app()).unwrap();
         emu.set_unknown_hle_policy(UnknownHlePolicy::Stop);
         emu.set_unknown_hle_allowlist(["allowed_missing"]);
         emu.cpu.regs.write(31, 0x8000_4008);
@@ -2283,18 +2237,18 @@ mod tests {
 
     #[test]
     fn test_legacy_load_base_requests_lcd_initialization() {
-        let legacy = Emulator::from_package(minimal_app()).unwrap();
+        let legacy = Runtime::from_package(minimal_app()).unwrap();
         assert_eq!(legacy.cpu.regs.read(5), 1);
 
         let mut standard_app = minimal_app();
         standard_app.rawd.origin = STANDARD_APP_LOAD_BASE;
-        let standard = Emulator::from_package(standard_app).unwrap();
+        let standard = Runtime::from_package(standard_app).unwrap();
         assert_eq!(standard.cpu.regs.read(5), 0);
     }
 
     #[test]
     fn test_reset_rebuilds_loaded_runtime_state() {
-        let mut emu = Emulator::from_package(minimal_app()).unwrap();
+        let mut emu = Runtime::from_package(minimal_app()).unwrap();
         emu.start();
         emu.memory.write_u32(0x1000, 0x1234_5678).unwrap();
         emu.set_buttons(crate::input::BUTTON_A);
@@ -2313,7 +2267,7 @@ mod tests {
 
     #[test]
     fn test_guest_task_executes_with_shared_memory() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let entry = 0x1000;
         let addiu_t0 = (0x09 << 26) | (8 << 16) | 0x1234;
         let sw_t0 = (0x2B << 26) | (8 << 16) | 0x2000;
@@ -2332,7 +2286,7 @@ mod tests {
 
     #[test]
     fn test_tick_uses_interpreter_cycle_cost() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         emu.start();
 
         emu.tick().unwrap();
@@ -2348,8 +2302,8 @@ mod tests {
     #[test]
     #[ignore = "manual JIT throughput benchmark"]
     fn benchmark_jit_hot_integer_loop() {
-        fn make_emulator(jit_enabled: bool, block_count: u32) -> Emulator {
-            let mut emu = Emulator::default();
+        fn make_emulator(jit_enabled: bool, block_count: u32) -> Runtime {
+            let mut emu = Runtime::default();
             for block_index in 0..block_count {
                 let block_address = 0x8000_0000 + block_index * 64;
                 let next_address = 0x8000_0000 + ((block_index + 1) % block_count) * 64;
@@ -2383,7 +2337,7 @@ mod tests {
         }
 
         fn measure(
-            mut emu: Emulator,
+            mut emu: Runtime,
             warmup_frames: usize,
             diagnostics_enabled: bool,
         ) -> (std::time::Duration, std::time::Duration, JitDiagnostics) {
@@ -2428,7 +2382,7 @@ mod tests {
     #[cfg(feature = "jit")]
     #[test]
     fn compiled_block_bypasses_colliding_interpreter_cache_entry() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let start = 0x8000_1000;
         let collision = start + (INSTRUCTION_BLOCK_CACHE_SLOTS as u32 * 4);
         let instructions = [
@@ -2477,7 +2431,7 @@ mod tests {
     #[cfg(feature = "jit")]
     #[test]
     fn consecutive_compiled_blocks_run_in_one_dispatch() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let first = 0x8000_1000;
         let second = 0x8000_1100;
         for (start, next) in [(first, second), (second, first)] {
@@ -2513,7 +2467,7 @@ mod tests {
 
     #[test]
     fn test_tick_stops_after_framebuffer_submission() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let hook_address = 0x1000;
         emu.hooked_addrs
             .insert(hook_address, "lcd_set_frame".to_string());
@@ -2534,7 +2488,7 @@ mod tests {
 
     #[test]
     fn test_instruction_blocks_stop_before_sdk_hooks() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let hook_address = 0x1020;
         emu.hooked_addrs
             .insert(hook_address, "lcd_set_frame".to_string());
@@ -2549,7 +2503,7 @@ mod tests {
 
     #[test]
     fn test_instruction_cache_is_cleared_by_guest_invalidation() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let cache_index = instruction_block_cache_index(0x1000);
         emu.instruction_blocks[cache_index] = CachedInstructionBlock {
             start: 0x1000,
@@ -2564,7 +2518,7 @@ mod tests {
 
     #[test]
     fn test_hle_modules_execute_through_runtime_hooks() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let return_address = 0x9000;
         emu.cpu.regs.write(31, return_address);
 
@@ -2594,7 +2548,7 @@ mod tests {
 
     #[test]
     fn test_gui_exec_dispatches_key_transitions_to_focused_guest_window() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let return_address = 0x9000;
         let callback = 0x4000;
         let stack_pointer = 0x3000;
@@ -2635,7 +2589,7 @@ mod tests {
 
     #[test]
     fn test_semaphore_wakes_waiting_main_task() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let semaphore = emu.create_semaphore(0);
 
         assert!(emu.pend_semaphore(semaphore));
@@ -2677,7 +2631,7 @@ mod tests {
 
     #[test]
     fn test_guest_timers_advance_with_emulated_cycles() {
-        let mut emu = Emulator {
+        let mut emu = Runtime {
             cycle_count: CPU_CLOCK_HZ / OS_TICKS_PER_SECOND,
             ..Default::default()
         };
@@ -2691,7 +2645,7 @@ mod tests {
 
     #[test]
     fn test_sprintf_builds_guest_path() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let destination = 0x8001_0000;
         let format = 0x8001_0100;
         let directory = 0x8001_0200;
@@ -2712,7 +2666,7 @@ mod tests {
 
     #[test]
     fn test_sprintf_reads_stack_varargs() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let destination = 0x8001_0000;
         let format = 0x8001_0100;
         let stack = 0x8001_1000;
@@ -2734,7 +2688,7 @@ mod tests {
 
     #[test]
     fn test_app_main_receives_file_name() {
-        let mut emu = Emulator {
+        let mut emu = Runtime {
             app_path: "games/astro/Astro-Lander.app".to_string(),
             ..Default::default()
         };
@@ -2749,7 +2703,7 @@ mod tests {
 
     #[test]
     fn test_host_file_path_resolves_from_app_directory() {
-        let emu = Emulator {
+        let emu = Runtime {
             app_path: "games/astro/Astro-Lander.app".to_string(),
             ..Default::default()
         };
@@ -2765,7 +2719,7 @@ mod tests {
 
     #[test]
     fn test_to_locale_ansi_preserves_input_and_reuses_output_buffer() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let ptr = 0x100;
         for (index, word) in "Ali中.app\0".encode_utf16().enumerate() {
             emu.memory
@@ -2797,7 +2751,7 @@ mod tests {
 
     #[test]
     fn test_get_system_model_writes_a320_as_utf16() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let ptr = 0x100;
         emu.cpu.regs.write(4, ptr);
         emu.cpu.regs.write(31, 0x1234);
@@ -2811,7 +2765,7 @@ mod tests {
 
     #[test]
     fn test_u8_conversion_aliases_read_little_endian_values() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let ptr = 0x100;
         emu.memory
             .load_data(ptr, &[0x18, 0xC2, 0x01, 0x00])
@@ -2831,7 +2785,7 @@ mod tests {
 
     #[test]
     fn test_lcd_size_matches_a320_display() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
 
         invoke_sdk_import(&mut emu, 0, "LCD_GetXSize");
         assert_eq!(emu.cpu.regs.read(2), crate::video::SCREEN_WIDTH);
@@ -2843,7 +2797,7 @@ mod tests {
     #[cfg(not(feature = "standalone"))]
     #[test]
     fn test_waveout_hle_opens_and_queues_guest_pcm() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let args_ptr = 0x1000;
         emu.memory.write_u32(args_ptr, 16_000).unwrap();
         emu.memory.write_u16(args_ptr + 4, 16).unwrap();
@@ -2877,7 +2831,7 @@ mod tests {
     #[cfg(not(feature = "standalone"))]
     #[test]
     fn test_waveout_write_retries_after_queue_space_is_available() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let config = AudioConfig::new(16_000, 16, 1, 100).unwrap();
         assert!(emu.audio.open(config));
         assert!(emu.audio.write(&vec![0; 32_000]));
@@ -2919,7 +2873,7 @@ mod tests {
 
     #[test]
     fn test_writable_file_persists_and_reopens() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let save_directory = std::env::temp_dir().join(format!(
             "dingooemu-save-test-{}-{}",
             std::process::id(),
@@ -2968,7 +2922,7 @@ mod tests {
 
     #[test]
     fn test_read_only_file_can_be_read_but_not_written() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         let handle = 7;
         emu.open_files.insert(
             handle,
@@ -2997,7 +2951,7 @@ mod tests {
 
     #[test]
     fn test_guest_save_path_cannot_escape_save_directory() {
-        let mut emu = Emulator::default();
+        let mut emu = Runtime::default();
         emu.set_save_directory(std::env::temp_dir().join("dingooemu-save-root"));
 
         assert!(emu.save_file_path("save/profile.dat").is_some());
@@ -3015,7 +2969,7 @@ mod tests {
         std::fs::write(directory.join("Dn-Beyond.xm"), b"xm").unwrap();
         std::fs::write(directory.join("Fountain.mod"), b"mod").unwrap();
 
-        let mut emu = Emulator {
+        let mut emu = Runtime {
             app_path: directory.join("GooPlayer.app").display().to_string(),
             ..Default::default()
         };
@@ -3069,7 +3023,7 @@ mod tests {
         std::fs::write(directory.join("Track.XM"), b"xm").unwrap();
         std::fs::write(directory.join("Track.mod"), b"mod").unwrap();
 
-        let mut emu = Emulator {
+        let mut emu = Runtime {
             app_path: directory.join("GooPlayer.app").display().to_string(),
             ..Default::default()
         };
@@ -3089,7 +3043,7 @@ mod tests {
 
     #[test]
     fn test_save_state_round_trip_and_transactional_rejection() {
-        let mut emu = Emulator::from_package(minimal_app()).unwrap();
+        let mut emu = Runtime::from_package(minimal_app()).unwrap();
         let save_directory = std::env::temp_dir().join("dingooemu-state-save-root");
         emu.set_save_directory(&save_directory);
         emu.start();
@@ -3166,7 +3120,7 @@ mod tests {
         state[32] ^= 1;
         let mut other_app = minimal_app();
         other_app.data.push(1);
-        let mut other = Emulator::from_package(other_app).unwrap();
+        let mut other = Runtime::from_package(other_app).unwrap();
         other.cpu.regs.pc = 0x8765_4321;
         assert!(other.unserialize_state(&state).is_err());
         assert_eq!(other.cpu.regs.pc, 0x8765_4321);

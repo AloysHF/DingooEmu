@@ -1,4 +1,4 @@
-use super::{Emulator, HandlerResult};
+use super::{HandlerResult, Runtime};
 use crate::error::Result;
 
 const WM_KEY: u32 = 14;
@@ -11,7 +11,7 @@ const GUI_KEY_RIGHT: u32 = 18;
 const GUI_KEY_DOWN: u32 = 19;
 const GUI_KEY_ESCAPE: u32 = 27;
 
-pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResult> {
+pub(super) fn handle(emu: &mut Runtime, func_name: &str) -> Result<HandlerResult> {
     match func_name {
         "open_gui_key_msg" => {
             emu.gui.key_messages_enabled = true;
@@ -26,7 +26,7 @@ pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResul
     Ok(HandlerResult::Complete)
 }
 
-fn create_window(emu: &mut Emulator) -> Result<()> {
+fn create_window(emu: &mut Runtime) -> Result<()> {
     let stack_pointer = emu.cpu.regs.read(29);
     let callback = emu.memory.read_u32(stack_pointer.wrapping_add(20))?;
     if callback == 0 {
@@ -42,7 +42,7 @@ fn create_window(emu: &mut Emulator) -> Result<()> {
     Ok(())
 }
 
-fn set_focus(emu: &mut Emulator) {
+fn set_focus(emu: &mut Runtime) {
     let handle = emu.cpu.regs.read(4);
     if emu.gui.windows.contains_key(&handle) {
         emu.gui.focused_window = Some(handle);
@@ -51,7 +51,7 @@ fn set_focus(emu: &mut Emulator) {
     log::trace!("  WM_SetFocus({handle:#010x})");
 }
 
-fn execute_gui(emu: &mut Emulator) -> Result<HandlerResult> {
+fn execute_gui(emu: &mut Runtime) -> Result<HandlerResult> {
     emu.cpu.regs.write(2, 0);
     if !emu.gui.key_messages_enabled {
         return Ok(HandlerResult::Complete);

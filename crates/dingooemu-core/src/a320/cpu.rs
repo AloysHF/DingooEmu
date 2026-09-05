@@ -1,12 +1,6 @@
+use super::memory::Memory;
+use crate::common::execution::UnknownInstructionPolicy;
 use crate::error::{Result, SimulatorError};
-use crate::memory::Memory;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum UnknownInstructionPolicy {
-    Stop,
-    #[default]
-    Skip,
-}
 
 /// MIPS32 register file
 #[repr(C)]

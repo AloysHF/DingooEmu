@@ -1,8 +1,9 @@
-use super::super::{AudioConfig, Emulator, TaskWait, MAX_AUDIO_WRITE_BYTES};
+use super::super::AudioConfig;
+use super::super::{Runtime, TaskWait, MAX_AUDIO_WRITE_BYTES};
 use super::HandlerResult;
 use crate::error::Result;
 
-pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResult> {
+pub(super) fn handle(emu: &mut Runtime, func_name: &str) -> Result<HandlerResult> {
     match func_name {
         "_waveout_open" | "waveout_open" => {
             let args_ptr = emu.cpu.regs.read(4);

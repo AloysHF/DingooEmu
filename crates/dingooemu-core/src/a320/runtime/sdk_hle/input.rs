@@ -1,7 +1,7 @@
-use super::{Emulator, HandlerResult};
+use super::{HandlerResult, Runtime};
 use crate::error::Result;
 
-pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResult> {
+pub(super) fn handle(emu: &mut Runtime, func_name: &str) -> Result<HandlerResult> {
     match func_name {
         "_kbd_get_status" | "kbd_get_status" => {
             let status_ptr = emu.cpu.regs.read(4);

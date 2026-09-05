@@ -61,8 +61,8 @@ fn test_app_parsing() {
 /// Test CPU instruction execution
 #[test]
 fn test_cpu_instructions() {
-    use dingooemu_core::cpu::Cpu;
-    use dingooemu_core::memory::Memory;
+    use dingooemu_core::a320::cpu::Cpu;
+    use dingooemu_core::a320::memory::Memory;
 
     let mut cpu = Cpu::new(0);
     let mut mem = Memory::new();
@@ -80,8 +80,8 @@ fn test_cpu_instructions() {
 /// Test branch instructions
 #[test]
 fn test_branch_instructions() {
-    use dingooemu_core::cpu::Cpu;
-    use dingooemu_core::memory::Memory;
+    use dingooemu_core::a320::cpu::Cpu;
+    use dingooemu_core::a320::memory::Memory;
 
     let mut cpu = Cpu::new(0);
     let mut mem = Memory::new();
@@ -128,7 +128,7 @@ fn test_branch_instructions() {
 /// Test memory operations
 #[test]
 fn test_memory_operations() {
-    use dingooemu_core::memory::Memory;
+    use dingooemu_core::a320::memory::Memory;
 
     let mut mem = Memory::new();
 
