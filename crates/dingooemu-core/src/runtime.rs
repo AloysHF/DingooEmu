@@ -2,7 +2,7 @@ use crate::a330_runtime::A330Runtime;
 use crate::app_loader::{AppImage, PackageImage};
 use crate::audio::AudioConfig;
 use crate::cheats::{CheatParseError, CheatRule};
-use crate::content::{ArmProfile, ContentFormat, GuestArchitecture};
+use crate::content::{ArmProfile, ContentFormat, GuestArchitecture, TargetDevice};
 use crate::cpu::UnknownInstructionPolicy;
 use crate::emulator::{Emulator as AppRuntime, JitDiagnostics, UnknownHleCall, UnknownHlePolicy};
 use crate::error::Result;
@@ -41,11 +41,11 @@ impl Emulator {
     }
 
     fn from_package_with_path(package: PackageImage, path: String) -> Result<Self> {
-        let runtime = match package.architecture() {
-            GuestArchitecture::Mips32 => {
+        let runtime = match package.target() {
+            TargetDevice::DingooA320 => {
                 Runtime::App(Box::new(AppRuntime::from_app_with_path(package, path)?))
             }
-            GuestArchitecture::Arm32 => Runtime::Arm(Box::new(A330Runtime::from_package(
+            TargetDevice::GemeiA330(_) => Runtime::Arm(Box::new(A330Runtime::from_package(
                 package,
                 PathBuf::from(path),
             )?)),
@@ -441,6 +441,7 @@ mod tests {
     fn arm_package_selects_the_a330_runtime() {
         let mut package = minimal_app();
         package.format = ContentFormat::Cc;
+        package.target = TargetDevice::GemeiA330(ArmProfile::Retail);
         package.rawd.entry = ArmProfile::RETAIL_ORIGIN;
         package.rawd.origin = ArmProfile::RETAIL_ORIGIN;
 

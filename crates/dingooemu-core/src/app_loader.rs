@@ -1,4 +1,4 @@
-use crate::content::{ArmProfile, ContentFormat, GuestArchitecture};
+use crate::content::{ArmProfile, ContentFormat, GuestArchitecture, TargetDevice};
 use crate::error::{Result, SimulatorError};
 use std::path::Path;
 
@@ -96,7 +96,9 @@ pub enum ResourceKind {
 #[derive(Debug, Clone)]
 pub struct PackageImage {
     /// Content category selected from the file extension or caller context.
-    pub format: ContentFormat,
+    pub(crate) format: ContentFormat,
+    /// Device target detected from the package load address.
+    pub(crate) target: TargetDevice,
     /// Raw file data
     pub data: Vec<u8>,
     /// Import table descriptor
@@ -197,7 +199,7 @@ impl PackageImage {
             );
             rawd.program_size = rawd.base.size;
         }
-        validate_guest_metadata(format, &rawd)?;
+        let target = validate_guest_metadata(format, &rawd)?;
 
         // Check for ERPT chunk
         let (has_erpt, erpt) = if data.len() >= ERPT_OFFSET as usize + 16 {
@@ -230,7 +232,7 @@ impl PackageImage {
         log::info!(
             "Parsed .{} package: architecture={:?}, entry={:#010x}, base={:#010x}, size={}, imports={}, exports={}, resources={}",
             format,
-            format.architecture(),
+            target.architecture(),
             rawd.entry,
             rawd.origin,
             rawd.program_size,
@@ -241,6 +243,7 @@ impl PackageImage {
 
         Ok(Self {
             format,
+            target,
             data: data.to_vec(),
             impt,
             expt,
@@ -258,13 +261,15 @@ impl PackageImage {
     }
 
     pub const fn architecture(&self) -> GuestArchitecture {
-        self.format.architecture()
+        self.target.architecture()
     }
 
-    pub fn arm_profile(&self) -> Option<ArmProfile> {
-        (self.architecture() == GuestArchitecture::Arm32)
-            .then(|| ArmProfile::detect(self.load_base()))
-            .flatten()
+    pub const fn target(&self) -> TargetDevice {
+        self.target
+    }
+
+    pub const fn arm_profile(&self) -> Option<ArmProfile> {
+        self.target.arm_profile()
     }
 
     /// Get the executable data (RAWD payload)
@@ -381,7 +386,7 @@ fn read_u32_checked(data: &[u8], offset: usize) -> Option<u32> {
     ))
 }
 
-fn validate_guest_metadata(format: ContentFormat, rawd: &RawdHeader) -> Result<()> {
+fn validate_guest_metadata(format: ContentFormat, rawd: &RawdHeader) -> Result<TargetDevice> {
     let program_end = rawd
         .origin
         .checked_add(rawd.program_size)
@@ -393,21 +398,18 @@ fn validate_guest_metadata(format: ContentFormat, rawd: &RawdHeader) -> Result<(
         )));
     }
 
-    match format.architecture() {
-        GuestArchitecture::Mips32 if rawd.origin & 0x8000_0000 == 0 => {
-            Err(SimulatorError::InvalidAppFormat(format!(
-                ".{format} package has non-MIPS origin {:#010x}",
-                rawd.origin
-            )))
-        }
-        GuestArchitecture::Arm32 if ArmProfile::detect(rawd.origin).is_none() => {
-            Err(SimulatorError::InvalidAppFormat(format!(
-                ".{format} package has unsupported ARM origin {:#010x}",
-                rawd.origin
-            )))
-        }
-        _ => Ok(()),
+    let target = TargetDevice::detect(rawd.origin).ok_or_else(|| {
+        SimulatorError::InvalidAppFormat(format!(
+            ".{format} package has unsupported load origin {:#010x}",
+            rawd.origin
+        ))
+    })?;
+    if !format.supports_target(target) {
+        return Err(SimulatorError::InvalidAppFormat(format!(
+            ".{format} package target {target:?} does not match its content format"
+        )));
     }
+    Ok(target)
 }
 
 /// Read a 16-byte chunk header
@@ -1050,18 +1052,24 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_records_content_architecture_and_arm_profile() {
+    fn test_parse_records_detected_target_architecture_and_arm_profile() {
         let app = minimal_package(0x80A0_0000, ContentFormat::App);
         assert_eq!(app.format(), ContentFormat::App);
+        assert_eq!(app.target(), TargetDevice::DingooA320);
         assert_eq!(app.architecture(), GuestArchitecture::Mips32);
         assert_eq!(app.arm_profile(), None);
 
         for format in [ContentFormat::Cc, ContentFormat::C2s, ContentFormat::C3s] {
             let retail = minimal_package(ArmProfile::RETAIL_ORIGIN, format);
+            assert_eq!(retail.target(), TargetDevice::GemeiA330(ArmProfile::Retail));
             assert_eq!(retail.architecture(), GuestArchitecture::Arm32);
             assert_eq!(retail.arm_profile(), Some(ArmProfile::Retail));
 
             let homebrew = minimal_package(ArmProfile::HOMEBREW_ORIGIN, format);
+            assert_eq!(
+                homebrew.target(),
+                TargetDevice::GemeiA330(ArmProfile::Homebrew)
+            );
             assert_eq!(homebrew.arm_profile(), Some(ArmProfile::Homebrew));
         }
     }
@@ -1073,6 +1081,13 @@ mod tests {
 
         let mips_data = minimal_package_data(0x80A0_0000);
         assert!(PackageImage::parse_with_format(&mips_data, ContentFormat::Cc).is_err());
+    }
+
+    #[test]
+    fn test_parse_rejects_unknown_target_origin() {
+        let data = minimal_package_data(0x11c0_0000);
+
+        assert!(PackageImage::parse_with_format(&data, ContentFormat::Cc).is_err());
     }
 
     #[test]

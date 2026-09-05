@@ -2024,6 +2024,7 @@ impl ArmBus for RuntimeBus<'_> {
 mod tests {
     use super::*;
     use crate::app_loader::{ChunkHeader, RawdHeader, ResourceEntry, ResourceKind, SymbolEntry};
+    use crate::content::TargetDevice;
 
     fn svc_package(name: &str) -> PackageImage {
         let origin = ArmProfile::RETAIL_ORIGIN;
@@ -2032,6 +2033,7 @@ mod tests {
         data[0x84..0x88].copy_from_slice(&0xe12f_ff1eu32.to_le_bytes());
         PackageImage {
             format: ContentFormat::Cc,
+            target: TargetDevice::GemeiA330(ArmProfile::Retail),
             data,
             impt: ChunkHeader::default(),
             expt: ChunkHeader::default(),
@@ -2092,6 +2094,7 @@ mod tests {
             package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
         }
         package.rawd.base.size = words.len() as u32 * 4;
+        package.target = TargetDevice::GemeiA330(ArmProfile::Homebrew);
         package.rawd.entry = origin;
         package.rawd.origin = origin;
         package.rawd.program_size = words.len() as u32 * 4;
@@ -2610,6 +2613,7 @@ mod tests {
 
         let mut package = svc_package("fsys_findfirst");
         package.format = ContentFormat::C2s;
+        package.target = TargetDevice::GemeiA330(ArmProfile::Homebrew);
         package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
         package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
         package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
@@ -2663,6 +2667,7 @@ mod tests {
         std::fs::write(directory.join("asset.bin"), [1, 2, 3, 4]).unwrap();
         let mut package = svc_package("fsys_fopen");
         package.format = ContentFormat::C2s;
+        package.target = TargetDevice::GemeiA330(ArmProfile::Homebrew);
         package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
         package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
         package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
@@ -2860,6 +2865,7 @@ mod tests {
     #[test]
     fn homebrew_legacy_framebuffer_defaults_to_rgb565() {
         let mut package = svc_package("FlushDCache");
+        package.target = TargetDevice::GemeiA330(ArmProfile::Homebrew);
         package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
         package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
         package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
@@ -2894,6 +2900,7 @@ mod tests {
     #[test]
     fn homebrew_frames_default_to_xrgb8888() {
         let mut package = svc_package("FlushDCache");
+        package.target = TargetDevice::GemeiA330(ArmProfile::Homebrew);
         package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
         package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
         package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;

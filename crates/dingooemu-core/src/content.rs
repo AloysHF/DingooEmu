@@ -31,14 +31,6 @@ impl ContentFormat {
         }
     }
 
-    /// Return the guest instruction set associated with this content category.
-    pub const fn architecture(self) -> GuestArchitecture {
-        match self {
-            Self::App => GuestArchitecture::Mips32,
-            Self::Cc | Self::C2s | Self::C3s => GuestArchitecture::Arm32,
-        }
-    }
-
     pub const fn extension(self) -> &'static str {
         match self {
             Self::App => "app",
@@ -60,6 +52,51 @@ impl fmt::Display for ContentFormat {
 pub enum GuestArchitecture {
     Mips32,
     Arm32,
+}
+
+/// Device and ABI target detected from validated package metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TargetDevice {
+    DingooA320,
+    GemeiA330(ArmProfile),
+}
+
+impl TargetDevice {
+    /// Detect a supported device from the package load address.
+    pub const fn detect(origin: u32) -> Option<Self> {
+        if let Some(profile) = ArmProfile::detect(origin) {
+            Some(Self::GemeiA330(profile))
+        } else if origin & 0x8000_0000 != 0 {
+            Some(Self::DingooA320)
+        } else {
+            None
+        }
+    }
+
+    pub const fn architecture(self) -> GuestArchitecture {
+        match self {
+            Self::DingooA320 => GuestArchitecture::Mips32,
+            Self::GemeiA330(_) => GuestArchitecture::Arm32,
+        }
+    }
+
+    pub const fn arm_profile(self) -> Option<ArmProfile> {
+        match self {
+            Self::DingooA320 => None,
+            Self::GemeiA330(profile) => Some(profile),
+        }
+    }
+}
+
+impl ContentFormat {
+    /// Check whether the declared file category can contain the detected device target.
+    pub const fn supports_target(self, target: TargetDevice) -> bool {
+        matches!(
+            (self, target),
+            (Self::App, TargetDevice::DingooA320)
+                | (Self::Cc | Self::C2s | Self::C3s, TargetDevice::GemeiA330(_))
+        )
+    }
 }
 
 /// Known Gemei A330 address-space and ABI layouts.
@@ -104,10 +141,12 @@ mod tests {
     }
 
     #[test]
-    fn maps_content_categories_to_guest_architectures() {
-        assert_eq!(ContentFormat::App.architecture(), GuestArchitecture::Mips32);
+    fn validates_content_categories_against_detected_targets() {
+        assert!(ContentFormat::App.supports_target(TargetDevice::DingooA320));
+        assert!(!ContentFormat::App.supports_target(TargetDevice::GemeiA330(ArmProfile::Retail)));
         for format in [ContentFormat::Cc, ContentFormat::C2s, ContentFormat::C3s] {
-            assert_eq!(format.architecture(), GuestArchitecture::Arm32);
+            assert!(format.supports_target(TargetDevice::GemeiA330(ArmProfile::Retail)));
+            assert!(!format.supports_target(TargetDevice::DingooA320));
         }
     }
 
@@ -122,5 +161,22 @@ mod tests {
             Some(ArmProfile::Homebrew)
         );
         assert_eq!(ArmProfile::detect(0x11c0_0000), None);
+    }
+
+    #[test]
+    fn detects_target_device_from_load_address() {
+        assert_eq!(
+            TargetDevice::detect(0x80a0_0000),
+            Some(TargetDevice::DingooA320)
+        );
+        assert_eq!(
+            TargetDevice::detect(ArmProfile::RETAIL_ORIGIN),
+            Some(TargetDevice::GemeiA330(ArmProfile::Retail))
+        );
+        assert_eq!(
+            TargetDevice::detect(ArmProfile::HOMEBREW_ORIGIN),
+            Some(TargetDevice::GemeiA330(ArmProfile::Homebrew))
+        );
+        assert_eq!(TargetDevice::detect(0x11c0_0000), None);
     }
 }

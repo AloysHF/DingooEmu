@@ -300,7 +300,7 @@ fn memory_error(address: u32, size: usize) -> SimulatorError {
 mod tests {
     use super::*;
     use crate::app_loader::{ChunkHeader, RawdHeader, SymbolEntry};
-    use crate::content::ContentFormat;
+    use crate::content::{ContentFormat, TargetDevice};
 
     fn package(profile: ArmProfile) -> PackageImage {
         let origin = match profile {
@@ -313,6 +313,7 @@ mod tests {
         }
         PackageImage {
             format: ContentFormat::Cc,
+            target: TargetDevice::GemeiA330(profile),
             data,
             impt: ChunkHeader::default(),
             expt: ChunkHeader::default(),
