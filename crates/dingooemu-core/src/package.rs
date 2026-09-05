@@ -306,8 +306,17 @@ impl PackageImage {
     /// Get resource data (decoded)
     pub fn get_resource_data(&self, resource: &ResourceEntry) -> Vec<u8> {
         let start = resource.offset as usize;
-        let end = start + resource.size as usize;
-        let mut data = self.data[start..end].to_vec();
+        let Some(data) = start
+            .checked_add(resource.size as usize)
+            .and_then(|end| self.data.get(start..end))
+        else {
+            log::warn!(
+                "Ignoring out-of-bounds package resource {:?}",
+                resource.name
+            );
+            return Vec::new();
+        };
+        let mut data = data.to_vec();
 
         // Apply XOR decoding if needed
         if resource.xor_key != 0 {
@@ -661,7 +670,15 @@ fn parse_erpt_resources(data: &[u8], erpt: &ChunkHeader) -> Result<Vec<ResourceE
         ]);
 
         // Absolute offset = ERPT chunk offset + relative offset
-        let abs_offset = erpt.offset + rel_offset;
+        let Some(abs_offset) = erpt.offset.checked_add(rel_offset) else {
+            continue;
+        };
+        let Some(abs_end) = abs_offset.checked_add(res_size) else {
+            continue;
+        };
+        if abs_end as usize > data.len() {
+            continue;
+        }
 
         resources.push(ResourceEntry {
             kind: ResourceKind::Erpt,
@@ -861,8 +878,12 @@ fn parse_packed64_resources(data: &[u8], start: usize) -> Vec<ResourceEntry> {
 
     // Calculate data bias (first stored offset - table end)
     if let Some(first_offset) = first_stored_offset {
-        let table_end = offset as u32;
-        let data_bias = first_offset - table_end;
+        let Ok(table_end) = u32::try_from(offset) else {
+            return resources;
+        };
+        let Some(data_bias) = first_offset.checked_sub(table_end) else {
+            return resources;
+        };
 
         // Re-parse with correct offsets
         offset = start;
@@ -898,14 +919,21 @@ fn parse_packed64_resources(data: &[u8], start: usize) -> Vec<ResourceEntry> {
         // Convert to ResourceEntry
         for i in 0..stored_offsets.len() {
             let (stored, name) = &stored_offsets[i];
-            let abs_offset = stored - data_bias;
-
-            let size = if i + 1 < stored_offsets.len() {
-                stored_offsets[i + 1].0 - data_bias - abs_offset
-            } else {
-                // Approximate size
-                (data.len() as u32) - abs_offset
+            let Some(abs_offset) = stored.checked_sub(data_bias) else {
+                continue;
             };
+            let next_offset = if i + 1 < stored_offsets.len() {
+                stored_offsets[i + 1].0.checked_sub(data_bias)
+            } else {
+                u32::try_from(data.len()).ok()
+            };
+            let Some(size) = next_offset.and_then(|next| next.checked_sub(abs_offset)) else {
+                continue;
+            };
+            if abs_offset as usize >= data.len() || abs_offset as usize + size as usize > data.len()
+            {
+                continue;
+            }
 
             resources.push(ResourceEntry {
                 kind: ResourceKind::Packed64,
@@ -1165,5 +1193,33 @@ mod tests {
 
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0].name, "asset.bin");
+    }
+
+    #[test]
+    fn test_erpt_resources_outside_the_file_are_ignored() {
+        const RECORD_SIZE: usize = 0x1FC;
+        const NAME_SIZE: usize = 0x1F4;
+        let mut data = vec![0u8; 4 + RECORD_SIZE];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes());
+        data[4..14].copy_from_slice(b"asset.bin\0");
+        data[4 + NAME_SIZE..8 + NAME_SIZE].copy_from_slice(&16u32.to_le_bytes());
+        data[8 + NAME_SIZE..12 + NAME_SIZE].copy_from_slice(&u32::MAX.to_le_bytes());
+        let erpt = ChunkHeader {
+            offset: 0,
+            size: data.len() as u32,
+            ..ChunkHeader::default()
+        };
+
+        assert!(parse_erpt_resources(&data, &erpt).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_packed64_offsets_before_the_table_are_ignored() {
+        const RECORD_SIZE: usize = 0x44;
+        let mut data = vec![0u8; RECORD_SIZE];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes());
+        data[4..12].copy_from_slice(b".\\a.bin\0");
+
+        assert!(parse_packed64_resources(&data, 0).is_empty());
     }
 }
