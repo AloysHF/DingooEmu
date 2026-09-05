@@ -26,6 +26,7 @@ const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
 const FRAMEBUFFER_BITS_EXPLICIT: u32 = 1 << 31;
 const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
 const FILE_SEARCH_NAME_CAPACITY: usize = 256;
+const CONSOLE_OUTPUT_LIMIT: usize = 4096;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct GuestFile {
@@ -290,6 +291,7 @@ pub(crate) struct A330Runtime {
     active_framebuffer: u32,
     framebuffer_bits: u32,
     firmware_archive: Option<FirmwareArchive>,
+    console_output: Vec<u8>,
 }
 
 impl A330Runtime {
@@ -353,6 +355,7 @@ impl A330Runtime {
             active_framebuffer: FRAMEBUFFER_BASE,
             framebuffer_bits,
             firmware_archive,
+            console_output: Vec::new(),
         })
     }
 
@@ -364,6 +367,21 @@ impl A330Runtime {
         self.running = false;
         self.cpu.stop();
         self.flush_save_files();
+    }
+
+    fn present_early_exit(&mut self) {
+        if !framebuffer_is_solid(self.video.framebuffer()) {
+            return;
+        }
+        let output = String::from_utf8_lossy(&self.console_output);
+        let detail = output
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("NO VISIBLE VIDEO FRAME WAS PRESENTED");
+        log::warn!("A330 guest exited without leaving a visible frame: {detail}");
+        render_early_exit_frame(&mut self.video, detail);
     }
     pub(crate) fn reset(&mut self) -> Result<()> {
         self.flush_save_files();
@@ -543,6 +561,7 @@ impl A330Runtime {
         self.semaphores = state.semaphores;
         self.active_framebuffer = state.active_framebuffer;
         self.framebuffer_bits = state.framebuffer_bits;
+        self.console_output.clear();
         Ok(())
     }
 
@@ -594,6 +613,7 @@ impl A330Runtime {
                     }
                 }
                 if !self.activate_next_task() {
+                    self.present_early_exit();
                     self.stop();
                     break;
                 }
@@ -627,6 +647,7 @@ impl A330Runtime {
                     audio: &mut self.audio,
                     input: &mut self.input,
                     firmware_archive: self.firmware_archive.as_ref(),
+                    console_output: &mut self.console_output,
                 };
                 let pc = self.cpu.r[15];
                 if let Err(error) = self.cpu.step(&mut bus) {
@@ -652,6 +673,7 @@ impl A330Runtime {
                 (bus.stop_requested, bus.yield_requested, bus.finish_current)
             };
             if stop_requested {
+                self.present_early_exit();
                 self.stop();
                 break;
             }
@@ -741,6 +763,7 @@ struct RuntimeBus<'a> {
     audio: &'a mut Audio,
     input: &'a mut Input,
     firmware_archive: Option<&'a FirmwareArchive>,
+    console_output: &'a mut Vec<u8>,
 }
 
 impl RuntimeBus<'_> {
@@ -1082,11 +1105,13 @@ impl RuntimeBus<'_> {
             0x03 => {
                 let value = self.memory.read8(cpu.r[1])?;
                 log::trace!("ARM semihosting SYS_WRITEC: {:?}", char::from(value));
+                self.append_console_output(&[value]);
                 cpu.r[0] = 0;
             }
             0x04 => {
                 let value = self.read_c_string(cpu.r[1], 4096)?;
                 log::trace!("ARM semihosting SYS_WRITE0: {value:?}");
+                self.append_console_output(value.as_bytes());
                 cpu.r[0] = 0;
             }
             0x18 | 0x20 => {
@@ -1106,6 +1131,24 @@ impl RuntimeBus<'_> {
             }
         }
         Ok(())
+    }
+
+    fn append_console_output(&mut self, output: &[u8]) {
+        if output.len() >= CONSOLE_OUTPUT_LIMIT {
+            self.console_output.clear();
+            self.console_output
+                .extend_from_slice(&output[output.len() - CONSOLE_OUTPUT_LIMIT..]);
+            return;
+        }
+        let overflow = self
+            .console_output
+            .len()
+            .saturating_add(output.len())
+            .saturating_sub(CONSOLE_OUTPUT_LIMIT);
+        if overflow != 0 {
+            self.console_output.drain(..overflow);
+        }
+        self.console_output.extend_from_slice(output);
     }
 
     fn allocate(&mut self, size: u32) -> u32 {
@@ -1567,6 +1610,192 @@ impl RuntimeBus<'_> {
         }
         cpu.r[0] = 0;
         Ok(())
+    }
+}
+
+fn framebuffer_is_solid(framebuffer: &[u8]) -> bool {
+    let pixels = framebuffer.as_chunks::<2>().0;
+    pixels
+        .first()
+        .is_none_or(|first| pixels.iter().all(|pixel| pixel == first))
+}
+
+fn render_early_exit_frame(video: &mut Video, detail: &str) {
+    const BACKGROUND: u16 = 0x0841;
+    const HEADER: u16 = 0xa800;
+    const PANEL: u16 = 0x18c3;
+    const TEXT: u16 = 0xffff;
+    const ACCENT: u16 = 0xffe0;
+
+    let framebuffer = video.framebuffer_mut();
+    fill_rgb565(framebuffer, BACKGROUND);
+    fill_rect(framebuffer, 0, 0, SCREEN_WIDTH as usize, 62, HEADER);
+    fill_rect(framebuffer, 14, 74, SCREEN_WIDTH as usize - 28, 148, PANEL);
+    draw_rect(framebuffer, 14, 74, SCREEN_WIDTH as usize - 28, 148, ACCENT);
+    draw_text(framebuffer, 38, 21, "GUEST PROGRAM EXITED", TEXT, 2, 0);
+    draw_text(
+        framebuffer,
+        29,
+        88,
+        "THE GUEST STOPPED WITHOUT LEAVING A VISIBLE VIDEO FRAME.",
+        TEXT,
+        1,
+        43,
+    );
+    draw_text(framebuffer, 29, 124, "LAST MESSAGE:", ACCENT, 1, 0);
+    draw_text(framebuffer, 29, 140, detail, TEXT, 1, 43);
+    video.mark_dirty();
+    video.advance_frame();
+}
+
+fn fill_rgb565(framebuffer: &mut [u8], color: u16) {
+    let color = color.to_le_bytes();
+    for pixel in framebuffer.as_chunks_mut::<2>().0 {
+        *pixel = color;
+    }
+}
+
+fn fill_rect(framebuffer: &mut [u8], x: usize, y: usize, width: usize, height: usize, color: u16) {
+    for row in y..(y + height).min(SCREEN_HEIGHT as usize) {
+        for column in x..(x + width).min(SCREEN_WIDTH as usize) {
+            set_rgb565(framebuffer, column, row, color);
+        }
+    }
+}
+
+fn draw_rect(framebuffer: &mut [u8], x: usize, y: usize, width: usize, height: usize, color: u16) {
+    fill_rect(framebuffer, x, y, width, 2, color);
+    fill_rect(
+        framebuffer,
+        x,
+        y + height.saturating_sub(2),
+        width,
+        2,
+        color,
+    );
+    fill_rect(framebuffer, x, y, 2, height, color);
+    fill_rect(
+        framebuffer,
+        x + width.saturating_sub(2),
+        y,
+        2,
+        height,
+        color,
+    );
+}
+
+fn set_rgb565(framebuffer: &mut [u8], x: usize, y: usize, color: u16) {
+    if x >= SCREEN_WIDTH as usize || y >= SCREEN_HEIGHT as usize {
+        return;
+    }
+    let offset = (y * SCREEN_WIDTH as usize + x) * 2;
+    framebuffer[offset..offset + 2].copy_from_slice(&color.to_le_bytes());
+}
+
+fn draw_text(
+    framebuffer: &mut [u8],
+    start_x: usize,
+    start_y: usize,
+    text: &str,
+    color: u16,
+    scale: usize,
+    wrap_columns: usize,
+) {
+    let mut column = 0;
+    let mut row = 0;
+    for character in text.chars().take(256) {
+        if character == '\r' {
+            continue;
+        }
+        if character == '\n' || wrap_columns != 0 && column >= wrap_columns {
+            row += 1;
+            column = 0;
+            if character == '\n' {
+                continue;
+            }
+        }
+        draw_glyph(
+            framebuffer,
+            start_x + column * 6 * scale,
+            start_y + row * 9 * scale,
+            character,
+            color,
+            scale,
+        );
+        column += 1;
+    }
+}
+
+fn draw_glyph(
+    framebuffer: &mut [u8],
+    x: usize,
+    y: usize,
+    character: char,
+    color: u16,
+    scale: usize,
+) {
+    for (row, bits) in glyph_rows(character).into_iter().enumerate() {
+        for column in 0..5 {
+            if bits & (1 << (4 - column)) != 0 {
+                fill_rect(
+                    framebuffer,
+                    x + column * scale,
+                    y + row * scale,
+                    scale,
+                    scale,
+                    color,
+                );
+            }
+        }
+    }
+}
+
+fn glyph_rows(character: char) -> [u8; 7] {
+    match character.to_ascii_uppercase() {
+        'A' => [14, 17, 17, 31, 17, 17, 17],
+        'B' => [30, 17, 17, 30, 17, 17, 30],
+        'C' => [15, 16, 16, 16, 16, 16, 15],
+        'D' => [30, 17, 17, 17, 17, 17, 30],
+        'E' => [31, 16, 16, 30, 16, 16, 31],
+        'F' => [31, 16, 16, 30, 16, 16, 16],
+        'G' => [15, 16, 16, 19, 17, 17, 15],
+        'H' => [17, 17, 17, 31, 17, 17, 17],
+        'I' => [31, 4, 4, 4, 4, 4, 31],
+        'J' => [1, 1, 1, 1, 17, 17, 14],
+        'K' => [17, 18, 20, 24, 20, 18, 17],
+        'L' => [16, 16, 16, 16, 16, 16, 31],
+        'M' => [17, 27, 21, 21, 17, 17, 17],
+        'N' => [17, 25, 21, 19, 17, 17, 17],
+        'O' => [14, 17, 17, 17, 17, 17, 14],
+        'P' => [30, 17, 17, 30, 16, 16, 16],
+        'Q' => [14, 17, 17, 17, 21, 18, 13],
+        'R' => [30, 17, 17, 30, 20, 18, 17],
+        'S' => [15, 16, 16, 14, 1, 1, 30],
+        'T' => [31, 4, 4, 4, 4, 4, 4],
+        'U' => [17, 17, 17, 17, 17, 17, 14],
+        'V' => [17, 17, 17, 17, 17, 10, 4],
+        'W' => [17, 17, 17, 21, 21, 21, 10],
+        'X' => [17, 17, 10, 4, 10, 17, 17],
+        'Y' => [17, 17, 10, 4, 4, 4, 4],
+        'Z' => [31, 1, 2, 4, 8, 16, 31],
+        '0' => [14, 17, 19, 21, 25, 17, 14],
+        '1' => [4, 12, 4, 4, 4, 4, 14],
+        '2' => [14, 17, 1, 2, 4, 8, 31],
+        '3' => [30, 1, 1, 14, 1, 1, 30],
+        '4' => [2, 6, 10, 18, 31, 2, 2],
+        '5' => [31, 16, 16, 30, 1, 1, 30],
+        '6' => [14, 16, 16, 30, 17, 17, 14],
+        '7' => [31, 1, 2, 4, 8, 8, 8],
+        '8' => [14, 17, 17, 14, 17, 17, 14],
+        '9' => [14, 17, 17, 15, 1, 1, 14],
+        ':' => [0, 4, 4, 0, 4, 4, 0],
+        '.' => [0, 0, 0, 0, 0, 12, 12],
+        '-' => [0, 0, 0, 31, 0, 0, 0],
+        '/' => [1, 1, 2, 4, 8, 16, 16],
+        '\\' => [16, 16, 8, 4, 2, 1, 1],
+        '_' => [0, 0, 0, 0, 0, 0, 31],
+        ' ' => [0; 7],
+        _ => [14, 17, 1, 2, 4, 0, 4],
     }
 }
 
@@ -2116,6 +2345,8 @@ mod tests {
 
         assert_eq!(runtime.cpu.r[0], 0);
         assert_eq!(runtime.cpu.instruction_count, 2);
+        assert_eq!(runtime.console_output, b"X");
+        assert_eq!(runtime.video.frame_count(), 1);
         assert!(!runtime.is_running());
     }
 
@@ -2130,6 +2361,38 @@ mod tests {
         assert_eq!(runtime.cpu.r[0], 0);
         assert_eq!(runtime.cpu.instruction_count, 1);
         assert!(!runtime.is_running());
+        assert_eq!(runtime.video.frame_count(), 1);
+        assert!(runtime
+            .video
+            .framebuffer()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|pixel| *pixel != [0, 0]));
+    }
+
+    #[test]
+    fn early_exit_does_not_replace_a_presented_guest_frame() {
+        let mut runtime = A330Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
+        runtime.video.framebuffer_mut()[..2].copy_from_slice(&0xf800_u16.to_le_bytes());
+        runtime.video.advance_frame();
+        let crc = runtime.video.framebuffer_crc32();
+
+        runtime.present_early_exit();
+
+        assert_eq!(runtime.video.frame_count(), 1);
+        assert_eq!(runtime.video.framebuffer_crc32(), crc);
+    }
+
+    #[test]
+    fn early_exit_replaces_a_presented_solid_frame() {
+        let mut runtime = A330Runtime::from_package(semihosting_package(), PathBuf::new()).unwrap();
+        runtime.video.advance_frame();
+
+        runtime.present_early_exit();
+
+        assert_eq!(runtime.video.frame_count(), 2);
+        assert!(!framebuffer_is_solid(runtime.video.framebuffer()));
     }
 
     #[test]

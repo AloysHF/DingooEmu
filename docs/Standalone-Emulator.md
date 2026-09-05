@@ -166,6 +166,11 @@ rejected. Modified files are flushed when the guest closes them and when the
 emulator stops or resets. Guest reads support seeking from the beginning,
 current position, or end of a file, including data appended to A330 packages.
 
+If A330 software exits while its last frame is still a single solid color, the
+window keeps a guest-exit panel visible instead. The panel includes the last
+available semihosting message, such as a missing-data or runtime error, and
+never replaces a non-solid frame that the guest already rendered.
+
 ## Performance
 
 Use a release build for normal gameplay. APP content uses the cached MIPS

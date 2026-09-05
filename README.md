@@ -37,6 +37,7 @@ and guest architecture must agree before content is loaded.
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
 - **HLE (High-Level Emulation)** — Architecture-specific SDK bridges for graphics, input, audio, timing, random-access files and directory enumeration, resources, tasks, and synchronization
 - **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and emit per-game JSON reports for review
+- **Visible A330 exit diagnostics** — Replace an otherwise solid final frame with a readable guest-exit panel and the last semihosting message
 - **Multi-format loading** — Validated `.app`, `.cc`, `.c2s`, and `.c3s` CCDL packages with automatic runtime selection
 - **Frame rendering** — Native 320×240 RGB565 output with source-aware RGB565 and XRGB8888 guest framebuffer handling
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling

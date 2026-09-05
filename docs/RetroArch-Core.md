@@ -100,6 +100,11 @@ rejected. Modified files are flushed when the guest closes them and when the
 core resets or unloads content. Guest reads support seeking from the beginning,
 current position, or end of a file, including data appended to A330 packages.
 
+If A330 software exits while its last frame is still a single solid color, the
+core submits a guest-exit panel instead. The panel includes the last available
+semihosting message and never replaces a non-solid frame that the guest already
+rendered.
+
 ## Save States
 
 RetroArch save and load state commands capture the active runtime's complete
