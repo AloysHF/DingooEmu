@@ -596,100 +596,139 @@ impl Runtime {
         super::cheats::apply(&self.cheats, &mut self.memory, &mut self.cpu);
         let profile = self.memory.profile();
         let mut frame_address = None;
-        let initial = self.cpu.instruction_count;
-        let mut previous_pc = self.cpu.r[15];
-        while self.cpu.is_running() && self.cpu.instruction_count - initial < INSTRUCTIONS_PER_SLICE
-        {
-            if self.cpu.r[15] == EXIT_ADDRESS {
-                if !self.boot_complete {
-                    self.boot_complete = true;
-                    if let Some(entry) = self.app_main {
-                        let count = self.cpu.instruction_count;
-                        self.cpu = Cpu::new(entry, EXIT_ADDRESS - 16, EXIT_ADDRESS);
-                        self.cpu.instruction_count = count;
-                        self.cpu.r[0] = APP_PATH_ADDRESS;
-                        self.cpu.start();
-                        self.current_priority = 0;
-                        continue;
+        let mut presented_frame_address = None;
+        let mut slices_remaining = self.tasks.len() + 1;
+        'scheduler: loop {
+            let initial = self.cpu.instruction_count;
+            let mut previous_pc = self.cpu.r[15];
+            while self.cpu.is_running()
+                && self.cpu.instruction_count - initial < INSTRUCTIONS_PER_SLICE
+            {
+                if self.cpu.r[15] == EXIT_ADDRESS {
+                    if !self.boot_complete {
+                        self.boot_complete = true;
+                        if let Some(entry) = self.app_main {
+                            let count = self.cpu.instruction_count;
+                            self.cpu = Cpu::new(entry, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+                            self.cpu.instruction_count = count;
+                            self.cpu.r[0] = APP_PATH_ADDRESS;
+                            self.cpu.start();
+                            self.current_priority = 0;
+                            continue;
+                        }
                     }
+                    if !self.activate_next_task() {
+                        self.present_early_exit();
+                        self.stop();
+                        break 'scheduler;
+                    }
+                    slices_remaining -= 1;
+                    if slices_remaining == 0 {
+                        break 'scheduler;
+                    }
+                    continue 'scheduler;
                 }
-                if !self.activate_next_task() {
+                let queued_tasks_before = self.tasks.len();
+                let (stop_requested, yield_requested, finish_current, queued_tasks_after) = {
+                    let mut bus = RuntimeBus {
+                        memory: &mut self.memory,
+                        package: &self.package,
+                        imports: &self.package.imports,
+                        profile,
+                        unknown_hle_calls: &mut self.unknown_hle_calls,
+                        unknown_hle_policy: self.unknown_hle_policy,
+                        unknown_hle_allowlist: &self.unknown_hle_allowlist,
+                        heap: &mut self.heap,
+                        frame_address: &mut frame_address,
+                        stop_requested: false,
+                        dynamic_imports: &mut self.dynamic_imports,
+                        tasks: &mut self.tasks,
+                        current_priority: self.current_priority,
+                        yield_requested: false,
+                        finish_current: false,
+                        content_directory: &self.content_directory,
+                        save_directory: self.save_directory.as_deref(),
+                        files: &mut self.files,
+                        file_searches: &mut self.file_searches,
+                        next_file_handle: &mut self.next_file_handle,
+                        semaphores: &mut self.semaphores,
+                        active_framebuffer: &mut self.active_framebuffer,
+                        framebuffer_bits: &mut self.framebuffer_bits,
+                        audio: &mut self.audio,
+                        input: &mut self.input,
+                        firmware_archive: self.firmware_archive.as_ref(),
+                        console_output: &mut self.console_output,
+                    };
+                    let pc = self.cpu.r[15];
+                    if let Err(error) = self.cpu.step(&mut bus) {
+                        return match error {
+                            SimulatorError::MemoryError { .. }
+                            | SimulatorError::InvalidInstruction { .. } => {
+                                Err(SimulatorError::CpuError {
+                                    pc,
+                                    message: format!(
+                                        "{:?} state: {error}; previous_pc={previous_pc:#010x}, r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, sp={:#010x}, lr={:#010x}",
+                                        self.cpu.execution_state(),
+                                        self.cpu.r[0],
+                                        self.cpu.r[1],
+                                        self.cpu.r[2],
+                                        self.cpu.r[3],
+                                        self.cpu.r[13],
+                                        self.cpu.r[14]
+                                    ),
+                                })
+                            }
+                            other => Err(other),
+                        };
+                    }
+                    previous_pc = pc;
+                    (
+                        bus.stop_requested,
+                        bus.yield_requested,
+                        bus.finish_current,
+                        bus.tasks.len(),
+                    )
+                };
+                if queued_tasks_after >= queued_tasks_before {
+                    slices_remaining += queued_tasks_after - queued_tasks_before;
+                } else {
+                    slices_remaining = slices_remaining
+                        .saturating_sub(queued_tasks_before - queued_tasks_after)
+                        .max(1);
+                }
+                if stop_requested {
                     self.present_early_exit();
                     self.stop();
-                    break;
+                    break 'scheduler;
                 }
-                continue;
-            }
-            let (stop_requested, yield_requested, finish_current) = {
-                let mut bus = RuntimeBus {
-                    memory: &mut self.memory,
-                    package: &self.package,
-                    imports: &self.package.imports,
-                    profile,
-                    unknown_hle_calls: &mut self.unknown_hle_calls,
-                    unknown_hle_policy: self.unknown_hle_policy,
-                    unknown_hle_allowlist: &self.unknown_hle_allowlist,
-                    heap: &mut self.heap,
-                    frame_address: &mut frame_address,
-                    stop_requested: false,
-                    dynamic_imports: &mut self.dynamic_imports,
-                    tasks: &mut self.tasks,
-                    current_priority: self.current_priority,
-                    yield_requested: false,
-                    finish_current: false,
-                    content_directory: &self.content_directory,
-                    save_directory: self.save_directory.as_deref(),
-                    files: &mut self.files,
-                    file_searches: &mut self.file_searches,
-                    next_file_handle: &mut self.next_file_handle,
-                    semaphores: &mut self.semaphores,
-                    active_framebuffer: &mut self.active_framebuffer,
-                    framebuffer_bits: &mut self.framebuffer_bits,
-                    audio: &mut self.audio,
-                    input: &mut self.input,
-                    firmware_archive: self.firmware_archive.as_ref(),
-                    console_output: &mut self.console_output,
-                };
-                let pc = self.cpu.r[15];
-                if let Err(error) = self.cpu.step(&mut bus) {
-                    return match error {
-                        SimulatorError::MemoryError { .. }
-                        | SimulatorError::InvalidInstruction { .. } => Err(SimulatorError::CpuError {
-                            pc,
-                            message: format!(
-                                "{:?} state: {error}; previous_pc={previous_pc:#010x}, r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, sp={:#010x}, lr={:#010x}",
-                                self.cpu.execution_state(),
-                                self.cpu.r[0],
-                                self.cpu.r[1],
-                                self.cpu.r[2],
-                                self.cpu.r[3],
-                                self.cpu.r[13],
-                                self.cpu.r[14]
-                            ),
-                        }),
-                        other => Err(other),
-                    };
+                if finish_current {
+                    self.cpu.r[15] = EXIT_ADDRESS;
                 }
-                previous_pc = pc;
-                (bus.stop_requested, bus.yield_requested, bus.finish_current)
-            };
-            if stop_requested {
-                self.present_early_exit();
-                self.stop();
-                break;
+                if yield_requested {
+                    self.rotate_task();
+                    slices_remaining -= 1;
+                    if slices_remaining == 0 {
+                        break 'scheduler;
+                    }
+                    continue 'scheduler;
+                }
+                if let Some(address) = frame_address.take() {
+                    presented_frame_address = Some(address);
+                    self.rotate_task();
+                    slices_remaining -= 1;
+                    if slices_remaining == 0 {
+                        break 'scheduler;
+                    }
+                    continue 'scheduler;
+                }
             }
-            if finish_current {
-                self.cpu.r[15] = EXIT_ADDRESS;
-            }
-            if yield_requested {
-                self.rotate_task();
-                break;
-            }
-            if frame_address.is_some() {
-                break;
+            self.rotate_task();
+            slices_remaining -= 1;
+            if slices_remaining == 0 {
+                break 'scheduler;
             }
         }
-        if let Some(address) = frame_address {
+        if let Some(address) = presented_frame_address {
             self.present_frame(address)?;
         }
         self.audio.advance_frame();
@@ -1660,6 +1699,26 @@ mod tests {
         assert!(!runtime.is_running());
         assert!(runtime.tasks.is_empty());
         assert_eq!(runtime.current_priority, 7);
+    }
+
+    #[test]
+    fn frame_boundary_runs_a_background_task_slice() {
+        let mut runtime =
+            Runtime::from_package(svc_package("lcd_set_frame"), PathBuf::new()).unwrap();
+        let mut audio_task = Cpu::new(
+            ArmProfile::RETAIL_ORIGIN + 4,
+            EXIT_ADDRESS - 0x100,
+            EXIT_ADDRESS,
+        );
+        audio_task.start();
+        runtime.tasks.push_back((audio_task, 7));
+        runtime.current_priority = 3;
+        runtime.start();
+
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.current_priority, 3);
+        assert!(runtime.tasks.is_empty());
     }
 
     #[test]
