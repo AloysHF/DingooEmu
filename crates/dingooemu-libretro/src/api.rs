@@ -220,11 +220,7 @@ pub extern "C" fn retro_run() {
         return;
     }
 
-    if !emulator.is_running() {
-        log::info!("Content exited normally; requesting frontend shutdown");
-        callbacks::environment(RETRO_ENVIRONMENT_SHUTDOWN, ptr::null_mut());
-        return;
-    }
+    let exited = !emulator.is_running();
 
     let Some(diagnostic_timer) = diagnostic_timer else {
         callbacks::video_refresh(
@@ -242,6 +238,7 @@ pub extern "C" fn retro_run() {
                 callbacks::audio_sample(sample[0], sample[1]);
             }
         }
+        request_shutdown_if_exited(exited);
         return;
     };
     let tick_elapsed = diagnostic_timer.elapsed();
@@ -279,6 +276,14 @@ pub extern "C" fn retro_run() {
         audio_frames_requested,
         audio_frames_accepted,
     );
+    request_shutdown_if_exited(exited);
+}
+
+fn request_shutdown_if_exited(exited: bool) {
+    if exited {
+        log::info!("Content exited normally; requesting frontend shutdown");
+        callbacks::environment(RETRO_ENVIRONMENT_SHUTDOWN, ptr::null_mut());
+    }
 }
 
 fn update_diagnostic_audio_buffer_status(enabled: bool) {
@@ -770,6 +775,8 @@ mod tests {
     static INPUT_DESCRIPTORS_SET: AtomicBool = AtomicBool::new(false);
     static INPUT_POLLED: AtomicBool = AtomicBool::new(false);
     static VIDEO_WIDTH: AtomicU32 = AtomicU32::new(0);
+    static VIDEO_NON_SOLID: AtomicBool = AtomicBool::new(false);
+    static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
     static AUDIO_BATCH_CALLED: AtomicBool = AtomicBool::new(false);
     static AUDIO_BUFFER_STATUS_REGISTERED: AtomicBool = AtomicBool::new(false);
     static ASYNC_AUDIO_CALLBACK: Mutex<RetroAudioCallbackFn> = Mutex::new(None);
@@ -792,6 +799,10 @@ mod tests {
                 true
             }
             RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL => true,
+            RETRO_ENVIRONMENT_SHUTDOWN => {
+                SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+                true
+            }
             RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK => {
                 let audio = &*data.cast::<RetroAudioCallback>();
                 *ASYNC_AUDIO_CALLBACK.lock().unwrap() = audio.callback;
@@ -840,7 +851,7 @@ mod tests {
     }
 
     unsafe extern "C" fn test_video_refresh(
-        _data: *const c_void,
+        data: *const c_void,
         width: u32,
         height: u32,
         pitch: usize,
@@ -848,6 +859,16 @@ mod tests {
         assert_eq!(height, SCREEN_HEIGHT);
         assert_eq!(pitch, SCREEN_WIDTH as usize * std::mem::size_of::<u16>());
         VIDEO_WIDTH.store(width, Ordering::SeqCst);
+        if !data.is_null() {
+            let pixels =
+                std::slice::from_raw_parts(data.cast::<u16>(), width as usize * height as usize);
+            VIDEO_NON_SOLID.store(
+                pixels
+                    .first()
+                    .is_some_and(|first| pixels.iter().any(|pixel| pixel != first)),
+                Ordering::SeqCst,
+            );
+        }
     }
 
     unsafe extern "C" fn test_audio_batch(_data: *const i16, _frames: usize) -> usize {
@@ -1051,6 +1072,8 @@ mod tests {
         INPUT_DESCRIPTORS_SET.store(false, Ordering::SeqCst);
         INPUT_POLLED.store(false, Ordering::SeqCst);
         VIDEO_WIDTH.store(0, Ordering::SeqCst);
+        VIDEO_NON_SOLID.store(false, Ordering::SeqCst);
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
         AUDIO_BATCH_CALLED.store(false, Ordering::SeqCst);
         AUDIO_BUFFER_STATUS_REGISTERED.store(false, Ordering::SeqCst);
         DIAGNOSTIC_AUDIO_BUFFER_REGISTERED.store(false, Ordering::SeqCst);
@@ -1190,6 +1213,8 @@ mod tests {
         INPUT_DESCRIPTORS_SET.store(false, Ordering::SeqCst);
         INPUT_POLLED.store(false, Ordering::SeqCst);
         VIDEO_WIDTH.store(0, Ordering::SeqCst);
+        VIDEO_NON_SOLID.store(false, Ordering::SeqCst);
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
         AUDIO_BATCH_CALLED.store(false, Ordering::SeqCst);
         AUDIO_BUFFER_STATUS_REGISTERED.store(false, Ordering::SeqCst);
         DIAGNOSTIC_AUDIO_BUFFER_REGISTERED.store(false, Ordering::SeqCst);
@@ -1325,6 +1350,18 @@ mod tests {
                 0
             );
         }
+
+        unsafe {
+            EMULATOR
+                .as_mut()
+                .unwrap()
+                .write_memory_u32(dingooemu_core::ArmProfile::HOMEBREW_ORIGIN, 0xe12f_ff1e)
+                .unwrap();
+        }
+        retro_run();
+        assert!(SHUTDOWN_REQUESTED.load(Ordering::SeqCst));
+        assert!(VIDEO_NON_SOLID.load(Ordering::SeqCst));
+        unsafe { assert!(!EMULATOR.as_ref().unwrap().is_running()) };
 
         retro_unload_game();
         assert!(retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM).is_null());
