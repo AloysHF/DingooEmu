@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 #[cfg(feature = "standalone")]
 use std::num::NonZero;
 
-pub const OUTPUT_SAMPLE_RATE: u32 = 48_000;
+pub const OUTPUT_SAMPLE_RATE: u32 = 22_050;
 
 #[cfg(not(feature = "standalone"))]
 const VIDEO_FRAMES_PER_SECOND: u32 = 60;
@@ -514,5 +514,20 @@ mod tests {
             .0
             .iter()
             .all(|frame| frame[0] == frame[1]));
+    }
+
+    #[cfg(not(feature = "standalone"))]
+    #[test]
+    fn preserves_fractional_audio_frames_at_22050_hz() {
+        let mut audio = Audio::new();
+        let frame_counts = (0..VIDEO_FRAMES_PER_SECOND)
+            .map(|_| audio.take_frame_samples().len() / 2)
+            .collect::<Vec<_>>();
+
+        assert_eq!(&frame_counts[..4], &[367, 368, 367, 368]);
+        assert_eq!(
+            frame_counts.iter().sum::<usize>(),
+            OUTPUT_SAMPLE_RATE as usize
+        );
     }
 }
