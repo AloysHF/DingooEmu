@@ -638,7 +638,9 @@ impl Runtime {
                     input: &mut self.input,
                     firmware_archive: self.firmware_archive.as_ref(),
                     console_output: &mut self.console_output,
+                    event_pending: false,
                 };
+                let mut known_task_count = bus.tasks.len();
                 loop {
                     if !self.cpu.is_running()
                         || self.cpu.instruction_count - initial >= INSTRUCTIONS_PER_SLICE
@@ -648,7 +650,6 @@ impl Runtime {
                     if self.cpu.r[15] == EXIT_ADDRESS {
                         break SliceEvent::Exit;
                     }
-                    let queued_tasks_before = bus.tasks.len();
                     let pc = self.cpu.r[15];
                     if let Err(error) = self.cpu.step(&mut bus) {
                         return match error {
@@ -672,14 +673,19 @@ impl Runtime {
                         };
                     }
                     previous_pc = pc;
-                    let queued_tasks_after = bus.tasks.len();
-                    if queued_tasks_after >= queued_tasks_before {
-                        slices_remaining += queued_tasks_after - queued_tasks_before;
+                    if !bus.event_pending {
+                        continue;
+                    }
+                    bus.event_pending = false;
+                    let current_task_count = bus.tasks.len();
+                    if current_task_count >= known_task_count {
+                        slices_remaining += current_task_count - known_task_count;
                     } else {
                         slices_remaining = slices_remaining
-                            .saturating_sub(queued_tasks_before - queued_tasks_after)
+                            .saturating_sub(known_task_count - current_task_count)
                             .max(1);
                     }
+                    known_task_count = current_task_count;
                     if bus.stop_requested {
                         break SliceEvent::Stop;
                     }
@@ -826,6 +832,7 @@ struct RuntimeBus<'a> {
     input: &'a mut Input,
     firmware_archive: Option<&'a FirmwareArchive>,
     console_output: &'a mut Vec<u8>,
+    event_pending: bool,
 }
 
 fn framebuffer_is_solid(framebuffer: &[u8]) -> bool {

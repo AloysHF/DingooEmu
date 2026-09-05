@@ -118,10 +118,12 @@ impl Bus for RuntimeBus<'_> {
         if address == LEGACY_GRAPHICS_SURFACE {
             *self.active_framebuffer = LEGACY_FRAMEBUFFER_ADDRESS;
             *self.frame_address = Some(LEGACY_FRAMEBUFFER_ADDRESS);
+            self.event_pending = true;
         }
         Ok(())
     }
     fn svc(&mut self, cpu: &mut Cpu, immediate: u32) -> Result<()> {
+        self.event_pending = true;
         self.dispatch(cpu, immediate)
     }
 }
