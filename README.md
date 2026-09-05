@@ -38,7 +38,7 @@ and guest architecture must agree before content is loaded.
 - **HLE (High-Level Emulation)** — Architecture-specific SDK bridges for graphics, input, audio, timing, files, resources, tasks, and synchronization
 - **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and emit per-game JSON reports for review
 - **Multi-format loading** — Validated `.app`, `.cc`, `.c2s`, and `.c3s` CCDL packages with automatic runtime selection
-- **Frame rendering** — Native 320×240 RGB565 framebuffer output
+- **Frame rendering** — Native 320×240 RGB565 output with source-aware RGB565 and XRGB8888 guest framebuffer handling
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
 - **Screenshot mode** — Headless frame capture for automated testing and preview generation
 - **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`

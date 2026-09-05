@@ -1,6 +1,6 @@
 use crate::a330_memory::{
-    A330Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE, STACK_BASE,
-    STACK_SIZE,
+    A330Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE,
+    LEGACY_GRAPHICS_STRIDE, LEGACY_GRAPHICS_SURFACE, STACK_BASE, STACK_SIZE,
 };
 use crate::app_loader::PackageImage;
 use crate::arm_cpu::{ArmBus, ArmCpu};
@@ -23,7 +23,7 @@ const INSTRUCTIONS_PER_SLICE: u64 = 1_000_000;
 const APP_PATH_ADDRESS: u32 = STACK_BASE + 0x200;
 const LOCALE_ADDRESS: u32 = STACK_BASE + 0x600;
 const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
-const LEGACY_GRAPHICS_SURFACE: u32 = 0x0930_201c;
+const FRAMEBUFFER_BITS_EXPLICIT: u32 = 1 << 31;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct GuestFile {
@@ -488,7 +488,9 @@ impl A330Runtime {
         if state.dynamic_imports.len() > max_dynamic_imports {
             anyhow::bail!("save state has too many dynamic imports");
         }
-        if !matches!(state.framebuffer_bits, 16 | 32) {
+        if !matches!(state.framebuffer_bits & !FRAMEBUFFER_BITS_EXPLICIT, 16 | 32)
+            || state.framebuffer_bits & !(FRAMEBUFFER_BITS_EXPLICIT | 32 | 16) != 0
+        {
             anyhow::bail!("save state has an invalid framebuffer depth");
         }
         for file in state.files.values_mut() {
@@ -657,7 +659,9 @@ impl A330Runtime {
     }
 
     fn present_frame(&mut self, address: u32) -> Result<()> {
-        if self.framebuffer_bits == 32 {
+        let explicit = self.framebuffer_bits & FRAMEBUFFER_BITS_EXPLICIT != 0;
+        let bits = self.framebuffer_bits & !FRAMEBUFFER_BITS_EXPLICIT;
+        if bits == 32 && (explicit || address != LEGACY_FRAMEBUFFER_ADDRESS) {
             let source = self.memory.read_bytes(address, FRAMEBUFFER_SIZE * 2)?;
             let (source_pixels, _) = source.as_chunks::<4>();
             let (destination_pixels, _) = self.video.framebuffer_mut().as_chunks_mut::<2>();
@@ -1012,7 +1016,7 @@ impl RuntimeBus<'_> {
             "LCDGetFBFormat" => cpu.r[0] = 0,
             "LCDSetFBBit" => {
                 if matches!(cpu.r[0], 16 | 32) {
-                    *self.framebuffer_bits = cpu.r[0];
+                    *self.framebuffer_bits = cpu.r[0] | FRAMEBUFFER_BITS_EXPLICIT;
                 }
                 cpu.r[0] = 0;
             }
@@ -1577,6 +1581,17 @@ impl ArmBus for RuntimeBus<'_> {
     }
     fn write32(&mut self, address: u32, value: u32) -> Result<()> {
         self.memory.write32(address, value)?;
+        if address == LEGACY_GRAPHICS_STRIDE {
+            match value {
+                value if value == SCREEN_WIDTH * 2 => {
+                    *self.framebuffer_bits = 16 | FRAMEBUFFER_BITS_EXPLICIT;
+                }
+                value if value == SCREEN_WIDTH * 4 => {
+                    *self.framebuffer_bits = 32 | FRAMEBUFFER_BITS_EXPLICIT;
+                }
+                _ => {}
+            }
+        }
         if address == LEGACY_GRAPHICS_SURFACE {
             *self.active_framebuffer = LEGACY_FRAMEBUFFER_ADDRESS;
             *self.frame_address = Some(LEGACY_FRAMEBUFFER_ADDRESS);
@@ -1631,6 +1646,30 @@ mod tests {
     fn semihosting_package() -> PackageImage {
         let mut package = svc_package("unused");
         package.data[0x80..0x84].copy_from_slice(&0xef12_3456u32.to_le_bytes());
+        package.imports.clear();
+        package
+    }
+
+    fn legacy_stride_package(stride: u32) -> PackageImage {
+        let mut package = svc_package("unused");
+        let origin = ArmProfile::HOMEBREW_ORIGIN;
+        let words = [
+            0xe59f_0008,
+            0xe59f_1008,
+            0xe580_1000,
+            0xe12f_ff1e,
+            LEGACY_GRAPHICS_STRIDE,
+            stride,
+        ];
+        package.data.resize(0x80 + words.len() * 4, 0);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.rawd.base.size = words.len() as u32 * 4;
+        package.rawd.entry = origin;
+        package.rawd.origin = origin;
+        package.rawd.program_size = words.len() as u32 * 4;
         package.imports.clear();
         package
     }
@@ -2263,10 +2302,44 @@ mod tests {
     }
 
     #[test]
+    fn legacy_stride_selects_framebuffer_depth() {
+        for (stride, expected_bits) in [(SCREEN_WIDTH * 2, 16), (SCREEN_WIDTH * 4, 32)] {
+            let mut runtime =
+                A330Runtime::from_package(legacy_stride_package(stride), PathBuf::new()).unwrap();
+            runtime.start();
+            runtime.tick().unwrap();
+
+            assert_eq!(
+                runtime.framebuffer_bits,
+                expected_bits | FRAMEBUFFER_BITS_EXPLICIT
+            );
+        }
+    }
+
+    #[test]
+    fn homebrew_legacy_framebuffer_defaults_to_rgb565() {
+        let mut package = svc_package("FlushDCache");
+        package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
+        package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
+        package.imports[0].address = ArmProfile::HOMEBREW_ORIGIN;
+        let mut runtime = A330Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime
+            .memory
+            .write16(LEGACY_FRAMEBUFFER_ADDRESS, 0x07e0)
+            .unwrap();
+        runtime.cpu.r[0] = LEGACY_FRAMEBUFFER_ADDRESS;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.framebuffer_bits, 32);
+        assert_eq!(&runtime.video.framebuffer()[..2], &[0xe0, 0x07]);
+    }
+
+    #[test]
     fn thirty_two_bit_guest_frames_are_converted_to_rgb565() {
         let mut runtime =
             A330Runtime::from_package(svc_package("FlushDCache"), PathBuf::new()).unwrap();
-        runtime.framebuffer_bits = 32;
+        runtime.framebuffer_bits = 32 | FRAMEBUFFER_BITS_EXPLICIT;
         runtime
             .memory
             .write32(LEGACY_FRAMEBUFFER_ADDRESS, 0x00ff_0000)

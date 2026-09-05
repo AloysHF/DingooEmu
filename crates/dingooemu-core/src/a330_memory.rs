@@ -20,6 +20,10 @@ const LEGACY_AUDIO_MMIO_BASE: u32 = 0x08a0_0000;
 const LEGACY_AUDIO_MMIO_SIZE: usize = 0x0001_0000;
 const LEGACY_SYSTEM_MMIO_BASE: u32 = 0x0930_0000;
 const LEGACY_SYSTEM_MMIO_SIZE: usize = 0x0001_0000;
+pub(crate) const LEGACY_GRAPHICS_SURFACE: u32 = 0x0930_201c;
+pub(crate) const LEGACY_GRAPHICS_STRIDE: u32 = 0x0930_2020;
+pub(crate) const LEGACY_GRAPHICS_STATUS: u32 = 0x0930_3054;
+pub(crate) const LEGACY_GRAPHICS_READY: u32 = 1 << 2;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct A330Memory {
@@ -92,6 +96,9 @@ impl A330Memory {
             if stub_size == 8 {
                 memory.write32(import.address + 4, 0xe12f_ff1e)?;
             }
+        }
+        if profile == ArmProfile::Homebrew {
+            memory.write32(LEGACY_GRAPHICS_STATUS, LEGACY_GRAPHICS_READY)?;
         }
         Ok(memory)
     }
@@ -364,6 +371,16 @@ mod tests {
             0x1716_1514
         );
         assert_eq!(memory.heap_base(), HOMEBREW_HEAP_BASE);
+    }
+
+    #[test]
+    fn homebrew_display_starts_ready() {
+        let memory = A330Memory::from_package(&package(ArmProfile::Homebrew)).unwrap();
+
+        assert_eq!(
+            memory.read32(LEGACY_GRAPHICS_STATUS).unwrap() & LEGACY_GRAPHICS_READY,
+            LEGACY_GRAPHICS_READY
+        );
     }
 
     #[test]
