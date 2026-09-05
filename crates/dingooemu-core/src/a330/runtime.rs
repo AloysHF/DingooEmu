@@ -284,6 +284,7 @@ pub(crate) struct Runtime {
     dynamic_imports: Vec<String>,
     tasks: VecDeque<(Cpu, u32)>,
     current_priority: u32,
+    content_path: PathBuf,
     content_directory: PathBuf,
     save_directory: Option<PathBuf>,
     files: BTreeMap<u32, GuestFile>,
@@ -297,7 +298,7 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
-    pub(crate) fn from_package(package: PackageImage, _path: PathBuf) -> Result<Self> {
+    pub(crate) fn from_package(package: PackageImage, path: PathBuf) -> Result<Self> {
         let mut memory = Memory::from_package(&package)?;
         let cpu = Cpu::new(
             package.entry_point(),
@@ -309,7 +310,7 @@ impl Runtime {
             ArmProfile::Homebrew => 32,
         };
         let heap = GuestHeap::new(memory.heap_base());
-        let file_name = _path
+        let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("game.cc");
@@ -326,7 +327,7 @@ impl Runtime {
             .iter()
             .find(|symbol| symbol.name == "AppMain")
             .map(|symbol| symbol.address);
-        let content_directory = _path.parent().map(PathBuf::from).unwrap_or_default();
+        let content_directory = path.parent().map(PathBuf::from).unwrap_or_default();
         let save_directory =
             (!content_directory.as_os_str().is_empty()).then(|| content_directory.clone());
         let firmware_archive = FirmwareArchive::discover(&content_directory);
@@ -348,6 +349,7 @@ impl Runtime {
             dynamic_imports: Vec::new(),
             tasks: VecDeque::new(),
             current_priority: 0,
+            content_path: path,
             content_directory,
             save_directory,
             files: BTreeMap::new(),
@@ -390,14 +392,12 @@ impl Runtime {
         let was_running = self.is_running();
         let policy = self.unknown_hle_policy;
         let allowlist = self.unknown_hle_allowlist.clone();
-        let content_directory = self.content_directory.clone();
         let save_directory = self.save_directory.clone();
         let cheats = self.cheats.clone();
         let instruction_policy = self.cpu.unknown_instruction_policy();
-        let mut replacement = Self::from_package(self.package.clone(), PathBuf::new())?;
+        let mut replacement = Self::from_package(self.package.clone(), self.content_path.clone())?;
         replacement.unknown_hle_policy = policy;
         replacement.unknown_hle_allowlist = allowlist;
-        replacement.content_directory = content_directory;
         replacement.save_directory = save_directory;
         replacement.firmware_archive = self.firmware_archive.clone();
         replacement.cheats = cheats;
@@ -1329,6 +1329,26 @@ mod tests {
         assert_eq!(
             runtime.cpu.unknown_instruction_policy(),
             UnknownInstructionPolicy::Stop
+        );
+    }
+
+    #[test]
+    fn a330_reset_preserves_the_guest_content_path() {
+        let content_path = PathBuf::from(r"C:\games\original.c2s");
+        let mut runtime =
+            Runtime::from_package(svc_package("LCDGetWidth"), content_path.clone()).unwrap();
+
+        assert_eq!(
+            memory_c_string(&runtime.memory, LOCALE_ADDRESS),
+            r".\original.c2s"
+        );
+
+        runtime.reset().unwrap();
+
+        assert_eq!(runtime.content_path, content_path);
+        assert_eq!(
+            memory_c_string(&runtime.memory, LOCALE_ADDRESS),
+            r".\original.c2s"
         );
     }
 
