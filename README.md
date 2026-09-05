@@ -135,11 +135,12 @@ crates/
 │       │   ├── cheats.rs        # A320 cheat validation and application
 │       │   └── runtime/sdk_hle/ # A320 SDK dispatch and implementations
 │       ├── a330/
-│       │   ├── runtime.rs       # Gemei A330 lifecycle, scheduler, and SDK bridge
+│       │   ├── runtime.rs       # Gemei A330 lifecycle and scheduler
 │       │   ├── cpu.rs           # ARM32/Thumb interpreter
 │       │   ├── memory.rs        # A330 memory map and package loader
 │       │   ├── cheats.rs        # A330 cheat validation and application
-│       │   └── firmware_archive.rs # Adjacent A330 firmware reader
+│       │   ├── firmware_archive.rs # Adjacent A330 firmware reader
+│       │   └── runtime/sdk_hle/ # A330 SDK dispatch by service responsibility
 │       └── error.rs             # Error types
 ├── dingooemu/                   # Standalone binary (-> dingoo-emu)
 │   └── src/
