@@ -8,6 +8,15 @@ also accepts Gemei A330 `.cc`, `.c2s`, and `.c3s` content, but those formats do
 not yet have an equivalent public per-game compatibility matrix. Format support
 must not be interpreted as a claim that every title is playable.
 
+On September 5, 2026, the maintainer A330 smoke set (10 `.cc`, 3 `.c2s`, and
+3 `.c3s` packages) was run without input for 600 emulated ticks in release
+mode. All 16 final frames contained more than one color. `PrBoom.c3s` remained
+solid at the 300-tick checkpoint on a clean first run but showed the emulator's
+exit diagnostic by tick 600; this is not a playability pass. The other 15
+packages were non-solid at both checkpoints. These results establish that the
+tested packages do not remain indefinitely on a pure-color frame, not that
+their gameplay, audio, or input is complete.
+
 The current sample set contains 39 distinct `.app` entries, including alternate
 builds of several games. On August 13, 2026, all 39 entries completed the release
 batch screenshot process and rendered a non-black frame. The newer Hell Striker

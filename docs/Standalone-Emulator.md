@@ -21,8 +21,10 @@ Windows).
 ## Loading Games
 
 The standalone emulator accepts Dingoo A320 `.app` files, Gemei A330 firmware
-1.0 `.cc` files, and later A330 `.c2s` (2D) and `.c3s` (3D) files. The package
-header and load address must match the architecture expected for the extension.
+1.0 `.cc` files, and later A330 `.c2s` (2D) and `.c3s` (3D) files. The extension
+identifies the content category, while validated RAWD metadata selects the A320
+or A330 device runtime and, for A330, its retail or homebrew ABI profile. A
+category/target mismatch is rejected; renaming a file cannot change its CPU.
 
 ```bash
 dingoo-emu path/to/game.app

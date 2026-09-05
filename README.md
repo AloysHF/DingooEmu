@@ -27,8 +27,10 @@ content container, then provides the matching device memory and SDK services.
 | Later Gemei A330 firmware, 2D software | `.c2s` | ARM32/Thumb |
 | Later Gemei A330 firmware, 3D software | `.c3s` | ARM32/Thumb |
 
-The extension is not trusted on its own: the package layout, load address,
-and guest architecture must agree before content is loaded.
+The extension identifies a content category; it does not directly choose a
+CPU or runtime. DingooEmu validates the CCDL package, derives the device and ABI
+profile from RAWD metadata, checks that the category can carry that target, and
+only then selects the A320 or A330 runtime.
 
 ## Features
 
@@ -153,6 +155,9 @@ crates/
         ├── callbacks.rs         # Callback management
         └── types.rs             # libretro type definitions
 ```
+
+See [Emulator Architecture](docs/Architecture.md) for the runtime-selection
+flow, module boundaries, and extension rules.
 
 ## Game Compatibility
 

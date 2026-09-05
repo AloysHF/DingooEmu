@@ -70,8 +70,10 @@ platform-specific installation requirements:
 | Later Gemei A330 firmware, 2D software | `.c2s` | ARM32/Thumb |
 | Later Gemei A330 firmware, 3D software | `.c3s` | ARM32/Thumb |
 
-Renaming a file is not enough to change its type. The core validates the CCDL
-container, load address, and architecture before selecting a runtime.
+Renaming a file is not enough to change its target. The extension supplies a
+content category only. The core validates the CCDL container, derives the
+device and A330 ABI profile from RAWD metadata, verifies that the category is
+compatible with that target, and then selects the runtime.
 
 ## Supported Features
 
