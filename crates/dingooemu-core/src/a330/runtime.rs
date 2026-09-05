@@ -1334,7 +1334,7 @@ mod tests {
 
     #[test]
     fn a330_reset_preserves_the_guest_content_path() {
-        let content_path = PathBuf::from(r"C:\games\original.c2s");
+        let content_path = PathBuf::from("games").join("original.c2s");
         let mut runtime =
             Runtime::from_package(svc_package("LCDGetWidth"), content_path.clone()).unwrap();
 
