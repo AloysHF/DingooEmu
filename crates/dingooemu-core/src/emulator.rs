@@ -1,4 +1,3 @@
-use crate::app_loader::{AppImage, ResourceKind};
 use crate::audio::{Audio, AudioConfig};
 use crate::cheats::{CheatManager, CheatParseError, CheatRule};
 use crate::content::{ArmProfile, ContentFormat, GuestArchitecture};
@@ -8,6 +7,7 @@ use crate::input::Input;
 #[cfg(feature = "jit")]
 use crate::jit::{CompiledExecution, JitEngine};
 use crate::memory::Memory;
+use crate::package::{PackageImage, ResourceKind};
 use crate::video::Video;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
@@ -269,7 +269,7 @@ pub struct Emulator {
     /// Next guest semaphore handle
     next_semaphore_handle: u32,
     /// Parsed app image (for resource access)
-    app: Option<AppImage>,
+    app: Option<PackageImage>,
     /// Import address to function name mapping (for diagnostics)
     #[allow(dead_code)]
     import_addrs: HashMap<u32, String>,
@@ -316,16 +316,16 @@ impl Emulator {
     /// Create the legacy APP runtime from a content path.
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let app = AppImage::from_path(path)?;
-        Self::from_app_with_path(app, path.to_string_lossy().into_owned())
+        let app = PackageImage::from_path(path)?;
+        Self::from_package_with_path(app, path.to_string_lossy().into_owned())
     }
 
     /// Create the legacy APP runtime from a parsed package.
-    pub fn from_app(app: AppImage) -> Result<Self> {
-        Self::from_app_with_path(app, String::new())
+    pub fn from_package(app: PackageImage) -> Result<Self> {
+        Self::from_package_with_path(app, String::new())
     }
 
-    pub(crate) fn from_app_with_path(app: AppImage, app_path: String) -> Result<Self> {
+    pub(crate) fn from_package_with_path(app: PackageImage, app_path: String) -> Result<Self> {
         if app.architecture() != GuestArchitecture::Mips32 {
             return Err(SimulatorError::UnsupportedContentFormat(format!(
                 ".{} requires the ARM runtime; use the format-neutral Emulator facade",
@@ -579,7 +579,7 @@ impl Emulator {
             .clone()
             .ok_or_else(|| "cannot reset an emulator without a loaded app".to_string())?;
         let was_running = self.is_running();
-        let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
+        let mut replacement = Self::from_package_with_path(app, self.app_path.clone())?;
         replacement.save_directory = self.save_directory.clone();
         replacement.cheats = self.cheats.clone();
         replacement.unknown_hle_policy = self.unknown_hle_policy;
@@ -682,7 +682,7 @@ impl Emulator {
         let was_running = state.cpu.is_running();
         #[cfg(feature = "standalone")]
         let host_audio_output_enabled = self.audio.host_output_enabled();
-        let mut replacement = Self::from_app_with_path(app, self.app_path.clone())?;
+        let mut replacement = Self::from_package_with_path(app, self.app_path.clone())?;
         replacement.save_directory = self.save_directory.clone();
         replacement.cheats = self.cheats.clone();
         replacement.unknown_hle_policy = self.unknown_hle_policy;
@@ -1901,19 +1901,19 @@ impl Emulator {
     pub fn content_format(&self) -> ContentFormat {
         self.app
             .as_ref()
-            .map_or(ContentFormat::App, AppImage::format)
+            .map_or(ContentFormat::App, PackageImage::format)
     }
 
     /// Return the active guest architecture.
     pub fn guest_architecture(&self) -> GuestArchitecture {
         self.app
             .as_ref()
-            .map_or(GuestArchitecture::Mips32, AppImage::architecture)
+            .map_or(GuestArchitecture::Mips32, PackageImage::architecture)
     }
 
     /// Return the active A330 profile for ARM content.
     pub fn arm_profile(&self) -> Option<ArmProfile> {
-        self.app.as_ref().and_then(AppImage::arm_profile)
+        self.app.as_ref().and_then(PackageImage::arm_profile)
     }
 
     /// Configure how unsupported guest instructions are handled.
@@ -2059,7 +2059,7 @@ impl Emulator {
     }
 
     /// Get the app image (for resource access)
-    pub fn app(&self) -> Option<&AppImage> {
+    pub fn package(&self) -> Option<&PackageImage> {
         self.app.as_ref()
     }
 }
@@ -2175,7 +2175,7 @@ impl Default for Emulator {
 mod tests {
     use super::*;
 
-    fn minimal_app() -> AppImage {
+    fn minimal_app() -> PackageImage {
         let mut data = vec![0u8; 132];
         data[0..4].copy_from_slice(b"CCDL");
         data[0x20..0x24].copy_from_slice(b"IMPT");
@@ -2186,7 +2186,7 @@ mod tests {
         data[0x74..0x78].copy_from_slice(&0x8000_0000u32.to_le_bytes());
         data[0x78..0x7c].copy_from_slice(&0x8000_0000u32.to_le_bytes());
         data[0x7c..0x80].copy_from_slice(&4u32.to_le_bytes());
-        AppImage::parse(&data).unwrap()
+        PackageImage::parse(&data, ContentFormat::App).unwrap()
     }
 
     fn try_invoke_sdk_import(emu: &mut Emulator, address: u32, function_name: &str) -> Result<u64> {
@@ -2263,7 +2263,7 @@ mod tests {
 
     #[test]
     fn strict_unknown_hle_allowlist_is_exact_and_survives_reset() {
-        let mut emu = Emulator::from_app(minimal_app()).unwrap();
+        let mut emu = Emulator::from_package(minimal_app()).unwrap();
         emu.set_unknown_hle_policy(UnknownHlePolicy::Stop);
         emu.set_unknown_hle_allowlist(["allowed_missing"]);
         emu.cpu.regs.write(31, 0x8000_4008);
@@ -2283,18 +2283,18 @@ mod tests {
 
     #[test]
     fn test_legacy_load_base_requests_lcd_initialization() {
-        let legacy = Emulator::from_app(minimal_app()).unwrap();
+        let legacy = Emulator::from_package(minimal_app()).unwrap();
         assert_eq!(legacy.cpu.regs.read(5), 1);
 
         let mut standard_app = minimal_app();
         standard_app.rawd.origin = STANDARD_APP_LOAD_BASE;
-        let standard = Emulator::from_app(standard_app).unwrap();
+        let standard = Emulator::from_package(standard_app).unwrap();
         assert_eq!(standard.cpu.regs.read(5), 0);
     }
 
     #[test]
     fn test_reset_rebuilds_loaded_runtime_state() {
-        let mut emu = Emulator::from_app(minimal_app()).unwrap();
+        let mut emu = Emulator::from_package(minimal_app()).unwrap();
         emu.start();
         emu.memory.write_u32(0x1000, 0x1234_5678).unwrap();
         emu.set_buttons(crate::input::BUTTON_A);
@@ -3089,7 +3089,7 @@ mod tests {
 
     #[test]
     fn test_save_state_round_trip_and_transactional_rejection() {
-        let mut emu = Emulator::from_app(minimal_app()).unwrap();
+        let mut emu = Emulator::from_package(minimal_app()).unwrap();
         let save_directory = std::env::temp_dir().join("dingooemu-state-save-root");
         emu.set_save_directory(&save_directory);
         emu.start();
@@ -3166,7 +3166,7 @@ mod tests {
         state[32] ^= 1;
         let mut other_app = minimal_app();
         other_app.data.push(1);
-        let mut other = Emulator::from_app(other_app).unwrap();
+        let mut other = Emulator::from_package(other_app).unwrap();
         other.cpu.regs.pc = 0x8765_4321;
         assert!(other.unserialize_state(&state).is_err());
         assert_eq!(other.cpu.regs.pc, 0x8765_4321);

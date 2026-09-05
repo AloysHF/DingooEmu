@@ -131,19 +131,14 @@ impl PackageImage {
             SimulatorError::UnsupportedContentFormat(extension.to_string())
         })?;
         let data = std::fs::read(path)?;
-        Self::parse_with_format(&data, format)
+        Self::parse(&data, format)
     }
 
-    /// Parse an APP package from a byte slice for backward compatibility.
-    pub fn parse(data: &[u8]) -> Result<Self> {
-        Self::parse_with_format(data, ContentFormat::App)
-    }
-
-    /// Parse package data using an explicit content category.
-    pub fn parse_with_format(data: &[u8], format: ContentFormat) -> Result<Self> {
+    /// Parse package data using the declared content category.
+    pub fn parse(data: &[u8], format: ContentFormat) -> Result<Self> {
         // Validate minimum size
         if data.len() < MIN_FILE_SIZE {
-            return Err(SimulatorError::InvalidAppFormat(format!(
+            return Err(SimulatorError::InvalidPackageFormat(format!(
                 "File too small: {} bytes (minimum {})",
                 data.len(),
                 MIN_FILE_SIZE
@@ -152,7 +147,7 @@ impl PackageImage {
 
         // Validate CCDL magic at offset 0
         if data[0..4] != *MAGIC_CCDL {
-            return Err(SimulatorError::InvalidAppFormat(
+            return Err(SimulatorError::InvalidPackageFormat(
                 "Invalid CCDL magic".to_string(),
             ));
         }
@@ -163,19 +158,19 @@ impl PackageImage {
         let mut rawd = read_rawd_header(data, RAWD_OFFSET as usize)?;
 
         if impt.ident != *MAGIC_IMPT || expt.ident != *MAGIC_EXPT {
-            return Err(SimulatorError::InvalidAppFormat(
+            return Err(SimulatorError::InvalidPackageFormat(
                 "Missing IMPT or EXPT descriptor".to_string(),
             ));
         }
         if rawd.base.ident != *MAGIC_RAWD {
-            return Err(SimulatorError::InvalidAppFormat(
+            return Err(SimulatorError::InvalidPackageFormat(
                 "Missing RAWD descriptor".to_string(),
             ));
         }
 
         // Validate RAWD
         if rawd.entry == 0 {
-            return Err(SimulatorError::InvalidAppFormat(
+            return Err(SimulatorError::InvalidPackageFormat(
                 "RAW entry point is zero".to_string(),
             ));
         }
@@ -184,10 +179,10 @@ impl PackageImage {
             .offset
             .checked_add(rawd.base.size)
             .ok_or_else(|| {
-                SimulatorError::InvalidAppFormat("RAW payload range overflow".to_string())
+                SimulatorError::InvalidPackageFormat("RAW payload range overflow".to_string())
             })?;
         if rawd_end as usize > data.len() {
-            return Err(SimulatorError::InvalidAppFormat(
+            return Err(SimulatorError::InvalidPackageFormat(
                 "RAW payload out of bounds".to_string(),
             ));
         }
@@ -337,9 +332,6 @@ impl PackageImage {
     }
 }
 
-/// Backward-compatible name for callers that only handle APP content.
-pub type AppImage = PackageImage;
-
 fn appended_zip_range(data: &[u8], search_start: usize) -> Option<std::ops::Range<usize>> {
     const LOCAL_HEADER: &[u8; 4] = b"PK\x03\x04";
     const CENTRAL_HEADER: &[u8; 4] = b"PK\x01\x02";
@@ -387,25 +379,24 @@ fn read_u32_checked(data: &[u8], offset: usize) -> Option<u32> {
 }
 
 fn validate_guest_metadata(format: ContentFormat, rawd: &RawdHeader) -> Result<TargetDevice> {
-    let program_end = rawd
-        .origin
-        .checked_add(rawd.program_size)
-        .ok_or_else(|| SimulatorError::InvalidAppFormat("Program range overflow".to_string()))?;
+    let program_end = rawd.origin.checked_add(rawd.program_size).ok_or_else(|| {
+        SimulatorError::InvalidPackageFormat("Program range overflow".to_string())
+    })?;
     if rawd.entry < rawd.origin || rawd.entry >= program_end {
-        return Err(SimulatorError::InvalidAppFormat(format!(
+        return Err(SimulatorError::InvalidPackageFormat(format!(
             ".{format} entry {:#010x} is outside program range {:#010x}..{:#010x}",
             rawd.entry, rawd.origin, program_end
         )));
     }
 
     let target = TargetDevice::detect(rawd.origin).ok_or_else(|| {
-        SimulatorError::InvalidAppFormat(format!(
+        SimulatorError::InvalidPackageFormat(format!(
             ".{format} package has unsupported load origin {:#010x}",
             rawd.origin
         ))
     })?;
     if !format.supports_target(target) {
-        return Err(SimulatorError::InvalidAppFormat(format!(
+        return Err(SimulatorError::InvalidPackageFormat(format!(
             ".{format} package target {target:?} does not match its content format"
         )));
     }
@@ -415,7 +406,7 @@ fn validate_guest_metadata(format: ContentFormat, rawd: &RawdHeader) -> Result<T
 /// Read a 16-byte chunk header
 fn read_chunk_header(data: &[u8], offset: usize) -> Result<ChunkHeader> {
     if data.len() < offset + 16 {
-        return Err(SimulatorError::InvalidAppFormat(format!(
+        return Err(SimulatorError::InvalidPackageFormat(format!(
             "Chunk header at {:#x} out of bounds",
             offset
         )));
@@ -457,7 +448,7 @@ fn read_chunk_header(data: &[u8], offset: usize) -> Result<ChunkHeader> {
 /// Read the RAWD header (extended 32 bytes)
 fn read_rawd_header(data: &[u8], offset: usize) -> Result<RawdHeader> {
     if data.len() < offset + 32 {
-        return Err(SimulatorError::InvalidAppFormat(
+        return Err(SimulatorError::InvalidPackageFormat(
             "RAW header out of bounds".to_string(),
         ));
     }
@@ -501,7 +492,7 @@ fn parse_symbol_table(data: &[u8], offset: usize, size: usize) -> Result<Vec<Sym
         .checked_add(size)
         .filter(|&end| end <= data.len())
         .ok_or_else(|| {
-            SimulatorError::InvalidAppFormat("Symbol table range is outside file".to_string())
+            SimulatorError::InvalidPackageFormat("Symbol table range is outside file".to_string())
         })?;
 
     // Read count (first 4 bytes)
@@ -524,11 +515,11 @@ fn parse_symbol_table(data: &[u8], offset: usize, size: usize) -> Result<Vec<Sym
         .checked_mul(16)
         .and_then(|entries_size| entries_start.checked_add(entries_size))
         .ok_or_else(|| {
-            SimulatorError::InvalidAppFormat("Symbol table size overflow".to_string())
+            SimulatorError::InvalidPackageFormat("Symbol table size overflow".to_string())
         })?;
 
     if strings_start > section_end {
-        return Err(SimulatorError::InvalidAppFormat(
+        return Err(SimulatorError::InvalidPackageFormat(
             "Symbol table truncated".to_string(),
         ));
     }
@@ -568,7 +559,9 @@ fn parse_symbol_table(data: &[u8], offset: usize, size: usize) -> Result<Vec<Sym
             .checked_add(string_offset as usize)
             .filter(|&name_offset| name_offset < section_end)
             .ok_or_else(|| {
-                SimulatorError::InvalidAppFormat("Symbol name offset is outside table".to_string())
+                SimulatorError::InvalidPackageFormat(
+                    "Symbol name offset is outside table".to_string(),
+                )
             })?;
         let name = read_cstring(data, name_offset, (section_end - name_offset).min(256));
 
@@ -982,7 +975,7 @@ mod tests {
     }
 
     fn minimal_package(origin: u32, format: ContentFormat) -> PackageImage {
-        PackageImage::parse_with_format(&minimal_package_data(origin), format).unwrap()
+        PackageImage::parse(&minimal_package_data(origin), format).unwrap()
     }
 
     fn minimal_appended_zip() -> Vec<u8> {
@@ -1045,7 +1038,7 @@ mod tests {
         data[0x78..0x7C].copy_from_slice(&0x8000_0000u32.to_le_bytes());
         data[0x7C..0x80].copy_from_slice(&0x18u32.to_le_bytes());
 
-        let app = AppImage::parse(&data).unwrap();
+        let app = PackageImage::parse(&data, ContentFormat::App).unwrap();
 
         assert_eq!(app.program_size(), 0x20);
         assert_eq!(app.executable().len(), 0x20);
@@ -1077,17 +1070,17 @@ mod tests {
     #[test]
     fn test_parse_rejects_extension_architecture_mismatch() {
         let arm_data = minimal_package_data(ArmProfile::RETAIL_ORIGIN);
-        assert!(PackageImage::parse_with_format(&arm_data, ContentFormat::App).is_err());
+        assert!(PackageImage::parse(&arm_data, ContentFormat::App).is_err());
 
         let mips_data = minimal_package_data(0x80A0_0000);
-        assert!(PackageImage::parse_with_format(&mips_data, ContentFormat::Cc).is_err());
+        assert!(PackageImage::parse(&mips_data, ContentFormat::Cc).is_err());
     }
 
     #[test]
     fn test_parse_rejects_unknown_target_origin() {
         let data = minimal_package_data(0x11c0_0000);
 
-        assert!(PackageImage::parse_with_format(&data, ContentFormat::Cc).is_err());
+        assert!(PackageImage::parse(&data, ContentFormat::Cc).is_err());
     }
 
     #[test]
@@ -1096,7 +1089,7 @@ mod tests {
         package.data[0x28..0x2C].copy_from_slice(&0xF8u32.to_le_bytes());
         package.data[0x2C..0x30].copy_from_slice(&0x20u32.to_le_bytes());
 
-        assert!(PackageImage::parse(&package.data).is_err());
+        assert!(PackageImage::parse(&package.data, ContentFormat::App).is_err());
     }
 
     #[test]

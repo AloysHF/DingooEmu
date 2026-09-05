@@ -6,7 +6,7 @@ pub type Result<T> = std::result::Result<T, SimulatorError>;
 pub enum SimulatorError {
     /// Invalid CCDL package format
     #[error("invalid content package: {0}")]
-    InvalidAppFormat(String),
+    InvalidPackageFormat(String),
 
     /// Unsupported content extension
     #[error("unsupported content format: {0}")]

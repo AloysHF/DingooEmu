@@ -2,7 +2,6 @@ use crate::a330_memory::{
     A330Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE,
     LEGACY_GRAPHICS_STRIDE, LEGACY_GRAPHICS_SURFACE, STACK_BASE, STACK_SIZE,
 };
-use crate::app_loader::PackageImage;
 use crate::arm_cpu::{ArmBus, ArmCpu};
 use crate::audio::{Audio, AudioConfig};
 use crate::cheats::{CheatManager, CheatParseError, CheatRule};
@@ -15,6 +14,7 @@ use crate::input::{
     Input, BUTTON_A, BUTTON_B, BUTTON_DOWN, BUTTON_L, BUTTON_LEFT, BUTTON_R, BUTTON_RIGHT,
     BUTTON_SELECT, BUTTON_START, BUTTON_UP, BUTTON_X, BUTTON_Y,
 };
+use crate::package::PackageImage;
 use crate::video::{Video, FRAMEBUFFER_SIZE, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -739,7 +739,7 @@ impl A330Runtime {
 struct RuntimeBus<'a> {
     memory: &'a mut A330Memory,
     package: &'a PackageImage,
-    imports: &'a [crate::app_loader::SymbolEntry],
+    imports: &'a [crate::package::SymbolEntry],
     profile: ArmProfile,
     unknown_hle_calls: &'a mut BTreeMap<String, UnknownHleCall>,
     unknown_hle_policy: UnknownHlePolicy,
@@ -2023,8 +2023,8 @@ impl ArmBus for RuntimeBus<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_loader::{ChunkHeader, RawdHeader, ResourceEntry, ResourceKind, SymbolEntry};
     use crate::content::TargetDevice;
+    use crate::package::{ChunkHeader, RawdHeader, ResourceEntry, ResourceKind, SymbolEntry};
 
     fn svc_package(name: &str) -> PackageImage {
         let origin = ArmProfile::RETAIL_ORIGIN;

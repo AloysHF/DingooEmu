@@ -28,7 +28,7 @@ fn test_load_simple_game() {
 /// Test .app parsing
 #[test]
 fn test_app_parsing() {
-    use dingooemu_core::app_loader::AppImage;
+    use dingooemu_core::package::PackageImage;
 
     // Create a minimal .app file for testing
     let mut data = vec![0u8; 256];
@@ -51,7 +51,7 @@ fn test_app_parsing() {
     data[0x7C..0x80].copy_from_slice(&0x80u32.to_le_bytes()); // program_size
 
     // Parse the .app file
-    let app = AppImage::parse(&data).unwrap();
+    let app = PackageImage::parse(&data, dingooemu_core::ContentFormat::App).unwrap();
 
     assert_eq!(app.entry_point(), 0x8000_0000);
     assert_eq!(app.load_base(), 0x8000_0000);

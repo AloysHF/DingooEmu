@@ -6,7 +6,6 @@
 
 pub mod a330_memory;
 mod a330_runtime;
-pub mod app_loader;
 pub mod arm_cpu;
 pub mod audio;
 pub mod cheats;
@@ -19,6 +18,7 @@ pub mod input;
 #[cfg(feature = "jit")]
 mod jit;
 pub mod memory;
+pub mod package;
 mod runtime;
 mod save_state;
 pub mod video;

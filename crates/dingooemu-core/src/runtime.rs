@@ -1,11 +1,11 @@
 use crate::a330_runtime::A330Runtime;
-use crate::app_loader::{AppImage, PackageImage};
 use crate::audio::AudioConfig;
 use crate::cheats::{CheatParseError, CheatRule};
 use crate::content::{ArmProfile, ContentFormat, GuestArchitecture, TargetDevice};
 use crate::cpu::UnknownInstructionPolicy;
 use crate::emulator::{Emulator as AppRuntime, JitDiagnostics, UnknownHleCall, UnknownHlePolicy};
 use crate::error::Result;
+use crate::package::PackageImage;
 use std::path::{Path, PathBuf};
 
 /// Architecture-specific runtime selected by the content probe.
@@ -36,14 +36,14 @@ impl Emulator {
     }
 
     /// Create an emulator from an already parsed package.
-    pub fn from_app(package: AppImage) -> Result<Self> {
+    pub fn from_package(package: PackageImage) -> Result<Self> {
         Self::from_package_with_path(package, String::new())
     }
 
     fn from_package_with_path(package: PackageImage, path: String) -> Result<Self> {
         let runtime = match package.target() {
             TargetDevice::DingooA320 => {
-                Runtime::App(Box::new(AppRuntime::from_app_with_path(package, path)?))
+                Runtime::App(Box::new(AppRuntime::from_package_with_path(package, path)?))
             }
             TargetDevice::GemeiA330(_) => Runtime::Arm(Box::new(A330Runtime::from_package(
                 package,
@@ -397,9 +397,9 @@ impl Emulator {
         }
     }
 
-    pub fn app(&self) -> Option<&PackageImage> {
+    pub fn package(&self) -> Option<&PackageImage> {
         match &self.runtime {
-            Runtime::App(runtime) => runtime.app(),
+            Runtime::App(runtime) => runtime.package(),
             Runtime::Arm(runtime) => Some(runtime.package()),
         }
     }
@@ -420,12 +420,12 @@ mod tests {
         data[0x74..0x78].copy_from_slice(&0x80a0_0000u32.to_le_bytes());
         data[0x78..0x7c].copy_from_slice(&0x80a0_0000u32.to_le_bytes());
         data[0x7c..0x80].copy_from_slice(&0x20u32.to_le_bytes());
-        PackageImage::parse(&data).unwrap()
+        PackageImage::parse(&data, ContentFormat::App).unwrap()
     }
 
     #[test]
     fn app_package_selects_the_mips_runtime() {
-        let emulator = Emulator::from_app(minimal_app()).unwrap();
+        let emulator = Emulator::from_package(minimal_app()).unwrap();
 
         assert_eq!(emulator.content_format(), ContentFormat::App);
         assert_eq!(emulator.guest_architecture(), GuestArchitecture::Mips32);
@@ -445,7 +445,7 @@ mod tests {
         package.rawd.entry = ArmProfile::RETAIL_ORIGIN;
         package.rawd.origin = ArmProfile::RETAIL_ORIGIN;
 
-        let emulator = Emulator::from_app(package).unwrap();
+        let emulator = Emulator::from_package(package).unwrap();
         assert_eq!(emulator.content_format(), ContentFormat::Cc);
         assert_eq!(emulator.guest_architecture(), GuestArchitecture::Arm32);
         assert_eq!(emulator.arm_profile(), Some(ArmProfile::Retail));

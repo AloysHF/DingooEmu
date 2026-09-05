@@ -120,7 +120,7 @@ crates/
 │       ├── lib.rs               # Crate root (module declarations)
 │       ├── runtime.rs           # Format-neutral runtime facade
 │       ├── content.rs           # Content format and architecture detection
-│       ├── app_loader.rs        # Shared CCDL package parser
+│       ├── package.rs        # Shared CCDL package parser
 │       ├── emulator.rs          # Dingoo A320 APP/MIPS runtime
 │       ├── emulator/
 │       │   └── sdk_hle/         # A320 SDK dispatch and implementations

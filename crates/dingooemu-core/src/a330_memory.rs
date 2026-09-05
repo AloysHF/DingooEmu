@@ -1,6 +1,6 @@
-use crate::app_loader::PackageImage;
 use crate::content::ArmProfile;
 use crate::error::{Result, SimulatorError};
+use crate::package::PackageImage;
 
 pub const SYSTEM_RAM_BASE: u32 = 0x1000_0000;
 pub const SYSTEM_RAM_SIZE: usize = 0x0400_0000;
@@ -41,7 +41,7 @@ pub struct A330Memory {
 impl A330Memory {
     pub fn from_package(package: &PackageImage) -> Result<Self> {
         let profile = package.arm_profile().ok_or_else(|| {
-            SimulatorError::InvalidAppFormat("unsupported ARM memory profile".into())
+            SimulatorError::InvalidPackageFormat("unsupported ARM memory profile".into())
         })?;
         let mut memory = Self {
             profile,
@@ -57,10 +57,12 @@ impl A330Memory {
         let program_end = package
             .load_base()
             .checked_add(package.program_size())
-            .ok_or_else(|| SimulatorError::InvalidAppFormat("ARM program range overflow".into()))?;
+            .ok_or_else(|| {
+                SimulatorError::InvalidPackageFormat("ARM program range overflow".into())
+            })?;
         let system_end = SYSTEM_RAM_BASE + SYSTEM_RAM_SIZE as u32;
         if package.load_base() < SYSTEM_RAM_BASE || program_end > system_end {
-            return Err(SimulatorError::InvalidAppFormat(format!(
+            return Err(SimulatorError::InvalidPackageFormat(format!(
                 "ARM program range {:#010x}..{program_end:#010x} is outside system RAM",
                 package.load_base()
             )));
@@ -68,12 +70,12 @@ impl A330Memory {
         memory.write_bytes(package.load_base(), package.executable())?;
         for (index, import) in package.imports.iter().enumerate() {
             if index > 0x00ff_ffff {
-                return Err(SimulatorError::InvalidAppFormat(
+                return Err(SimulatorError::InvalidPackageFormat(
                     "too many ARM imports".into(),
                 ));
             }
             if import.address & 3 != 0 {
-                return Err(SimulatorError::InvalidAppFormat(format!(
+                return Err(SimulatorError::InvalidPackageFormat(format!(
                     "unaligned ARM import {} at {:#010x}",
                     import.name, import.address
                 )));
@@ -84,10 +86,10 @@ impl A330Memory {
                 8
             };
             let stub_end = import.address.checked_add(stub_size).ok_or_else(|| {
-                SimulatorError::InvalidAppFormat("ARM import range overflow".into())
+                SimulatorError::InvalidPackageFormat("ARM import range overflow".into())
             })?;
             if import.address < package.load_base() || stub_end > program_end {
-                return Err(SimulatorError::InvalidAppFormat(format!(
+                return Err(SimulatorError::InvalidPackageFormat(format!(
                     "ARM import {} lies outside the program image",
                     import.name
                 )));
@@ -299,8 +301,8 @@ fn memory_error(address: u32, size: usize) -> SimulatorError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_loader::{ChunkHeader, RawdHeader, SymbolEntry};
     use crate::content::{ContentFormat, TargetDevice};
+    use crate::package::{ChunkHeader, RawdHeader, SymbolEntry};
 
     fn package(profile: ArmProfile) -> PackageImage {
         let origin = match profile {
@@ -407,7 +409,7 @@ mod tests {
         package.imports[0].address = package.load_base() + package.program_size();
         assert!(matches!(
             A330Memory::from_package(&package),
-            Err(SimulatorError::InvalidAppFormat(_))
+            Err(SimulatorError::InvalidPackageFormat(_))
         ));
     }
 }
