@@ -4,9 +4,13 @@ pub type Result<T> = std::result::Result<T, SimulatorError>;
 /// Errors that can occur during emulation
 #[derive(Debug, thiserror::Error)]
 pub enum SimulatorError {
-    /// Invalid .app file format
-    #[error("invalid app format: {0}")]
-    InvalidAppFormat(String),
+    /// Invalid CCDL package format
+    #[error("invalid content package: {0}")]
+    InvalidPackageFormat(String),
+
+    /// Unsupported content extension
+    #[error("unsupported content format: {0}")]
+    UnsupportedContentFormat(String),
 
     /// Memory access error
     #[error("memory error at {addr:#010x}: {message}")]

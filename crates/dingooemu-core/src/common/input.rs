@@ -1,4 +1,4 @@
-/// Dingoo A320 button masks
+/// Frontend-neutral logical button masks shared by both device runtimes.
 pub const BUTTON_UP: u32 = 1 << 20;
 pub const BUTTON_DOWN: u32 = 1 << 27;
 pub const BUTTON_LEFT: u32 = 1 << 28;

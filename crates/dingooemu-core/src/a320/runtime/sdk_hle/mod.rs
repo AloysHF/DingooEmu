@@ -1,4 +1,4 @@
-use super::Emulator;
+use super::Runtime;
 use crate::error::Result;
 
 mod audio;
@@ -17,7 +17,7 @@ pub(super) enum HandlerResult {
     GuestCallback,
 }
 
-type Handler = fn(&mut Emulator, &str) -> Result<HandlerResult>;
+type Handler = fn(&mut Runtime, &str) -> Result<HandlerResult>;
 
 const HANDLERS: [Handler; 7] = [
     graphics::handle,
@@ -29,7 +29,7 @@ const HANDLERS: [Handler; 7] = [
     system::handle,
 ];
 
-pub(super) fn dispatch(emu: &mut Emulator, addr: u32, func_name: &str) -> Result<()> {
+pub(super) fn dispatch(emu: &mut Runtime, addr: u32, func_name: &str) -> Result<()> {
     log::trace!("SDK call: {addr:#010x} = {func_name}");
     let return_address = emu.cpu.regs.read(31);
 

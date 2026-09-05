@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DingooEmu — Dingoo A320 掌机模拟器</title>
-  <meta name="description" content="用 Rust 编写的 Dingoo A320 掌机模拟器，支持 MIPS32 CPU 模拟、64 位 Android JIT 加速、Dingoo SDK HLE 和 RetroArch 核心">
+  <title>DingooEmu — 丁果 A320 与歌美 A330 模拟器</title>
+  <meta name="description" content="用 Rust 编写的丁果 A320 与歌美 A330 模拟器，支持 APP、CC、C2S、C3S 和 MIPS32、ARM32/Thumb 双架构">
   <link rel="icon" type="image/png" href="res/logo-banner.png">
   <link rel="stylesheet" href="css/style.css">
 </head>
@@ -44,7 +44,7 @@
         <span class="hero-title-line accent">Emulator</span>
       </h1>
       <p class="hero-subtitle" data-i18n="hero-subtitle">重温经典掌机游戏</p>
-      <p class="hero-desc" data-i18n="hero-desc">用 Rust 编写的 Dingoo A320 掌机模拟器，完整支持 Ingenic JZ4740 MIPS SoC 和 Dingoo SDK</p>
+      <p class="hero-desc" data-i18n="hero-desc">用 Rust 编写的丁果 A320 与歌美 A330 模拟器，支持 MIPS32 和 ARM32/Thumb 原生软件</p>
       <div class="hero-badges">
         <img src="https://img.shields.io/github/v/release/AloysHF/DingooEmu?style=for-the-badge" alt="Release">
         <img src="https://img.shields.io/badge/license-BSD%203--Clause-blue?style=for-the-badge" alt="License">
@@ -73,22 +73,22 @@
     <div class="container">
       <div class="about-grid">
         <div class="about-text fade-in-up">
-          <h2 data-i18n="about-title">什么是 Dingoo A320？</h2>
-          <p data-i18n="about-p1">Dingoo A320 是一款搭载 <strong>Ingenic JZ4740</strong> MIPS 处理器的便携式游戏掌机，于 2009 年发布。它拥有 320×240 分辨率的 2.8 英寸 TFT 屏幕，支持运行原生游戏和多种模拟器。</p>
-          <p data-i18n="about-p2">通过 DingooEmu，这些经典的掌机游戏可以在现代设备上重新体验。</p>
+          <h2 data-i18n="about-title">支持的掌机与格式</h2>
+          <p data-i18n="about-p1">DingooEmu 支持丁果 A320 的 <strong>.app</strong> 原生软件，以及歌美 A330 的 <strong>.cc</strong>、<strong>.c2s</strong> 和 <strong>.c3s</strong> 原生软件。</p>
+          <p data-i18n="about-p2">加载器会验证容器、地址和架构，再选择彼此隔离的 MIPS32 或 ARM32/Thumb 运行时。</p>
         </div>
         <div class="about-diagram fade-in-up">
           <div class="diagram-flow">
             <div class="diagram-node">
               <div class="diagram-icon chip-icon"></div>
-              <span data-i18n="about-chip">Ingenic JZ4740</span>
-              <small data-i18n="about-chip-sub">MIPS32 XBurst @ 336MHz</small>
+              <span data-i18n="about-chip">双 CPU 架构</span>
+              <small data-i18n="about-chip-sub">MIPS32 + ARM32/Thumb</small>
             </div>
             <div class="diagram-arrow">→</div>
             <div class="diagram-node">
               <div class="diagram-icon game-icon"></div>
-              <span>.app 容器</span>
-              <small data-i18n="about-game-sub">Dingoo 原生游戏</small>
+              <span data-i18n="about-game">4 种 CCDL 格式</span>
+              <small data-i18n="about-game-sub">APP / CC / C2S / C3S</small>
             </div>
             <div class="diagram-arrow">→</div>
             <div class="diagram-node highlight">
@@ -107,14 +107,14 @@
     <div class="container">
       <div class="stats-grid">
         <div class="stat-item fade-in-up">
-          <div class="stat-number" data-target="32">0</div>
+          <div class="stat-number" data-target="4">0</div>
           <div class="stat-label" data-i18n="stat-games">支持游戏格式</div>
-          <div class="stat-sub" data-i18n="stat-games-sub">.app 容器格式</div>
+          <div class="stat-sub" data-i18n="stat-games-sub">APP / CC / C2S / C3S</div>
         </div>
         <div class="stat-item fade-in-up">
-          <div class="stat-number" data-target="200">0</div>
-          <div class="stat-label" data-i18n="stat-opcodes">MIPS 指令集</div>
-          <div class="stat-sub" data-i18n="stat-opcodes-sub">MIPS32 XBurst 架构</div>
+          <div class="stat-number" data-target="2">0</div>
+          <div class="stat-label" data-i18n="stat-opcodes">来宾 CPU 架构</div>
+          <div class="stat-sub" data-i18n="stat-opcodes-sub">MIPS32 + ARM32/Thumb</div>
         </div>
         <div class="stat-item fade-in-up">
           <div class="stat-number" data-target="4">0</div>
@@ -124,7 +124,7 @@
         <div class="stat-item fade-in-up">
           <div class="stat-number" data-target="100" data-suffix="+">0</div>
           <div class="stat-label" data-i18n="stat-lines">SDK HLE 函数</div>
-          <div class="stat-sub" data-i18n="stat-lines-sub">完整 Dingoo SDK 模拟</div>
+          <div class="stat-sub" data-i18n="stat-lines-sub">设备专用 SDK 服务</div>
         </div>
       </div>
     </div>
@@ -134,21 +134,21 @@
   <section id="features" class="section">
     <div class="container">
       <h2 class="section-title fade-in-up" data-i18n="feat-title">核心特性</h2>
-      <p class="section-subtitle fade-in-up" data-i18n="feat-subtitle">从 MIPS CPU 到 Dingoo SDK，全栈 Rust 实现</p>
+      <p class="section-subtitle fade-in-up" data-i18n="feat-subtitle">双架构运行时与设备 SDK 均使用 Rust 实现</p>
       <div class="features-grid">
         <div class="feature-card fade-in-up">
           <div class="feature-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9l3 3-3 3"/><path d="M15 15l-3-3 3-3"/></svg>
           </div>
-          <h3 data-i18n="feat-mips-title">MIPS32 CPU 与 JIT</h3>
-          <p data-i18n="feat-mips-desc">全平台使用缓存解释器，64 位 Android 还可将高频 MIPS32 指令块动态翻译为本机代码，并对不支持的路径精确回退。</p>
+          <h3 data-i18n="feat-mips-title">MIPS32 与 ARM32/Thumb</h3>
+          <p data-i18n="feat-mips-desc">A320 使用缓存 MIPS32 解释器，并可在 64 位 Android 上启用 JIT；A330 使用支持 ARMv5TE 定点乘法的纯 Rust ARM32/Thumb 解释器。</p>
         </div>
         <div class="feature-card fade-in-up">
           <div class="feature-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
           </div>
-          <h3 data-i18n="feat-sdk-title">Dingoo SDK HLE</h3>
-          <p data-i18n="feat-sdk-desc">高层模拟 Dingoo 原生 SDK，包括图形渲染、输入处理、音频播放、文件系统和多任务调度。</p>
+          <h3 data-i18n="feat-sdk-title">设备 SDK HLE</h3>
+          <p data-i18n="feat-sdk-desc">按设备提供图形、输入、音频、随机访问文件与目录枚举、资源、任务和同步等高层模拟服务，并为无可见末帧的 A330 程序保留退出诊断。</p>
         </div>
         <div class="feature-card fade-in-up">
           <div class="feature-icon">
@@ -161,15 +161,15 @@
           <div class="feature-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
           </div>
-          <h3 data-i18n="feat-app-title">.app 容器加载</h3>
-          <p data-i18n="feat-app-desc">解析 Dingoo 专有的 .app 游戏容器格式，包含 CCDL、IMPT、EXPT、RAWD 等数据块。</p>
+          <h3 data-i18n="feat-app-title">多格式 CCDL 加载</h3>
+          <p data-i18n="feat-app-desc">解析并验证 .app、.cc、.c2s 和 .c3s，自动选择匹配的设备运行时。</p>
         </div>
         <div class="feature-card fade-in-up">
           <div class="feature-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
           </div>
           <h3 data-i18n="feat-audio-title">PCM 音频</h3>
-          <p data-i18n="feat-audio-desc">16-bit PCM 音频输出，支持 22050 Hz 采样率，完整还原掌机音效。</p>
+          <p data-i18n="feat-audio-desc">支持来宾 PCM 格式转换、音量控制、重采样以及同步或异步前端输出。</p>
         </div>
         <div class="feature-card fade-in-up">
           <div class="feature-icon">
@@ -186,7 +186,7 @@
   <section id="gallery" class="section section-dark">
     <div class="container">
       <h2 class="section-title fade-in-up" data-i18n="gallery-title">游戏库</h2>
-      <p class="section-subtitle fade-in-up" data-i18n="gallery-subtitle">支持 Dingoo A320 原生游戏和多种模拟器</p>
+      <p class="section-subtitle fade-in-up" data-i18n="gallery-subtitle">当前公开兼容性截图来自 A320 APP 测试集</p>
       <div id="gallery-dynamic" class="fade-in-up"></div>
     </div>
   </section>
@@ -201,7 +201,7 @@
           <div class="arch-label" data-i18n="arch-frontends">前端</div>
           <div class="arch-boxes">
             <div class="arch-box">
-              <strong>dingooemu</strong>
+              <strong>dingoo-emu</strong>
               <small data-i18n="arch-standalone-sub">Standalone 可执行文件<br>minifb 窗口</small>
             </div>
             <div class="arch-box">
@@ -223,7 +223,7 @@
               <strong>dingooemu-core</strong>
               <small data-i18n="arch-core-sub">平台无关的库</small>
               <div class="core-modules">
-                <span data-i18n="arch-cpu">MIPS CPU / JIT</span>
+                <span data-i18n="arch-cpu">MIPS / ARM Runtime</span>
                 <span>Memory</span>
                 <span>Graphics</span>
                 <span>Audio</span>
@@ -276,7 +276,7 @@
               <span class="qs-num">2</span>
               <div>
                 <p data-i18n="qs-standalone-2">运行游戏</p>
-                <code>dingooemu game.app</code>
+                <code>dingoo-emu game.app</code>
               </div>
             </div>
             <div class="qs-step">
@@ -356,7 +356,7 @@
       <div class="footer-grid">
         <div class="footer-brand">
           <span class="footer-name">DingooEmu</span>
-          <p data-i18n="footer-desc">用 Rust 编写的 Dingoo A320 掌机模拟器</p>
+          <p data-i18n="footer-desc">用 Rust 编写的丁果 A320 与歌美 A330 模拟器</p>
         </div>
         <div class="footer-links">
           <h4 data-i18n="footer-project">项目</h4>

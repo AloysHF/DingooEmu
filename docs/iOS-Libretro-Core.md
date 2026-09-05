@@ -1,6 +1,7 @@
 # iOS Libretro Core
 
-DingooEmu runs as a libretro core on RetroArch, allowing you to play Dingoo A320 games on iPhone / iPad.
+DingooEmu runs as a libretro core on RetroArch, allowing Dingoo A320 `.app`
+and Gemei A330 `.cc`, `.c2s`, and `.c3s` software to run on iPhone and iPad.
 
 > **Note**: iOS does not currently support downloading cores via RetroArch's Online Updater. You need to manually inject the core into the RetroArch IPA. This limitation may be resolved in future RetroArch releases.
 
@@ -12,7 +13,7 @@ DingooEmu runs as a libretro core on RetroArch, allowing you to play Dingoo A320
 - RetroArch 1.17.0 IPA ([official download](https://buildbot.libretro.com/stable/1.17.0/apple/ios-arm64/RetroArch.ipa))
   - Version 1.17.0 is recommended; newer versions have a different folder structure that makes manual injection more complex
 - Download `dingoo-emu-ios-libretro.tar.gz` from the [Releases](https://github.com/AloysHF/DingooEmu/releases) page. It contains:
-  - `dingooemu_libretro_ios.dylib` — core binary (real devices: arm64 + x86_64 universal)
+  - `dingooemu_libretro_ios.dylib` — universal core binary with arm64 device and x86_64 simulator slices
   - `dingooemu_libretro.info` — core metadata
 - A file manager and IPA signing app (e.g. ESign, SideStore, or AltStore)
 
@@ -63,7 +64,7 @@ This is the most critical step on iOS. The modified IPA must be re-signed before
    - Update Overlays
 4. Restart RetroArch
 
-The Dingoo A320 core should now appear in the core list automatically.
+The Dingoo A320 / Gemei A330 core should now appear in the core list automatically.
 
 ### Troubleshooting
 
@@ -87,19 +88,20 @@ Building for iOS requires [Rust](https://www.rust-lang.org/tools/install) (stabl
 rustup target add aarch64-apple-ios x86_64-apple-ios aarch64-apple-ios-sim
 ```
 
-Build for real devices (arm64 + x86_64 universal library):
+Build the arm64 device and legacy x86_64 simulator slices used by the
+universal package:
 
 ```bash
-# Build for arm64 (real devices)
+# Build for arm64 devices
 cargo build -p dingooemu-libretro --release --target aarch64-apple-ios
 
-# Build for x86_64 (real devices)
+# Build for legacy Intel simulators
 cargo build -p dingooemu-libretro --release --target x86_64-apple-ios
 
 # Create universal library
 lipo -create \
-  target/aarch64-apple-ios/release/libdingooemu_libretro.dylib \
-  target/x86_64-apple-ios/release/libdingooemu_libretro.dylib \
+  target/aarch64-apple-ios/release/libdingooemu.dylib \
+  target/x86_64-apple-ios/release/libdingooemu.dylib \
   -output dingooemu_libretro_ios.dylib
 ```
 
@@ -109,4 +111,4 @@ Build for simulator (Apple Silicon Mac):
 cargo build -p dingooemu-libretro --release --target aarch64-apple-ios-sim
 ```
 
-> Cargo names the cdylib `libdingooemu_libretro.dylib`; the CI release workflow packages it as `dingooemu_libretro_ios.dylib` along with `dingooemu_libretro.info`.
+> Cargo names the cdylib `libdingooemu.dylib`; the CI release workflow packages it as `dingooemu_libretro_ios.dylib` along with `dingooemu_libretro.info`.

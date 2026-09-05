@@ -27,7 +27,7 @@ fn test_sword_and_fairy_reaches_framebuffer() {
         emu.tick().expect("Game tick failed");
     }
 
-    let framebuffer = emu.video.framebuffer();
+    let framebuffer = emu.framebuffer();
     let non_zero = framebuffer.iter().filter(|&&byte| byte != 0).count();
     let unique_colors = framebuffer
         .as_chunks::<2>()
@@ -37,11 +37,11 @@ fn test_sword_and_fairy_reaches_framebuffer() {
         .collect::<BTreeSet<_>>()
         .len();
 
-    assert!(emu.cpu.instruction_count > 0);
+    assert!(emu.instruction_count() > 0);
     assert!(
         non_zero > 0,
         "Game did not produce framebuffer pixels after {} instructions",
-        emu.cpu.instruction_count
+        emu.instruction_count()
     );
     assert!(
         unique_colors > 1,

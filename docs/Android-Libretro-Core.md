@@ -11,8 +11,8 @@ The easiest way is to download the core directly from RetroArch's built-in Onlin
 
 1. Open RetroArch
 2. Go to **Main Menu → Online Updater → Core Downloader**
-3. Find and select **Dingoo A320 (DingooEmu)**, wait for the download to complete
-4. Go back to **Main Menu → Load Core** — the Dingoo A320 core should appear
+3. Find and select **Dingoo A320 / Gemei A330 (DingooEmu)**, wait for the download to complete
+4. Go back to **Main Menu → Load Core** — the DingooEmu core should appear
 
 To update an installed core:
 
@@ -34,12 +34,17 @@ If the Online Updater is not available, you can install the core manually:
    and copy `dingooemu_libretro.info` into RetroArch's `info/` directory.
 3. **Load** the core and content the same way as on desktop.
 
+The Android core accepts Dingoo A320 `.app` content, Gemei A330 firmware 1.0
+`.cc` content, and later A330 `.c2s` (2D) and `.c3s` (3D) content.
+
 ## CPU execution engines
 
-The `arm64-v8a` and `x86_64` cores use a tiered JIT by default. Frequently
-executed MIPS32 blocks are translated to native code, while unsupported or
-low-frequency paths continue through the cached interpreter. Compilation is
-rate-limited to avoid introducing frame-time spikes while a game warms up.
+For APP/MIPS content, the `arm64-v8a` and `x86_64` cores use a tiered JIT by
+default. Frequently executed MIPS32 blocks are translated to native code,
+while unsupported or low-frequency paths continue through the cached
+interpreter. Compilation is rate-limited to avoid introducing frame-time
+spikes while a game warms up. CC/C2S/C3S content always uses the ARM32/Thumb
+interpreter, regardless of this option.
 
 Use **Quick Menu → Core Options → CPU Execution Engine** to switch to
 `interpreter` for compatibility testing. The `armeabi-v7a` and `x86` cores
@@ -81,6 +86,6 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 --platform 21 \
   build -p dingooemu-libretro --release
 ```
 
-Each ABI produces `libdingooemu_libretro.so`; rename it to
+Each ABI produces `libdingooemu.so`; rename it to
 `dingooemu_libretro_android.so` when installing into RetroArch on Android.
 The CI release workflow performs this packaging automatically.

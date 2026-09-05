@@ -1,10 +1,10 @@
-use super::{Emulator, HandlerResult};
+use super::{HandlerResult, Runtime};
 use crate::error::Result;
 
-pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResult> {
+pub(super) fn handle(emu: &mut Runtime, func_name: &str) -> Result<HandlerResult> {
     match func_name {
         "_lcd_get_frame" | "lcd_get_frame" | "lcd_get_cframe" => {
-            let address = crate::video::VM_LCD_FB_ADDRESS;
+            let address = crate::a320::memory::LCD_FRAMEBUFFER_BASE;
             emu.cpu.regs.write(2, address);
             log::trace!("  lcd_get_frame() = {address:#010x}");
         }
@@ -21,12 +21,12 @@ pub(super) fn handle(emu: &mut Emulator, func_name: &str) -> Result<HandlerResul
             log::trace!("  LcdGetDisMode() = 0");
         }
         "LCD_GetXSize" => {
-            emu.cpu.regs.write(2, crate::video::SCREEN_WIDTH);
-            log::trace!("  LCD_GetXSize() = {}", crate::video::SCREEN_WIDTH);
+            emu.cpu.regs.write(2, crate::common::video::SCREEN_WIDTH);
+            log::trace!("  LCD_GetXSize() = {}", crate::common::video::SCREEN_WIDTH);
         }
         "LCD_GetYSize" => {
-            emu.cpu.regs.write(2, crate::video::SCREEN_HEIGHT);
-            log::trace!("  LCD_GetYSize() = {}", crate::video::SCREEN_HEIGHT);
+            emu.cpu.regs.write(2, crate::common::video::SCREEN_HEIGHT);
+            log::trace!("  LCD_GetYSize() = {}", crate::common::video::SCREEN_HEIGHT);
         }
         _ => return Ok(HandlerResult::NotHandled),
     }

@@ -20,7 +20,7 @@ fn test_load_simple_game() {
 
     // Verify CPU is still running or has executed instructions
     assert!(
-        emu.cpu.is_running() || emu.cpu.instruction_count > 0,
+        emu.is_running() || emu.instruction_count() > 0,
         "CPU should have executed some instructions"
     );
 }
@@ -28,7 +28,7 @@ fn test_load_simple_game() {
 /// Test .app parsing
 #[test]
 fn test_app_parsing() {
-    use dingooemu_core::app_loader::AppImage;
+    use dingooemu_core::package::PackageImage;
 
     // Create a minimal .app file for testing
     let mut data = vec![0u8; 256];
@@ -51,7 +51,7 @@ fn test_app_parsing() {
     data[0x7C..0x80].copy_from_slice(&0x80u32.to_le_bytes()); // program_size
 
     // Parse the .app file
-    let app = AppImage::parse(&data).unwrap();
+    let app = PackageImage::parse(&data, dingooemu_core::ContentFormat::App).unwrap();
 
     assert_eq!(app.entry_point(), 0x8000_0000);
     assert_eq!(app.load_base(), 0x8000_0000);
@@ -61,8 +61,8 @@ fn test_app_parsing() {
 /// Test CPU instruction execution
 #[test]
 fn test_cpu_instructions() {
-    use dingooemu_core::cpu::Cpu;
-    use dingooemu_core::memory::Memory;
+    use dingooemu_core::a320::cpu::Cpu;
+    use dingooemu_core::a320::memory::Memory;
 
     let mut cpu = Cpu::new(0);
     let mut mem = Memory::new();
@@ -80,8 +80,8 @@ fn test_cpu_instructions() {
 /// Test branch instructions
 #[test]
 fn test_branch_instructions() {
-    use dingooemu_core::cpu::Cpu;
-    use dingooemu_core::memory::Memory;
+    use dingooemu_core::a320::cpu::Cpu;
+    use dingooemu_core::a320::memory::Memory;
 
     let mut cpu = Cpu::new(0);
     let mut mem = Memory::new();
@@ -128,7 +128,7 @@ fn test_branch_instructions() {
 /// Test memory operations
 #[test]
 fn test_memory_operations() {
-    use dingooemu_core::memory::Memory;
+    use dingooemu_core::a320::memory::Memory;
 
     let mut mem = Memory::new();
 

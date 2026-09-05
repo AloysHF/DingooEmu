@@ -1,5 +1,5 @@
-use crate::cpu::Registers;
-use crate::emulator::JitDiagnostics;
+use super::cpu::Registers;
+use super::diagnostics::JitDiagnostics;
 use cranelift::codegen::ir::{
     types, AbiParam, Function, InstBuilder, MemFlagsData, Signature, Value,
 };
@@ -1271,7 +1271,7 @@ fn lower_memory_instruction(
     let ram_in_bounds = builder.ins().icmp_imm_u(
         IntCC::UnsignedLessThanOrEqual,
         physical,
-        i64::from(crate::memory::RAM_SIZE - width),
+        i64::from(super::memory::RAM_SIZE - width),
     );
     let physical_pointer = builder.ins().uextend(types::I64, physical);
     let ram_address = builder.ins().iadd(state.ram, physical_pointer);
@@ -1288,12 +1288,12 @@ fn lower_memory_instruction(
     builder.seal_block(check_framebuffer);
     let mut framebuffer_address = state.framebuffer;
     let mut mapped = None;
-    for base in crate::memory::LCD_FRAMEBUFFER_ALIASES {
+    for base in super::memory::LCD_FRAMEBUFFER_ALIASES {
         let alias_offset = builder.ins().iadd_imm_s(access_address, -i64::from(base));
         let alias_in_bounds = builder.ins().icmp_imm_u(
             IntCC::UnsignedLessThanOrEqual,
             alias_offset,
-            (crate::video::FRAMEBUFFER_MAP_SIZE as u32 - width) as i64,
+            (crate::a320::memory::FRAMEBUFFER_MAP_SIZE as u32 - width) as i64,
         );
         let alias_pointer = builder.ins().uextend(types::I64, alias_offset);
         let alias_address = builder.ins().iadd(state.framebuffer, alias_pointer);
@@ -1558,8 +1558,8 @@ fn iconst_u32(builder: &mut FunctionBuilder<'_>, value: u32) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cpu::Cpu;
-    use crate::memory::Memory;
+    use crate::a320::cpu::Cpu;
+    use crate::a320::memory::Memory;
 
     #[test]
     fn register_layout_matches_jit_offsets() {
@@ -1807,7 +1807,7 @@ mod tests {
         let block = compiler.compile(start, &instructions).unwrap().unwrap();
         let mut registers = Registers::new(start);
         registers.write(8, 0x1234_5678);
-        registers.write(9, crate::video::VM_LCD_FB_ADDRESS);
+        registers.write(9, crate::a320::memory::LCD_FRAMEBUFFER_BASE);
         let mut memory = Memory::new();
         let ram = memory.jit_ram_ptr();
         let framebuffer = memory.jit_framebuffer_ptr();
@@ -1817,7 +1817,9 @@ mod tests {
         assert_eq!(completed, 1);
         assert_eq!(registers.pc, start + 4);
         assert_eq!(
-            memory.read_u32(crate::video::VM_LCD_FB_ADDRESS).unwrap(),
+            memory
+                .read_u32(crate::a320::memory::LCD_FRAMEBUFFER_BASE)
+                .unwrap(),
             0x1234_5678
         );
     }

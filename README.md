@@ -1,7 +1,7 @@
-# Dingoo A320 Emulator — A Dingoo A320 emulator written in Rust
+# DingooEmu — A Dingoo A320 and Gemei A330 emulator written in Rust
 
 <p align="center">
-  <img src="res/logo-banner.png" alt="Dingoo A320 Emulator" width="600">
+  <img src="res/logo-banner.png" alt="DingooEmu" width="600">
 </p>
 
 <p align="center">
@@ -16,20 +16,36 @@
   <a href="https://qm.qq.com/q/LAO7DKAWUC"><img src="https://img.shields.io/badge/QQ%E7%BE%A4-Join%20Us-12B7F5?logo=tencent-qq&logoColor=white" alt="QQ Group"></a>
 </p>
 
-Dingoo A320 is a handheld game console powered by the Ingenic JZ4740 MIPS SoC. This emulator runs `.app` game files from the Dingoo ecosystem through high-level emulation of the MIPS32 CPU and Dingoo SDK.
+DingooEmu runs native software for the Dingoo A320 and Gemei A330 handhelds.
+It selects an isolated MIPS32 or ARM32/Thumb runtime after validating the
+content container, then provides the matching device memory and SDK services.
+
+| Device generation | Native content | Guest CPU |
+|---|---|---|
+| Dingoo A320 | `.app` | MIPS32 |
+| Gemei A330 firmware 1.0 | `.cc` | ARM32/Thumb |
+| Later Gemei A330 firmware, 2D software | `.c2s` | ARM32/Thumb |
+| Later Gemei A330 firmware, 3D software | `.c3s` | ARM32/Thumb |
+
+The extension identifies a content category; it does not directly choose a
+CPU or runtime. DingooEmu validates the CCDL package, derives the device and ABI
+profile from RAWD metadata, checks that the category can carry that target, and
+only then selects the A320 or A330 runtime.
 
 ## Features
 
-- **Tiered MIPS32 CPU execution** — Cached interpreter on every platform, plus native translation of hot blocks on 64-bit Android
+- **Two guest architectures** — Cached MIPS32 interpretation for A320 software and a pure Rust ARM32/Thumb interpreter with ARMv5TE fixed-point multiply support for A330 software
+- **Optional MIPS JIT** — Native translation of hot A320 blocks on 64-bit Android; A330 content always uses the ARM interpreter
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
-- **HLE (High-Level Emulation)** — Dingoo SDK functions for graphics, focused-window key callbacks, audio, timing, files, and companion-content discovery implemented in Rust
+- **HLE (High-Level Emulation)** — Architecture-specific SDK bridges for graphics, input, audio, timing, random-access files and directory enumeration, resources, tasks, and synchronization
 - **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and emit per-game JSON reports for review
-- **`.app` file support** — Parse and load Dingoo A320 game container format
-- **Frame rendering** — Native 320×240 RGB565 framebuffer output
+- **Visible A330 exit diagnostics** — Replace an otherwise solid final frame with a readable guest-exit panel and the last semihosting message
+- **Multi-format loading** — Validated `.app`, `.cc`, `.c2s`, and `.c3s` CCDL packages with automatic runtime selection
+- **Frame rendering** — Native 320×240 RGB565 output with source-aware RGB565 and XRGB8888 guest framebuffer handling
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
 - **Screenshot mode** — Headless frame capture for automated testing and preview generation
 - **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`
-- **RetroArch integration** — libretro core with video, asynchronous audio delivery, RetroPad input, reset, and persistent game saves
+- **RetroArch integration** — libretro core with video, asynchronous audio delivery, RetroPad input, reset, persistent files, save states, cheats, and memory access
 - **Cross-platform** — Windows, Linux, macOS
 
 ## Usage
@@ -40,7 +56,8 @@ Download the latest binary from the
 [Releases](https://github.com/AloysHF/DingooEmu/releases) page and run:
 
 ```bash
-dingooemu path/to/game.app
+dingoo-emu path/to/game.app
+# or: dingoo-emu path/to/game.c2s
 ```
 
 See the [Standalone Emulator](docs/Standalone-Emulator.md) guide for
@@ -50,8 +67,9 @@ installation, keyboard controls, screenshot mode, and all command-line options.
 
 <!-- TODO: Publish DingooEmu in the official RetroArch Core Downloader index. -->
 
-Install **Dingoo A320 (DingooEmu)** from RetroArch's Core Downloader, or
-install the release files manually, then load a `.app` game through
+Install **Dingoo A320 / Gemei A330 (DingooEmu)** from RetroArch's Core
+Downloader, or install the release files manually, then load an `.app`, `.cc`,
+`.c2s`, or `.c3s` file through
 **Load Content**.
 
 See the [RetroArch Core](docs/RetroArch-Core.md) guide for installation,
@@ -66,7 +84,7 @@ Requires [Rust](https://www.rust-lang.org/tools/install) (stable).
 ```bash
 cargo build -p dingooemu --release
 cargo run -p dingooemu --release -- path/to/game.app
-cargo run -p dingooemu --release -- --fullscreen path/to/game.app
+cargo run -p dingooemu --release -- --fullscreen path/to/game.c3s
 ```
 
 The binary is produced at `target/release/dingoo-emu` (`dingoo-emu.exe` on
@@ -78,12 +96,10 @@ Windows).
 cargo build -p dingooemu-libretro --release
 ```
 
-Cargo names the cdylib after its lib target, so this produces
-`dingooemu_libretro.dll` on Windows, `libdingooemu_libretro.so` on Linux, or
-`libdingooemu_libretro.dylib` on macOS under `target/release/`. RetroArch
-expects the core file to be named `dingooemu_libretro.<ext>`, so remove the
-leading `lib` from the Linux or macOS output before copying it into
-RetroArch's `cores/` directory.
+Cargo names the cdylib after its lib target, so this produces `dingooemu.dll`
+on Windows, `libdingooemu.so` on Linux, or `libdingooemu.dylib` on macOS under
+`target/release/`. Rename it to `dingooemu_libretro.<ext>` before copying it
+into RetroArch's `cores/` directory.
 
 For Android cross-compilation, see
 [Android Libretro Core](docs/Android-Libretro-Core.md). For iOS, see
@@ -104,43 +120,52 @@ crates/
 ├── dingooemu-core/              # Platform-independent emulator engine (library)
 │   └── src/
 │       ├── lib.rs               # Crate root (module declarations)
-│       ├── emulator.rs          # Shared Emulator (both front-ends)
-│       ├── emulator/
-│       │   └── sdk_hle/         # Runtime SDK dispatch and implementations
-│       │       ├── mod.rs       # Single HLE dispatcher
-│       │       ├── graphics.rs  # LCD and framebuffer calls
-│       │       ├── gui.rs       # Focused-window key message dispatch
-│       │       ├── input.rs     # Buttons and input events
-│       │       ├── audio.rs     # PCM and wave output
-│       │       ├── files.rs     # Resources, files, and saves
-│       │       ├── tasks.rs     # Tasks and semaphores
-│       │       └── system.rs    # Memory, timing, and system calls
-│       ├── cpu.rs               # Cached-block MIPS32 CPU interpreter
-│       ├── jit.rs               # Optional native translator for hot MIPS32 blocks
-│       ├── memory.rs            # Memory bus (32MB address space)
-│       ├── video.rs             # Framebuffer and screen rendering
-│       ├── audio.rs             # Audio engine (PCM output)
-│       ├── input.rs             # Button state management
-│       ├── app_loader.rs        # .app container parser
+│       ├── emulator.rs          # Device-neutral lifecycle facade and dispatch
+│       ├── content.rs           # Content format and architecture detection
+│       ├── package.rs           # Shared CCDL package parser
+│       ├── common/              # Cross-device services and policies
+│       │   ├── audio.rs         # Shared PCM audio engine
+│       │   ├── video.rs         # Shared framebuffer conversion and dimensions
+│       │   ├── input.rs         # Shared logical input state
+│       │   ├── cheats.rs        # Shared cheat syntax and slot storage
+│       │   └── save_state.rs    # Shared versioned state codec
+│       ├── a320/
+│       │   ├── runtime.rs       # Dingoo A320 APP runtime
+│       │   ├── cpu.rs           # Cached-block MIPS32 interpreter
+│       │   ├── jit.rs           # Optional native translator for hot MIPS32 blocks
+│       │   ├── memory.rs        # A320 memory bus
+│       │   ├── cheats.rs        # A320 cheat validation and application
+│       │   └── runtime/sdk_hle/ # A320 SDK dispatch and implementations
+│       ├── a330/
+│       │   ├── runtime.rs       # Gemei A330 lifecycle and scheduler
+│       │   ├── cpu.rs           # ARM32/Thumb interpreter
+│       │   ├── memory.rs        # A330 memory map and package loader
+│       │   ├── cheats.rs        # A330 cheat validation and application
+│       │   ├── firmware_archive.rs # Adjacent A330 firmware reader
+│       │   └── runtime/sdk_hle/ # A330 SDK dispatch by service responsibility
 │       └── error.rs             # Error types
-├── dingooemu/                   # Standalone binary (-> dingooemu)
+├── dingooemu/                   # Standalone binary (-> dingoo-emu)
 │   └── src/
 │       └── main.rs              # Window loop and CLI front-end
 └── dingooemu-libretro/          # libretro cdylib (-> dingooemu_libretro.{dll,so,dylib})
     ├── dingooemu_libretro.info  # RetroArch core metadata
     └── src/
         ├── lib.rs               # cdylib crate root
-        └── libretro/
-            ├── api.rs           # Exported libretro functions
-            ├── callbacks.rs     # Callback management
-            └── types.rs         # libretro type definitions
+        ├── api.rs               # Exported libretro functions
+        ├── callbacks.rs         # Callback management
+        └── types.rs             # libretro type definitions
 ```
+
+See [Emulator Architecture](docs/Architecture.md) for the runtime-selection
+flow, module boundaries, and extension rules.
 
 ## Game Compatibility
 
 Compatibility results are experimental and cover startup and initial rendering
-only. See [Game Compatibility](docs/Game-Compatibility.md) for the current
-39-build results and screenshots.
+only. The published matrix currently covers A320 APP software; A330 support is
+new and should not be interpreted as universal game compatibility. See
+[Game Compatibility](docs/Game-Compatibility.md) for the current results and
+screenshots.
 
 ## Keyboard Controls
 

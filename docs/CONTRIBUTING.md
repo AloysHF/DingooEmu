@@ -34,9 +34,9 @@ cargo test --workspace
 
 We welcome contributions in the following areas:
 
-- **Game compatibility testing** — Test `.app` files and report results
-- **MIPS instruction implementation** — Complete the CPU interpreter
-- **SDK HLE functions** — Implement missing Dingoo SDK calls
+- **Game compatibility testing** — Test `.app`, `.cc`, `.c2s`, and `.c3s` files and report results
+- **CPU instruction implementation** — Complete the MIPS32 and ARM32/Thumb interpreters
+- **SDK HLE functions** — Implement missing A320 and A330 SDK calls
 - **Platform porting** — Improve support for macOS, Android, iOS
 - **Documentation** — Improve guides, add examples, fix typos
 - **Bug reports** — Report issues with specific games or features

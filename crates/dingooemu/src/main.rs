@@ -3,9 +3,12 @@ mod keyboard;
 mod scaler;
 
 use clap::{Parser, ValueEnum};
-use dingooemu_core::cheats::CheatRule;
-use dingooemu_core::cpu::UnknownInstructionPolicy;
-use dingooemu_core::{video::SCREEN_HEIGHT, video::SCREEN_WIDTH, Emulator, UnknownHlePolicy};
+use dingooemu_core::common::cheats::CheatRule;
+use dingooemu_core::UnknownInstructionPolicy;
+use dingooemu_core::{
+    common::video::{SCREEN_HEIGHT, SCREEN_WIDTH},
+    Emulator, UnknownHlePolicy,
+};
 use minifb::{Key, Window, WindowOptions};
 use std::path::{Path, PathBuf};
 
@@ -109,15 +112,15 @@ mod screen {
     }
 }
 
-/// Dingoo A320 Emulator
+/// Dingoo A320 and Gemei A330 emulator
 #[derive(Parser, Debug)]
 #[command(
     name = "dingoo-emu",
     version,
-    about = "A Dingoo A320 emulator written in Rust"
+    about = "A Dingoo A320 and Gemei A330 emulator written in Rust"
 )]
 struct Args {
-    /// Path to the .app game file
+    /// Path to an .app, .cc, .c2s, or .c3s game file
     path: String,
 
     /// Window scale factor
@@ -165,11 +168,11 @@ struct Args {
     #[arg(long = "repeat-period", default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..))]
     repeat_period: u32,
 
-    /// Freeze a memory address or MIPS register using TARGET=VALUE syntax
+    /// Freeze a memory address or guest register using TARGET=VALUE syntax
     #[arg(long = "cheat", value_name = "RULE")]
     cheats: Vec<CheatRule>,
 
-    /// Behavior when an unknown MIPS instruction is encountered
+    /// Behavior when an unknown guest instruction is encountered
     #[arg(long, value_enum, default_value_t = UnknownInstructionMode::Skip)]
     unknown_instruction_policy: UnknownInstructionMode,
 
@@ -214,19 +217,16 @@ fn main() -> anyhow::Result<()> {
     // Load the game
     log::info!("Loading game: {}", args.path);
     let mut emu = Emulator::from_path(&args.path)?;
-    emu.cpu
-        .set_unknown_instruction_policy(args.unknown_instruction_policy.into());
+    emu.set_unknown_instruction_policy(args.unknown_instruction_policy.into());
     emu.set_unknown_hle_policy(args.unknown_hle_policy.into());
     emu.set_unknown_hle_allowlist(args.allowed_unknown_hle.iter().cloned());
-    emu.audio.set_master_volume(args.volume);
-    emu.input
-        .set_repeat_timing(args.repeat_delay, args.repeat_period);
+    emu.set_master_volume(args.volume);
+    emu.set_input_repeat_timing(args.repeat_delay, args.repeat_period);
     for (index, cheat) in args.cheats.iter().cloned().enumerate() {
         emu.set_parsed_cheat(index as u32, true, cheat)?;
     }
 
-    emu.audio
-        .set_host_output_enabled(args.screenshot.is_none() && !args.headless);
+    emu.set_host_audio_output_enabled(args.screenshot.is_none() && !args.headless);
 
     emu.start();
 
@@ -250,7 +250,7 @@ fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
                 log::info!("Frame {}", frame);
             }
         }
-        emu.video.save_screenshot(screenshot_path)?;
+        emu.save_screenshot(screenshot_path)?;
         log::info!("Screenshot saved to: {}", screenshot_path.display());
         return Ok(());
     }
@@ -277,7 +277,7 @@ fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
         };
 
         let mut window = Window::new(
-            "Dingoo A320 Emulator",
+            "Dingoo A320 / Gemei A330 Emulator",
             width,
             height,
             WindowOptions {
@@ -308,7 +308,7 @@ fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
             emu.tick()?;
 
             // Get framebuffer and convert to XRGB8888
-            let mut buffer = emu.video.to_xrgb8888();
+            let mut buffer = emu.frame_xrgb8888();
             if args.show_gamepad {
                 gamepad_overlay::draw(
                     &mut buffer,

@@ -3,9 +3,6 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
-use crate::cpu::Cpu;
-use crate::memory::Memory;
-
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CheatParseError {
     #[error("cheat code is empty")]
@@ -22,7 +19,7 @@ pub enum CheatParseError {
     MisalignedAddress(u32, u32),
     #[error("memory range 0x{address:08X}..0x{end:08X} is not writable RAM or framebuffer")]
     InvalidMemoryRange { address: u32, end: u32 },
-    #[error("unknown MIPS register '{0}'")]
+    #[error("unknown guest register '{0}'")]
     InvalidRegister(String),
 }
 
@@ -34,7 +31,7 @@ pub enum MemoryWidth {
 }
 
 impl MemoryWidth {
-    const fn bytes(self) -> u32 {
+    pub(crate) const fn bytes(self) -> u32 {
         match self {
             Self::U8 => 1,
             Self::U16 => 2,
@@ -42,7 +39,7 @@ impl MemoryWidth {
         }
     }
 
-    const fn bits(self) -> u32 {
+    pub(crate) const fn bits(self) -> u32 {
         self.bytes() * 8
     }
 
@@ -66,46 +63,6 @@ pub enum CheatRule {
         index: usize,
         value: u32,
     },
-}
-
-impl CheatRule {
-    fn validate(&self, memory: &Memory) -> Result<(), CheatParseError> {
-        let Self::Memory { width, address, .. } = self else {
-            return Ok(());
-        };
-        let bytes = width.bytes();
-        if address % bytes != 0 {
-            return Err(CheatParseError::MisalignedAddress(width.bits(), *address));
-        }
-        if !memory.is_cheat_writable_range(*address, bytes as usize) {
-            return Err(CheatParseError::InvalidMemoryRange {
-                address: *address,
-                end: address.saturating_add(bytes - 1),
-            });
-        }
-        Ok(())
-    }
-
-    fn apply(&self, memory: &mut Memory, cpu: &mut Cpu) {
-        let result = match *self {
-            Self::Memory {
-                width,
-                address,
-                value,
-            } => match width {
-                MemoryWidth::U8 => memory.write_u8(address, value as u8),
-                MemoryWidth::U16 => memory.write_u16(address, value as u16),
-                MemoryWidth::U32 => memory.write_u32(address, value),
-            },
-            Self::Register { index, value } => {
-                cpu.regs.write(index, value);
-                Ok(())
-            }
-        };
-        if let Err(error) = result {
-            log::warn!("Failed to apply cheat: {error}");
-        }
-    }
 }
 
 impl FromStr for CheatRule {
@@ -172,41 +129,50 @@ impl CheatManager {
         self.slots.clear();
     }
 
-    pub fn set_slot(
+    pub(crate) fn set_slot_with_validator<F>(
         &mut self,
         index: u32,
         enabled: bool,
         code: &str,
-        memory: &Memory,
-    ) -> Result<(), CheatParseError> {
+        validate: F,
+    ) -> Result<(), CheatParseError>
+    where
+        F: FnOnce(&CheatRule) -> Result<(), CheatParseError>,
+    {
         let code = code.trim();
         if code.is_empty() {
             self.slots.remove(&index);
             return Ok(());
         }
         let rule = CheatRule::from_str(code)?;
-        self.set_rule(index, enabled, code.to_string(), rule, memory)
+        self.set_rule_with_validator(index, enabled, code.to_string(), rule, validate)
     }
 
-    pub fn set_parsed_rule(
+    pub(crate) fn set_parsed_rule_with_validator<F>(
         &mut self,
         index: u32,
         enabled: bool,
         rule: CheatRule,
-        memory: &Memory,
-    ) -> Result<(), CheatParseError> {
-        self.set_rule(index, enabled, String::new(), rule, memory)
+        validate: F,
+    ) -> Result<(), CheatParseError>
+    where
+        F: FnOnce(&CheatRule) -> Result<(), CheatParseError>,
+    {
+        self.set_rule_with_validator(index, enabled, String::new(), rule, validate)
     }
 
-    fn set_rule(
+    fn set_rule_with_validator<F>(
         &mut self,
         index: u32,
         enabled: bool,
         code: String,
         rule: CheatRule,
-        memory: &Memory,
-    ) -> Result<(), CheatParseError> {
-        rule.validate(memory)?;
+        validate: F,
+    ) -> Result<(), CheatParseError>
+    where
+        F: FnOnce(&CheatRule) -> Result<(), CheatParseError>,
+    {
+        validate(&rule)?;
         self.slots.insert(
             index,
             CheatSlot {
@@ -222,10 +188,11 @@ impl CheatManager {
         self.slots.get(&index)
     }
 
-    pub fn apply(&self, memory: &mut Memory, cpu: &mut Cpu) {
-        for slot in self.slots.values().filter(|slot| slot.enabled) {
-            slot.rule.apply(memory, cpu);
-        }
+    pub(crate) fn enabled_rules(&self) -> impl Iterator<Item = &CheatRule> {
+        self.slots
+            .values()
+            .filter(|slot| slot.enabled)
+            .map(|slot| &slot.rule)
     }
 }
 
@@ -271,19 +238,5 @@ mod tests {
             "mem8:0x100=256".parse::<CheatRule>(),
             Err(CheatParseError::ValueOutOfRange(8))
         ));
-    }
-
-    #[test]
-    fn applies_only_enabled_slots() {
-        let mut memory = Memory::new();
-        let mut cpu = Cpu::new(0);
-        let mut cheats = CheatManager::default();
-        cheats
-            .set_slot(0, true, "mem32:0x100=0x12345678", &memory)
-            .unwrap();
-        cheats.set_slot(1, false, "reg:r4=7", &memory).unwrap();
-        cheats.apply(&mut memory, &mut cpu);
-        assert_eq!(memory.read_u32(0x100).unwrap(), 0x1234_5678);
-        assert_eq!(cpu.regs.read(4), 0);
     }
 }

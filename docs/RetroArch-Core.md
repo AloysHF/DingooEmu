@@ -12,7 +12,7 @@ supported frontend features, and controls.
 
 1. Open RetroArch.
 2. Go to **Main Menu > Online Updater > Core Downloader**.
-3. Select **Dingoo A320 (DingooEmu)**.
+3. Select **Dingoo A320 / Gemei A330 (DingooEmu)**.
 
 ### Manual Installation
 
@@ -34,11 +34,10 @@ to RetroArch's `cores/` directory, and copy `dingooemu_libretro.info` to its
 cargo build -p dingooemu-libretro --release
 ```
 
-Cargo names the cdylib after its lib target, producing
-`dingooemu_libretro.dll` on Windows, `libdingooemu_libretro.so` on Linux, or
-`libdingooemu_libretro.dylib` on macOS under `target/release/`. Rename the
-Linux or macOS output to remove the leading `lib` before copying it into
-RetroArch's `cores/` directory.
+Cargo names the cdylib after its lib target, producing `dingooemu.dll` on
+Windows, `libdingooemu.so` on Linux, or `libdingooemu.dylib` on macOS under
+`target/release/`. Rename it to `dingooemu_libretro.<ext>` before copying it
+into RetroArch's `cores/` directory.
 
 ## Supported Platforms
 
@@ -60,9 +59,21 @@ platform-specific installation requirements:
 
 ## Loading Games
 
-1. Open RetroArch and select **Load Core > Dingoo A320 (DingooEmu)**.
+1. Open RetroArch and select **Load Core > Dingoo A320 / Gemei A330 (DingooEmu)**.
 2. Select **Load Content**.
-3. Choose a `.app` file.
+3. Choose an `.app`, `.cc`, `.c2s`, or `.c3s` file.
+
+| Device generation | Native content | Guest CPU |
+|---|---|---|
+| Dingoo A320 | `.app` | MIPS32 |
+| Gemei A330 firmware 1.0 | `.cc` | ARM32/Thumb |
+| Later Gemei A330 firmware, 2D software | `.c2s` | ARM32/Thumb |
+| Later Gemei A330 firmware, 3D software | `.c3s` | ARM32/Thumb |
+
+Renaming a file is not enough to change its target. The extension supplies a
+content category only. The core validates the CCDL container, derives the
+device and A330 ABI profile from RAWD metadata, verifies that the category is
+compatible with that target, and then selects the runtime.
 
 ## Supported Features
 
@@ -71,12 +82,12 @@ platform-specific installation requirements:
 - Asynchronous audio delivery when supported by the frontend, with automatic
   synchronous fallback
 - RetroPad input handling
-- `.app` content loading
+- `.app`, `.cc`, `.c2s`, and `.c3s` content loading
 - Cold reset through RetroArch's **Reset** command
 - Persistent guest save files in RetroArch's configured save directory
 - Save states with content identity and corruption checks
-- Frontend cheat slots for 8/16/32-bit memory and MIPS registers
-- Frontend memory access for 32 MiB system RAM and LCD video RAM
+- Frontend cheat slots for 8/16/32-bit memory and guest registers
+- Frontend memory access for the active runtime's system RAM and video RAM
 - Live core options, including host master volume
 
 The current basic core does not yet provide subsystem loading. The metadata
@@ -88,32 +99,43 @@ Files created through the emulated file API are stored beneath RetroArch's
 configured save directory and reopened from there on later sessions. Guest
 paths are normalized inside that directory; parent-directory traversal is
 rejected. Modified files are flushed when the guest closes them and when the
-core resets or unloads content.
+core resets or unloads content. Guest reads support seeking from the beginning,
+current position, or end of a file, including data appended to A330 packages.
+
+If A330 software exits while its last frame is still a single solid color, the
+core submits a guest-exit panel instead. The panel includes the last available
+semihosting message and never replaces a non-solid frame that the guest already
+rendered.
 
 ## Save States
 
-RetroArch save and load state commands capture the complete mutable CPU,
-memory, video, input, audio, scheduler, semaphore, and open-file state. Each
-state also preserves active file enumeration and focused-window input dispatch,
-and contains a format version, content checksum, payload length, and payload
-checksum. States for different content and damaged or incompatible states are
-rejected without changing the running emulator.
+RetroArch save and load state commands capture the active runtime's complete
+mutable CPU, memory, video, input, audio, scheduler, semaphore, heap, dynamic
+import, and open-file state. Architecture-specific state such as A320 file
+enumeration and focused-window input dispatch is included when applicable.
+Each state contains a format version, content checksum, payload length, and
+payload checksum. States for different content and damaged or incompatible
+states are rejected without changing the running emulator. The fixed state
+capacity is selected per runtime because the A330 memory map is larger.
 
 ## Cheats
 
 RetroArch cheat slots accept `TARGET=VALUE` rules. Supported targets are
-`mem8:ADDRESS`, `mem16:ADDRESS`, `mem32:ADDRESS`, and `reg:rN` for MIPS
-registers `r0` through `r31`. Numbers may be decimal or use a `0x` hexadecimal
-prefix. Enabled slots are applied at the start of every emulated frame;
-disabled slots remain configured but do not modify state.
+`mem8:ADDRESS`, `mem16:ADDRESS`, `mem32:ADDRESS`, and `reg:rN`. APP/MIPS
+content exposes registers `r0` through `r31`; A330/ARM content exposes `r0`
+through `r15`. Numbers may be decimal or use a `0x` hexadecimal prefix.
+Enabled slots are applied at the start of every emulated frame; disabled slots
+remain configured but do not modify state. Memory rules must target writable
+RAM or framebuffer mappings, not A330 MMIO.
 
 ## Memory Access
 
-Compatible frontend tools can access the complete 32 MiB system RAM and the
-LCD framebuffer mapping through the standard libretro memory API. The core
-also registers both regions as memory-map descriptors, including the guest
-framebuffer address. Region pointers remain stable across Reset and save-state
-loads while content remains loaded.
+Compatible frontend tools can access system RAM and framebuffer memory through
+the standard libretro memory API. APP content exposes 32 MiB of system RAM and
+its LCD mapping. A330 content exposes 64 MiB of system RAM and an 8 MiB
+framebuffer region. The core also registers both regions as memory-map
+descriptors with their guest addresses. Region pointers remain stable across
+Reset and save-state loads while content remains loaded.
 
 ## Core Options
 
@@ -124,15 +146,16 @@ loads while content remains loaded.
 | Key Auto-Repeat Period | `1`–`30` frame choices | `6` | Sets the interval between repeat press events. |
 | Swap A/B Buttons | `disabled`, `enabled` | `disabled` | Exchanges the emulated A and B button meanings. |
 | Performance Diagnostic Log | `disabled`, `enabled` | `disabled` | Writes a compact `dingooemu-diagnostic.txt` performance report to the frontend save directory without enabling verbose frontend logs. |
-| Unknown MIPS Instruction Policy | `skip`, `stop` | `skip` | Logs and skips unsupported instructions or stops with an execution error. |
-| CPU Execution Engine (64-bit Android) | `jit`, `interpreter` | `jit` | Uses native translation for hot CPU blocks on arm64-v8a and x86_64 Android. Other targets and unsupported instructions use the interpreter. Select `interpreter` for compatibility testing. |
+| Unknown Guest Instruction Policy | `skip`, `stop` | `skip` | Logs and skips unsupported MIPS or ARM instructions, or stops with an execution error. Memory failures always remain errors. |
+| CPU Execution Engine (64-bit Android) | `jit`, `interpreter` | `jit` | Selects native translation or cached interpretation for APP/MIPS content on arm64-v8a and x86_64 Android. A330 content always uses the ARM interpreter. |
 
 Core option changes are applied while content is running and restored after a
 RetroArch reset.
 
-The JIT waits until a block has executed 256 times and rate-limits native
-compilation to one block per frame. Short blocks and repeatedly
-unsupported memory paths remain on the interpreter to avoid runtime stutter.
+For APP content, the JIT waits until a block has executed 256 times and
+rate-limits native compilation to one block per frame. Short blocks and
+repeatedly unsupported memory paths remain on the MIPS interpreter to avoid
+runtime stutter.
 
 When diagnostics are enabled, the report is refreshed once per second and when
 content is unloaded. It includes cumulative and recent 60-frame timing,

@@ -26,7 +26,6 @@ fn test_gooplayer_discovers_tracks_and_opens_playlist() {
     }
 
     let highlighted_pixels = emu
-        .video
         .framebuffer()
         .as_chunks::<2>()
         .0
