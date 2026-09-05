@@ -1489,15 +1489,15 @@ impl RuntimeBus<'_> {
         };
         let base = match origin {
             0 => 0,
-            1 => file.position as i64,
-            2 => file.data.len() as i64,
+            1 => file.position as i128,
+            2 => file.data.len() as i128,
             _ => return u32::MAX,
         };
-        let position = base.saturating_add(i64::from(offset));
-        if position < 0 || position > usize::MAX as i64 {
+        let position = base + i128::from(offset);
+        let Ok(position) = usize::try_from(position) else {
             return u32::MAX;
-        }
-        file.position = position as usize;
+        };
+        file.position = position;
         0
     }
 
@@ -2303,6 +2303,33 @@ mod tests {
         assert_eq!(
             runtime.memory.read_bytes(STACK_BASE + 64, 4).unwrap(),
             [1, 2, 3, 4]
+        );
+
+        runtime.package.imports[0].name = "fsys_fseek".into();
+        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu.r[0] = handle;
+        runtime.cpu.r[1] = 1;
+        runtime.cpu.r[2] = 0;
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.boot_complete = true;
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[0], 0);
+
+        runtime.package.imports[0].name = "fsys_fread".into();
+        runtime.cpu = ArmCpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+        runtime.cpu.r[0] = STACK_BASE + 64;
+        runtime.cpu.r[1] = 1;
+        runtime.cpu.r[2] = 2;
+        runtime.cpu.r[3] = handle;
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.boot_complete = true;
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[0], 2);
+        assert_eq!(
+            runtime.memory.read_bytes(STACK_BASE + 64, 2).unwrap(),
+            [2, 3]
         );
 
         std::fs::remove_dir_all(directory).unwrap();

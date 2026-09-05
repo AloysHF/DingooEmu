@@ -97,7 +97,8 @@ Files created through the emulated file API are stored beneath RetroArch's
 configured save directory and reopened from there on later sessions. Guest
 paths are normalized inside that directory; parent-directory traversal is
 rejected. Modified files are flushed when the guest closes them and when the
-core resets or unloads content.
+core resets or unloads content. Guest reads support seeking from the beginning,
+current position, or end of a file, including data appended to A330 packages.
 
 ## Save States
 

@@ -163,7 +163,8 @@ waits and retries the same buffer so playback data is not skipped.
 Files created through the emulated file API persist beside the loaded content
 file. Guest subdirectories are supported, while parent-directory traversal is
 rejected. Modified files are flushed when the guest closes them and when the
-emulator stops or resets.
+emulator stops or resets. Guest reads support seeking from the beginning,
+current position, or end of a file, including data appended to A330 packages.
 
 ## Performance
 
