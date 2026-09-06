@@ -1,7 +1,7 @@
 use super::cpu::{ArmInstructionKind, DecodedArmInstruction};
-use super::runtime::{jit_read32, jit_read8};
+use super::runtime::{jit_read32, jit_read8, jit_write32, jit_write8};
 use cranelift::codegen::ir::{
-    types, AbiParam, Function, InstBuilder, MemFlagsData, Signature, Value,
+    condcodes::IntCC, types, AbiParam, Function, InstBuilder, MemFlagsData, Signature, Value,
 };
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -14,8 +14,12 @@ const MIN_BLOCK_LEN: usize = 3;
 const CACHE_SLOTS: usize = 4_096;
 const MAX_COMPILES_PER_SLICE: u8 = 8;
 const REGISTER_COUNT: usize = 16;
+const N_FLAG: u32 = 1 << 31;
+const Z_FLAG: u32 = 1 << 30;
+const C_FLAG: u32 = 1 << 29;
+const V_FLAG: u32 = 1 << 28;
 
-type JitBlockFn = unsafe extern "C" fn(*mut u32, *mut u8) -> u64;
+type JitBlockFn = unsafe extern "C" fn(*mut u32, *mut u32, *mut u8) -> u64;
 
 #[derive(Clone, Copy)]
 struct CompiledBlock {
@@ -45,6 +49,12 @@ pub(crate) struct JitEngine {
     compile_budget: u8,
     compiled_blocks: usize,
     enabled: bool,
+}
+
+pub(crate) struct JitCpuContext<'a> {
+    pub(crate) registers: &'a mut [u32; REGISTER_COUNT],
+    pub(crate) cpsr: &'a mut u32,
+    pub(crate) bus: *mut u8,
 }
 
 impl JitEngine {
@@ -83,8 +93,7 @@ impl JitEngine {
         generation: u64,
         instructions: &[DecodedArmInstruction],
         instruction_limit: usize,
-        registers: &mut [u32; REGISTER_COUNT],
-        bus: *mut u8,
+        cpu: JitCpuContext<'_>,
     ) -> Option<usize> {
         if !self.enabled || instruction_limit == 0 || self.compiler.is_none() {
             return None;
@@ -104,7 +113,9 @@ impl JitEngine {
             }
             // SAFETY: The compiled function uses this exact ABI and both pointers
             // remain valid for the duration of the call.
-            let completed = unsafe { (block.function)(registers.as_mut_ptr(), bus) } as usize;
+            let completed = unsafe {
+                (block.function)(cpu.registers.as_mut_ptr(), cpu.cpsr as *mut u32, cpu.bus)
+            } as usize;
             return (completed != 0).then_some(completed);
         }
         if entry.failed || self.compile_budget == 0 {
@@ -131,7 +142,9 @@ impl JitEngine {
                 self.compiled_blocks += 1;
                 // SAFETY: The compiled function uses this exact ABI and both pointers
                 // remain valid for the duration of the call.
-                let completed = unsafe { (block.function)(registers.as_mut_ptr(), bus) } as usize;
+                let completed = unsafe {
+                    (block.function)(cpu.registers.as_mut_ptr(), cpu.cpsr as *mut u32, cpu.bus)
+                } as usize;
                 (completed != 0).then_some(completed)
             }
             Ok(None) => {
@@ -148,47 +161,46 @@ impl JitEngine {
 }
 
 fn candidate_len(instructions: &[DecodedArmInstruction]) -> usize {
-    instructions
-        .iter()
-        .take_while(|decoded| instruction_supported(decoded))
-        .count()
+    let mut count = 0;
+    for decoded in instructions {
+        if !instruction_supported(decoded) {
+            break;
+        }
+        count += 1;
+        if decoded.kind == ArmInstructionKind::Branch {
+            break;
+        }
+    }
+    count
 }
 
 fn instruction_supported(decoded: &DecodedArmInstruction) -> bool {
     let instruction = decoded.instruction;
-    if instruction >> 28 != 0xe {
+    if instruction >> 28 == 0xf {
         return false;
     }
     match decoded.kind {
         ArmInstructionKind::DataProcessing => {
             let opcode = (instruction >> 21) & 0xf;
-            let set_flags = instruction & (1 << 20) != 0;
             let rn = (instruction >> 16) & 0xf;
             let rd = (instruction >> 12) & 0xf;
-            !set_flags
-                && !matches!(opcode, 5..=11)
-                && rn != 15
-                && rd != 15
-                && operand2_supported(instruction)
+            !matches!(opcode, 5..=7) && rn != 15 && rd != 15 && operand2_supported(instruction)
         }
         ArmInstructionKind::SingleTransfer => {
-            let load = instruction & (1 << 20) != 0;
             let rn = (instruction >> 16) & 0xf;
             let rd = (instruction >> 12) & 0xf;
-            load && rn != 15 && rd != 15 && transfer_offset_supported(instruction)
+            rn != 15 && rd != 15 && transfer_offset_supported(instruction)
         }
         ArmInstructionKind::CountLeadingZeros => (instruction >> 12) & 0xf != 15,
-        ArmInstructionKind::Multiply => {
-            instruction & (1 << 20) == 0
-                && [
-                    (instruction >> 16) & 0xf,
-                    (instruction >> 12) & 0xf,
-                    (instruction >> 8) & 0xf,
-                    instruction & 0xf,
-                ]
-                .iter()
-                .all(|register| *register != 15)
-        }
+        ArmInstructionKind::Multiply => [
+            (instruction >> 16) & 0xf,
+            (instruction >> 12) & 0xf,
+            (instruction >> 8) & 0xf,
+            instruction & 0xf,
+        ]
+        .iter()
+        .all(|register| *register != 15),
+        ArmInstructionKind::Branch => true,
         _ => false,
     }
 }
@@ -240,6 +252,7 @@ impl Compiler {
         let mut signature = Signature::new(target_config.default_call_conv);
         signature.params.push(AbiParam::new(pointer_type));
         signature.params.push(AbiParam::new(pointer_type));
+        signature.params.push(AbiParam::new(pointer_type));
         signature.returns.push(AbiParam::new(types::I64));
         self.context.func = Function::with_name_signature(
             cranelift::codegen::ir::UserFuncName::user(1, self.next_function_id as u32),
@@ -254,29 +267,10 @@ impl Compiler {
             builder.switch_to_block(entry);
             builder.seal_block(entry);
             let registers = builder.block_params(entry)[0];
-            let bus = builder.block_params(entry)[1];
-            let mut state = LoweringState::new(registers);
-            for (index, decoded) in instructions.iter().enumerate() {
-                lower_instruction(
-                    &mut builder,
-                    &mut state,
-                    bus,
-                    start.wrapping_add(index as u32 * 4),
-                    index,
-                    decoded.instruction,
-                    decoded.kind,
-                );
-            }
-            state.flush(&mut builder);
-            let next_pc = builder.ins().iconst(
-                types::I32,
-                i64::from(start.wrapping_add(instructions.len() as u32 * 4)),
-            );
-            builder
-                .ins()
-                .store(MemFlagsData::new(), next_pc, registers, 15 * 4);
-            let completed = builder.ins().iconst(types::I64, instructions.len() as i64);
-            builder.ins().return_(&[completed]);
+            let cpsr = builder.block_params(entry)[1];
+            let bus = builder.block_params(entry)[2];
+            let mut state = LoweringState::new(registers, cpsr);
+            lower_block(&mut builder, &mut state, bus, start, instructions);
             builder.finalize(target_config);
         }
 
@@ -301,16 +295,22 @@ impl Compiler {
 
 struct LoweringState {
     registers: Value,
+    cpsr: Value,
     values: [Option<Value>; REGISTER_COUNT],
     dirty: [bool; REGISTER_COUNT],
+    cpsr_value: Option<Value>,
+    cpsr_dirty: bool,
 }
 
 impl LoweringState {
-    fn new(registers: Value) -> Self {
+    fn new(registers: Value, cpsr: Value) -> Self {
         Self {
             registers,
+            cpsr,
             values: [None; REGISTER_COUNT],
             dirty: [false; REGISTER_COUNT],
+            cpsr_value: None,
+            cpsr_dirty: false,
         }
     }
 
@@ -333,6 +333,40 @@ impl LoweringState {
         self.dirty[index] = true;
     }
 
+    fn write_conditionally(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        index: usize,
+        value: Value,
+        condition: Value,
+    ) {
+        let old = self.read(builder, index);
+        self.write(index, builder.ins().select(condition, value, old));
+    }
+
+    fn read_cpsr(&mut self, builder: &mut FunctionBuilder<'_>) -> Value {
+        if let Some(value) = self.cpsr_value {
+            return value;
+        }
+        let value = builder
+            .ins()
+            .load(types::I32, MemFlagsData::new(), self.cpsr, 0);
+        self.cpsr_value = Some(value);
+        value
+    }
+
+    fn write_cpsr(&mut self, value: Value) {
+        self.cpsr_value = Some(value);
+        self.cpsr_dirty = true;
+    }
+
+    fn reset_cached_values(&mut self) {
+        self.values.fill(None);
+        self.dirty.fill(false);
+        self.cpsr_value = None;
+        self.cpsr_dirty = false;
+    }
+
     fn flush(&self, builder: &mut FunctionBuilder<'_>) {
         for index in 0..REGISTER_COUNT {
             if self.dirty[index] {
@@ -344,88 +378,106 @@ impl LoweringState {
                 );
             }
         }
+        if self.cpsr_dirty {
+            builder.ins().store(
+                MemFlagsData::new(),
+                self.cpsr_value.expect("dirty CPSR has a value"),
+                self.cpsr,
+                0,
+            );
+        }
     }
 }
 
-fn lower_instruction(
+fn lower_block(
     builder: &mut FunctionBuilder<'_>,
     state: &mut LoweringState,
     bus: Value,
-    pc: u32,
-    completed: usize,
-    instruction: u32,
-    kind: ArmInstructionKind,
+    start: u32,
+    instructions: &[DecodedArmInstruction],
 ) {
-    match kind {
-        ArmInstructionKind::DataProcessing => lower_data_processing(builder, state, instruction),
-        ArmInstructionKind::SingleTransfer => {
-            lower_single_transfer(builder, state, bus, pc, completed, instruction)
-        }
-        ArmInstructionKind::CountLeadingZeros => {
-            let rd = ((instruction >> 12) & 0xf) as usize;
-            let rm = (instruction & 0xf) as usize;
-            let value = state.read(builder, rm);
-            let result = builder.ins().clz(value);
-            state.write(rd, result);
-        }
-        ArmInstructionKind::Multiply => {
-            let rd = ((instruction >> 16) & 0xf) as usize;
-            let rn = ((instruction >> 12) & 0xf) as usize;
-            let rs = ((instruction >> 8) & 0xf) as usize;
-            let rm = (instruction & 0xf) as usize;
-            let left = state.read(builder, rm);
-            let right = state.read(builder, rs);
-            let mut result = builder.ins().imul(left, right);
-            if instruction & (1 << 21) != 0 {
-                let accumulator = state.read(builder, rn);
-                result = builder.ins().iadd(result, accumulator);
+    for (index, decoded) in instructions.iter().enumerate() {
+        let instruction = decoded.instruction;
+        let pc = start.wrapping_add(index as u32 * 4);
+        let condition = lower_condition(builder, state, instruction >> 28);
+        match decoded.kind {
+            ArmInstructionKind::DataProcessing => {
+                lower_data_processing(builder, state, instruction, condition)
             }
-            state.write(rd, result);
+            ArmInstructionKind::SingleTransfer => {
+                lower_single_transfer(builder, state, bus, pc, index, instruction, condition)
+            }
+            ArmInstructionKind::CountLeadingZeros => {
+                let rd = ((instruction >> 12) & 0xf) as usize;
+                let rm = (instruction & 0xf) as usize;
+                let value = state.read(builder, rm);
+                let result = builder.ins().clz(value);
+                state.write_conditionally(builder, rd, result, condition);
+            }
+            ArmInstructionKind::Multiply => lower_multiply(builder, state, instruction, condition),
+            ArmInstructionKind::Branch => {
+                lower_branch(builder, state, pc, index + 1, instruction, condition);
+                return;
+            }
+            _ => unreachable!(),
         }
-        _ => unreachable!(),
     }
+    let next_pc = iconst_u32(builder, start.wrapping_add(instructions.len() as u32 * 4));
+    emit_exit(builder, state, next_pc, instructions.len());
 }
 
 fn lower_data_processing(
     builder: &mut FunctionBuilder<'_>,
     state: &mut LoweringState,
     instruction: u32,
+    condition: Value,
 ) {
     let opcode = (instruction >> 21) & 0xf;
     let rn = ((instruction >> 16) & 0xf) as usize;
     let rd = ((instruction >> 12) & 0xf) as usize;
     let left = state.read(builder, rn);
-    let right = lower_operand2(builder, state, instruction);
-    let result = match opcode {
-        0 => builder.ins().band(left, right),
-        1 => builder.ins().bxor(left, right),
-        2 => builder.ins().isub(left, right),
-        3 => builder.ins().isub(right, left),
-        4 => builder.ins().iadd(left, right),
-        12 => builder.ins().bor(left, right),
-        13 => right,
-        14 => builder.ins().band_not(left, right),
-        15 => builder.ins().bnot(right),
+    let (right, shifter_carry) = lower_operand2(builder, state, instruction);
+    let (result, carry, overflow) = match opcode {
+        0 | 8 => (builder.ins().band(left, right), shifter_carry, None),
+        1 | 9 => (builder.ins().bxor(left, right), shifter_carry, None),
+        2 | 10 => lower_subtract(builder, left, right),
+        3 => lower_subtract(builder, right, left),
+        4 | 11 => lower_add(builder, left, right),
+        12 => (builder.ins().bor(left, right), shifter_carry, None),
+        13 => (right, shifter_carry, None),
+        14 => (builder.ins().band_not(left, right), shifter_carry, None),
+        15 => (builder.ins().bnot(right), shifter_carry, None),
         _ => unreachable!(),
     };
-    state.write(rd, result);
+    let test_only = matches!(opcode, 8..=11);
+    if !test_only {
+        state.write_conditionally(builder, rd, result, condition);
+    }
+    if instruction & (1 << 20) != 0 || test_only {
+        update_flags(builder, state, result, carry, overflow, condition);
+    }
 }
 
 fn lower_operand2(
     builder: &mut FunctionBuilder<'_>,
     state: &mut LoweringState,
     instruction: u32,
-) -> Value {
+) -> (Value, Option<Value>) {
     if instruction & (1 << 25) != 0 {
         let value = instruction & 0xff;
         let rotate = ((instruction >> 8) & 0xf) * 2;
-        return builder
-            .ins()
-            .iconst(types::I32, i64::from(value.rotate_right(rotate)));
+        let result = iconst_u32(builder, value.rotate_right(rotate));
+        let carry = if rotate == 0 {
+            flag_value(builder, state, C_FLAG)
+        } else {
+            bit_is_set(builder, result, 31)
+        };
+        return (result, Some(carry));
     }
     let value = state.read(builder, (instruction & 0xf) as usize);
-    lower_immediate_shift(
+    lower_immediate_shift_with_carry(
         builder,
+        state,
         value,
         (instruction >> 5) & 3,
         (instruction >> 7) & 0x1f,
@@ -451,6 +503,68 @@ fn lower_immediate_shift(
     }
 }
 
+fn lower_immediate_shift_with_carry(
+    builder: &mut FunctionBuilder<'_>,
+    state: &mut LoweringState,
+    value: Value,
+    kind: u32,
+    amount: u32,
+) -> (Value, Option<Value>) {
+    let result = lower_immediate_shift(builder, value, kind, amount);
+    let carry = match (kind, amount) {
+        (0, 0) => flag_value(builder, state, C_FLAG),
+        (0, _) => bit_is_set(builder, value, 32 - amount),
+        (1 | 2, 0) => bit_is_set(builder, value, 31),
+        (1 | 2, _) | (3, _) => bit_is_set(builder, value, amount - 1),
+        _ => unreachable!(),
+    };
+    (result, Some(carry))
+}
+
+fn lower_add(
+    builder: &mut FunctionBuilder<'_>,
+    left: Value,
+    right: Value,
+) -> (Value, Option<Value>, Option<Value>) {
+    let (result, carry) = builder.ins().uadd_overflow(left, right);
+    let (_, overflow) = builder.ins().sadd_overflow(left, right);
+    (result, Some(carry), Some(overflow))
+}
+
+fn lower_subtract(
+    builder: &mut FunctionBuilder<'_>,
+    left: Value,
+    right: Value,
+) -> (Value, Option<Value>, Option<Value>) {
+    let (result, borrow) = builder.ins().usub_overflow(left, right);
+    let (_, overflow) = builder.ins().ssub_overflow(left, right);
+    let carry = invert_bool(builder, borrow);
+    (result, Some(carry), Some(overflow))
+}
+
+fn lower_multiply(
+    builder: &mut FunctionBuilder<'_>,
+    state: &mut LoweringState,
+    instruction: u32,
+    condition: Value,
+) {
+    let rd = ((instruction >> 16) & 0xf) as usize;
+    let rn = ((instruction >> 12) & 0xf) as usize;
+    let rs = ((instruction >> 8) & 0xf) as usize;
+    let rm = (instruction & 0xf) as usize;
+    let left = state.read(builder, rm);
+    let right = state.read(builder, rs);
+    let mut result = builder.ins().imul(left, right);
+    if instruction & (1 << 21) != 0 {
+        let accumulator = state.read(builder, rn);
+        result = builder.ins().iadd(result, accumulator);
+    }
+    state.write_conditionally(builder, rd, result, condition);
+    if instruction & (1 << 20) != 0 {
+        update_flags(builder, state, result, None, None, condition);
+    }
+}
+
 fn lower_single_transfer(
     builder: &mut FunctionBuilder<'_>,
     state: &mut LoweringState,
@@ -458,6 +572,7 @@ fn lower_single_transfer(
     pc: u32,
     completed: usize,
     instruction: u32,
+    condition: Value,
 ) {
     let rn = ((instruction >> 16) & 0xf) as usize;
     let rd = ((instruction >> 12) & 0xf) as usize;
@@ -483,12 +598,37 @@ fn lower_single_transfer(
     let pre = instruction & (1 << 24) != 0;
     let address = if pre { adjusted } else { base };
     let byte = instruction & (1 << 22) != 0;
-    let callback = if byte { jit_read8 } else { jit_read32 };
-    let packed = emit_read_call(builder, bus, address, callback as usize);
-    let success_bits = builder.ins().ushr_imm_u(packed, 32);
-    let failed = builder
+    let load = instruction & (1 << 20) != 0;
+    let store_value = (!load).then(|| state.read(builder, rd));
+
+    state.flush(builder);
+    let execute_block = builder.create_block();
+    let continuation_block = builder.create_block();
+    builder
         .ins()
-        .icmp_imm_u(cranelift::prelude::IntCC::Equal, success_bits, 0);
+        .brif(condition, execute_block, &[], continuation_block, &[]);
+    builder.switch_to_block(execute_block);
+    builder.seal_block(execute_block);
+
+    let packed = if load {
+        let callback = if byte { jit_read8 } else { jit_read32 };
+        emit_read_call(builder, bus, address, callback as usize)
+    } else {
+        let callback = if byte { jit_write8 } else { jit_write32 };
+        emit_write_call(
+            builder,
+            bus,
+            address,
+            store_value.expect("store value was captured"),
+            callback as usize,
+        )
+    };
+    let status = if load {
+        builder.ins().ushr_imm_u(packed, 32)
+    } else {
+        packed
+    };
+    let failed = builder.ins().icmp_imm_u(IntCC::Equal, status, 0);
     let failure_block = builder.create_block();
     let success_block = builder.create_block();
     builder
@@ -497,7 +637,6 @@ fn lower_single_transfer(
 
     builder.switch_to_block(failure_block);
     builder.seal_block(failure_block);
-    state.flush(builder);
     let current_pc = builder.ins().iconst(types::I32, i64::from(pc));
     builder
         .ins()
@@ -507,15 +646,45 @@ fn lower_single_transfer(
 
     builder.switch_to_block(success_block);
     builder.seal_block(success_block);
-    let mut value = builder.ins().ireduce(types::I32, packed);
-    if !byte {
-        let rotate = builder.ins().ishl_imm_u(address, 3);
-        value = builder.ins().rotr(value, rotate);
+    if load {
+        let mut value = builder.ins().ireduce(types::I32, packed);
+        if !byte {
+            let rotate = builder.ins().ishl_imm_u(address, 3);
+            value = builder.ins().rotr(value, rotate);
+        }
+        builder
+            .ins()
+            .store(MemFlagsData::new(), value, state.registers, (rd * 4) as i32);
     }
-    state.write(rd, value);
     if !pre || instruction & (1 << 21) != 0 {
-        state.write(rn, adjusted);
+        builder.ins().store(
+            MemFlagsData::new(),
+            adjusted,
+            state.registers,
+            (rn * 4) as i32,
+        );
     }
+    if !load {
+        let invalidated = builder.ins().icmp_imm_u(IntCC::Equal, status, 2);
+        let invalidated_block = builder.create_block();
+        builder
+            .ins()
+            .brif(invalidated, invalidated_block, &[], continuation_block, &[]);
+        builder.switch_to_block(invalidated_block);
+        builder.seal_block(invalidated_block);
+        let next_pc = iconst_u32(builder, pc.wrapping_add(4));
+        builder
+            .ins()
+            .store(MemFlagsData::new(), next_pc, state.registers, 15 * 4);
+        let count = builder.ins().iconst(types::I64, (completed + 1) as i64);
+        builder.ins().return_(&[count]);
+    } else {
+        builder.ins().jump(continuation_block, &[]);
+    }
+
+    builder.switch_to_block(continuation_block);
+    builder.seal_block(continuation_block);
+    state.reset_cached_values();
 }
 
 fn emit_read_call(
@@ -536,6 +705,158 @@ fn emit_read_call(
     builder.inst_results(call)[0]
 }
 
+fn emit_write_call(
+    builder: &mut FunctionBuilder<'_>,
+    bus: Value,
+    address: Value,
+    value: Value,
+    callback: usize,
+) -> Value {
+    let mut signature = Signature::new(builder.func.signature.call_conv);
+    signature.params.push(AbiParam::new(types::I64));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::I64));
+    let signature = builder.import_signature(signature);
+    let function = builder.ins().iconst(types::I64, callback as i64);
+    let call = builder
+        .ins()
+        .call_indirect(signature, function, &[bus, address, value]);
+    builder.inst_results(call)[0]
+}
+
+fn lower_branch(
+    builder: &mut FunctionBuilder<'_>,
+    state: &mut LoweringState,
+    pc: u32,
+    completed: usize,
+    instruction: u32,
+    condition: Value,
+) {
+    let offset = (((instruction & 0x00ff_ffff) << 8) as i32 >> 6) as u32;
+    let target = iconst_u32(builder, pc.wrapping_add(8).wrapping_add(offset));
+    let fallthrough = iconst_u32(builder, pc.wrapping_add(4));
+    let next_pc = builder.ins().select(condition, target, fallthrough);
+    if instruction & (1 << 24) != 0 {
+        let link = iconst_u32(builder, pc.wrapping_add(4));
+        state.write_conditionally(builder, 14, link, condition);
+    }
+    emit_exit(builder, state, next_pc, completed);
+}
+
+fn emit_exit(
+    builder: &mut FunctionBuilder<'_>,
+    state: &mut LoweringState,
+    next_pc: Value,
+    completed: usize,
+) {
+    state.write(15, next_pc);
+    state.flush(builder);
+    let count = builder.ins().iconst(types::I64, completed as i64);
+    builder.ins().return_(&[count]);
+}
+
+fn lower_condition(
+    builder: &mut FunctionBuilder<'_>,
+    state: &mut LoweringState,
+    condition: u32,
+) -> Value {
+    if condition == 14 {
+        return builder.ins().iconst(types::I8, 1);
+    }
+    let n = flag_value(builder, state, N_FLAG);
+    let z = flag_value(builder, state, Z_FLAG);
+    let c = flag_value(builder, state, C_FLAG);
+    let v = flag_value(builder, state, V_FLAG);
+    match condition {
+        0 => z,
+        1 => invert_bool(builder, z),
+        2 => c,
+        3 => invert_bool(builder, c),
+        4 => n,
+        5 => invert_bool(builder, n),
+        6 => v,
+        7 => invert_bool(builder, v),
+        8 => {
+            let not_z = invert_bool(builder, z);
+            builder.ins().band(c, not_z)
+        }
+        9 => {
+            let not_c = invert_bool(builder, c);
+            builder.ins().bor(not_c, z)
+        }
+        10 => builder.ins().icmp(IntCC::Equal, n, v),
+        11 => builder.ins().icmp(IntCC::NotEqual, n, v),
+        12 => {
+            let not_z = invert_bool(builder, z);
+            let equal = builder.ins().icmp(IntCC::Equal, n, v);
+            builder.ins().band(not_z, equal)
+        }
+        13 => {
+            let unequal = builder.ins().icmp(IntCC::NotEqual, n, v);
+            builder.ins().bor(z, unequal)
+        }
+        _ => unreachable!("condition support checked before lowering"),
+    }
+}
+
+fn flag_value(builder: &mut FunctionBuilder<'_>, state: &mut LoweringState, flag: u32) -> Value {
+    let cpsr = state.read_cpsr(builder);
+    let masked = builder.ins().band_imm_u(cpsr, i64::from(flag));
+    builder.ins().icmp_imm_u(IntCC::NotEqual, masked, 0)
+}
+
+fn bit_is_set(builder: &mut FunctionBuilder<'_>, value: Value, bit: u32) -> Value {
+    let shifted = builder.ins().ushr_imm_u(value, i64::from(bit));
+    let masked = builder.ins().band_imm_u(shifted, 1);
+    builder.ins().icmp_imm_u(IntCC::NotEqual, masked, 0)
+}
+
+fn invert_bool(builder: &mut FunctionBuilder<'_>, value: Value) -> Value {
+    builder.ins().icmp_imm_u(IntCC::Equal, value, 0)
+}
+
+fn update_flags(
+    builder: &mut FunctionBuilder<'_>,
+    state: &mut LoweringState,
+    result: Value,
+    carry: Option<Value>,
+    overflow: Option<Value>,
+    condition: Value,
+) {
+    let old = state.read_cpsr(builder);
+    let mut clear_mask = N_FLAG | Z_FLAG;
+    if carry.is_some() {
+        clear_mask |= C_FLAG;
+    }
+    if overflow.is_some() {
+        clear_mask |= V_FLAG;
+    }
+    let mut updated = builder.ins().band_imm_u(old, i64::from(!clear_mask));
+    let negative = bit_is_set(builder, result, 31);
+    let zero = builder.ins().icmp_imm_u(IntCC::Equal, result, 0);
+    updated = insert_flag(builder, updated, negative, N_FLAG);
+    updated = insert_flag(builder, updated, zero, Z_FLAG);
+    if let Some(carry) = carry {
+        updated = insert_flag(builder, updated, carry, C_FLAG);
+    }
+    if let Some(overflow) = overflow {
+        updated = insert_flag(builder, updated, overflow, V_FLAG);
+    }
+    state.write_cpsr(builder.ins().select(condition, updated, old));
+}
+
+fn insert_flag(builder: &mut FunctionBuilder<'_>, cpsr: Value, enabled: Value, flag: u32) -> Value {
+    let set = iconst_u32(builder, flag);
+    let clear = iconst_u32(builder, 0);
+    let value = builder.ins().select(enabled, set, clear);
+    builder.ins().bor(cpsr, value)
+}
+
+fn iconst_u32(builder: &mut FunctionBuilder<'_>, value: u32) -> Value {
+    builder.ins().iconst(types::I32, i64::from(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,11 +872,13 @@ mod tests {
         let mut compiler = Compiler::new().unwrap();
         let block = compiler.compile(start, &instructions).unwrap().unwrap();
         let mut registers = [0_u32; REGISTER_COUNT];
+        let mut cpsr = 0_u32;
         registers[0] = 10;
         registers[2] = 5;
 
         // SAFETY: The compiler created this function and the block performs no memory access.
-        let completed = unsafe { (block.function)(registers.as_mut_ptr(), std::ptr::null_mut()) };
+        let completed =
+            unsafe { (block.function)(registers.as_mut_ptr(), &mut cpsr, std::ptr::null_mut()) };
 
         assert_eq!(completed, 3);
         assert_eq!(registers[0], 11);
@@ -565,7 +888,58 @@ mod tests {
     }
 
     #[test]
-    fn candidate_stops_before_stateful_or_conditional_instructions() {
+    fn compiled_flags_conditions_and_branch_match_arm_semantics() {
+        let start = 0x1000_1000;
+        let instructions = [
+            DecodedArmInstruction::decode(0xe350_000a),
+            DecodedArmInstruction::decode(0x03a0_1007),
+            DecodedArmInstruction::decode(0x1281_1001),
+            DecodedArmInstruction::decode(0xea00_0001),
+        ];
+        let mut compiler = Compiler::new().unwrap();
+        let block = compiler.compile(start, &instructions).unwrap().unwrap();
+        let mut equal_registers = [0_u32; REGISTER_COUNT];
+        let mut equal_cpsr = 0_u32;
+        equal_registers[0] = 10;
+
+        // SAFETY: The compiler created this function and the block performs no memory access.
+        let equal_completed = unsafe {
+            (block.function)(
+                equal_registers.as_mut_ptr(),
+                &mut equal_cpsr,
+                std::ptr::null_mut(),
+            )
+        };
+
+        assert_eq!(equal_completed, 4);
+        assert_eq!(equal_registers[1], 7);
+        assert_eq!(equal_registers[15], start + 24);
+        assert_eq!(
+            equal_cpsr & (N_FLAG | Z_FLAG | C_FLAG | V_FLAG),
+            Z_FLAG | C_FLAG
+        );
+
+        let mut different_registers = [0_u32; REGISTER_COUNT];
+        let mut different_cpsr = 0_u32;
+        different_registers[0] = 9;
+
+        // SAFETY: The compiler created this function and the block performs no memory access.
+        let different_completed = unsafe {
+            (block.function)(
+                different_registers.as_mut_ptr(),
+                &mut different_cpsr,
+                std::ptr::null_mut(),
+            )
+        };
+
+        assert_eq!(different_completed, 4);
+        assert_eq!(different_registers[1], 1);
+        assert_eq!(different_registers[15], start + 24);
+        assert_eq!(different_cpsr & (N_FLAG | Z_FLAG | C_FLAG | V_FLAG), N_FLAG);
+    }
+
+    #[test]
+    fn candidate_accepts_stateful_and_conditional_instructions() {
         let instructions = [
             DecodedArmInstruction::decode(0xe280_0001),
             DecodedArmInstruction::decode(0xe590_1000),
@@ -573,6 +947,6 @@ mod tests {
             DecodedArmInstruction::decode(0x1280_0001),
         ];
 
-        assert_eq!(candidate_len(&instructions), 2);
+        assert_eq!(candidate_len(&instructions), 4);
     }
 }

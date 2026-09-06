@@ -1,7 +1,7 @@
 use super::cpu::{Bus, Cpu, DecodedArmInstruction, ExecutionState};
 use super::firmware_archive::FirmwareArchive;
 #[cfg(feature = "jit")]
-use super::jit::JitEngine;
+use super::jit::{JitCpuContext, JitEngine};
 use super::memory::{
     Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE, LEGACY_GRAPHICS_STRIDE,
     LEGACY_GRAPHICS_SURFACE, STACK_BASE, STACK_SIZE,
@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 mod sdk_hle;
 #[cfg(feature = "jit")]
-pub(crate) use sdk_hle::{jit_read32, jit_read8};
+pub(crate) use sdk_hle::{jit_read32, jit_read8, jit_write32, jit_write8};
 
 const INSTRUCTIONS_PER_SLICE: u64 = 3_000_000;
 const MAX_INSTRUCTION_BLOCK_LEN: usize = 64;
