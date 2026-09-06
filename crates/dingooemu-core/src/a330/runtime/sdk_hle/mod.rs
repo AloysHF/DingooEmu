@@ -143,6 +143,8 @@ impl RuntimeBus<'_> {
         #[cfg(feature = "jit")]
         let jit_result = {
             let bus = self as *mut RuntimeBus<'_> as *mut u8;
+            let heap_base = self.memory.heap_base();
+            let heap = self.memory.jit_heap_ptr();
             jit.execute(
                 address,
                 *self.code_generation,
@@ -152,6 +154,8 @@ impl RuntimeBus<'_> {
                     registers: &mut cpu.r,
                     cpsr: &mut cpu.cpsr,
                     bus,
+                    heap,
+                    heap_base,
                 },
             )
         };

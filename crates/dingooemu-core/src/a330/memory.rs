@@ -18,8 +18,8 @@ const LEGACY_MMIO_BASE: u32 = 0x0400_0000;
 const LEGACY_MMIO_SIZE: usize = 0x0010_0000;
 const LEGACY_AUDIO_MMIO_BASE: u32 = 0x08a0_0000;
 const LEGACY_AUDIO_MMIO_SIZE: usize = 0x0001_0000;
-const LEGACY_SYSTEM_MMIO_BASE: u32 = 0x0930_0000;
-const LEGACY_SYSTEM_MMIO_SIZE: usize = 0x0001_0000;
+pub(crate) const LEGACY_SYSTEM_MMIO_BASE: u32 = 0x0930_0000;
+pub(crate) const LEGACY_SYSTEM_MMIO_SIZE: usize = 0x0001_0000;
 pub(crate) const LEGACY_GRAPHICS_SURFACE: u32 = 0x0930_201c;
 pub(crate) const LEGACY_GRAPHICS_STRIDE: u32 = 0x0930_2020;
 pub(crate) const LEGACY_GRAPHICS_STATUS: u32 = 0x0930_3054;
@@ -125,6 +125,11 @@ impl Memory {
     }
     pub fn framebuffer_mut(&mut self) -> &mut [u8] {
         &mut self.framebuffer
+    }
+
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_heap_ptr(&mut self) -> *mut u8 {
+        self.heap.as_mut_ptr()
     }
 
     pub(crate) fn is_cheat_writable_range(&self, address: u32, size: usize) -> bool {
