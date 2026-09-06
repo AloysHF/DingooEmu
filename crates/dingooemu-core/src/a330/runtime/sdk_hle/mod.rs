@@ -253,7 +253,7 @@ pub(crate) unsafe extern "C" fn jit_read32(bus: *const u8, address: u32) -> u64 
 pub(crate) unsafe extern "C" fn jit_write8(bus: *mut u8, address: u32, value: u32) -> u64 {
     // SAFETY: JIT calls provide the live RuntimeBus pointer owned by the runtime.
     let bus = unsafe { &mut *(bus.cast::<RuntimeBus<'_>>()) };
-    if bus.write_memory(address, &[value as u8]).is_err() {
+    if bus.write8(address, value as u8).is_err() {
         return 0;
     }
     if bus.instruction_cache_invalidated {
@@ -267,7 +267,7 @@ pub(crate) unsafe extern "C" fn jit_write8(bus: *mut u8, address: u32, value: u3
 pub(crate) unsafe extern "C" fn jit_write32(bus: *mut u8, address: u32, value: u32) -> u64 {
     // SAFETY: JIT calls provide the live RuntimeBus pointer owned by the runtime.
     let bus = unsafe { &mut *(bus.cast::<RuntimeBus<'_>>()) };
-    if bus.write_memory(address, &value.to_le_bytes()).is_err() {
+    if bus.write32(address, value).is_err() {
         return 0;
     }
     if bus.instruction_cache_invalidated {
