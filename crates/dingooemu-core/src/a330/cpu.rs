@@ -8,6 +8,40 @@ const V: u32 = 1 << 28;
 const Q: u32 = 1 << 27;
 const T: u32 = 1 << 5;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ArmInstructionKind {
+    #[default]
+    Unsupported,
+    BlxImmediate,
+    BranchExchange,
+    BranchLinkExchange,
+    CountLeadingZeros,
+    SignedHalfwordMultiply,
+    Multiply,
+    LongMultiply,
+    HalfTransfer,
+    DataProcessing,
+    SingleTransfer,
+    BlockTransfer,
+    Branch,
+    Svc,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DecodedArmInstruction {
+    pub(crate) instruction: u32,
+    pub(crate) kind: ArmInstructionKind,
+}
+
+impl DecodedArmInstruction {
+    pub(crate) fn decode(instruction: u32) -> Self {
+        Self {
+            instruction,
+            kind: decode_arm_instruction(instruction),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExecutionState {
     #[default]
@@ -100,7 +134,7 @@ impl Cpu {
             ExecutionState::Arm => {
                 let instruction = bus.fetch32(pc)?;
                 self.r[15] = pc.wrapping_add(4);
-                self.execute_arm(instruction, pc, bus)
+                self.execute_decoded_arm(DecodedArmInstruction::decode(instruction), pc, bus)
             }
             ExecutionState::Thumb => {
                 let instruction = bus.fetch16(pc)?;
@@ -108,6 +142,27 @@ impl Cpu {
                 self.execute_thumb(instruction, pc, bus)
             }
         };
+        self.finish_step(result)
+    }
+
+    #[inline(always)]
+    pub(crate) fn step_fetched_arm<B: Bus>(
+        &mut self,
+        decoded: DecodedArmInstruction,
+        bus: &mut B,
+    ) -> Result<()> {
+        if !self.running {
+            return Ok(());
+        }
+        debug_assert_eq!(self.state, ExecutionState::Arm);
+        let pc = self.r[15];
+        self.r[15] = pc.wrapping_add(4);
+        let result = self.execute_decoded_arm(decoded, pc, bus);
+        self.finish_step(result)
+    }
+
+    #[inline(always)]
+    fn finish_step(&mut self, result: Result<()>) -> Result<()> {
         match result {
             Ok(()) => {}
             Err(SimulatorError::InvalidInstruction { pc, instr }) => {
@@ -134,72 +189,62 @@ impl Cpu {
         Ok(self.instruction_count.wrapping_sub(initial))
     }
 
-    fn execute_arm<B: Bus>(&mut self, instruction: u32, pc: u32, bus: &mut B) -> Result<()> {
+    #[inline(always)]
+    fn execute_decoded_arm<B: Bus>(
+        &mut self,
+        decoded: DecodedArmInstruction,
+        pc: u32,
+        bus: &mut B,
+    ) -> Result<()> {
+        let instruction = decoded.instruction;
         let condition = instruction >> 28;
         if condition != 0xf && !self.condition_passed(condition) {
             return Ok(());
         }
-        if condition == 0xf && instruction & 0x0e00_0000 == 0x0a00_0000 {
-            let offset = (((instruction & 0x00ff_ffff) << 8) as i32 >> 6) as u32;
-            let target = pc
-                .wrapping_add(8)
-                .wrapping_add(offset)
-                .wrapping_add((instruction >> 23) & 2);
-            self.r[14] = pc.wrapping_add(4);
-            self.state = ExecutionState::Thumb;
-            self.cpsr |= T;
-            self.r[15] = target & !1;
-            return Ok(());
-        }
-        if instruction & 0x0fff_fff0 == 0x012f_ff10 {
-            return self.branch_exchange(self.read_reg((instruction & 0xf) as usize, pc, false));
-        }
-        if instruction & 0x0fff_fff0 == 0x012f_ff30 {
-            self.r[14] = pc.wrapping_add(4);
-            return self.branch_exchange(self.read_reg((instruction & 0xf) as usize, pc, false));
-        }
-        if instruction & 0x0fff_0ff0 == 0x016f_0f10 {
-            let rd = ((instruction >> 12) & 0xf) as usize;
-            let rm = (instruction & 0xf) as usize;
-            self.write_reg(rd, self.read_reg(rm, pc, false).leading_zeros());
-            return Ok(());
-        }
-        match (instruction >> 25) & 7 {
-            0 | 1 => self.execute_arm_data_or_misc(instruction, pc, bus),
-            2 | 3 => self.execute_single_transfer(instruction, pc, bus),
-            4 => self.execute_block_transfer(instruction, pc, bus),
-            5 => self.execute_branch(instruction, pc),
-            7 if instruction & (1 << 24) != 0 => bus.svc(self, instruction & 0x00ff_ffff),
-            _ => Err(SimulatorError::InvalidInstruction {
+        match decoded.kind {
+            ArmInstructionKind::BlxImmediate => {
+                let offset = (((instruction & 0x00ff_ffff) << 8) as i32 >> 6) as u32;
+                let target = pc
+                    .wrapping_add(8)
+                    .wrapping_add(offset)
+                    .wrapping_add((instruction >> 23) & 2);
+                self.r[14] = pc.wrapping_add(4);
+                self.state = ExecutionState::Thumb;
+                self.cpsr |= T;
+                self.r[15] = target & !1;
+                Ok(())
+            }
+            ArmInstructionKind::BranchExchange => {
+                self.branch_exchange(self.read_reg((instruction & 0xf) as usize, pc, false))
+            }
+            ArmInstructionKind::BranchLinkExchange => {
+                self.r[14] = pc.wrapping_add(4);
+                self.branch_exchange(self.read_reg((instruction & 0xf) as usize, pc, false))
+            }
+            ArmInstructionKind::CountLeadingZeros => {
+                let rd = ((instruction >> 12) & 0xf) as usize;
+                let rm = (instruction & 0xf) as usize;
+                self.write_reg(rd, self.read_reg(rm, pc, false).leading_zeros());
+                Ok(())
+            }
+            ArmInstructionKind::SignedHalfwordMultiply => {
+                self.execute_signed_halfword_multiply(instruction, pc)
+            }
+            ArmInstructionKind::Multiply => self.execute_multiply(instruction, pc),
+            ArmInstructionKind::LongMultiply => self.execute_long_multiply(instruction, pc),
+            ArmInstructionKind::HalfTransfer => self.execute_half_transfer(instruction, pc, bus),
+            ArmInstructionKind::DataProcessing => self.execute_data_processing(instruction, pc),
+            ArmInstructionKind::SingleTransfer => {
+                self.execute_single_transfer(instruction, pc, bus)
+            }
+            ArmInstructionKind::BlockTransfer => self.execute_block_transfer(instruction, pc, bus),
+            ArmInstructionKind::Branch => self.execute_branch(instruction, pc),
+            ArmInstructionKind::Svc => bus.svc(self, instruction & 0x00ff_ffff),
+            ArmInstructionKind::Unsupported => Err(SimulatorError::InvalidInstruction {
                 pc,
                 instr: instruction,
             }),
         }
-    }
-
-    fn execute_arm_data_or_misc<B: Bus>(
-        &mut self,
-        instruction: u32,
-        pc: u32,
-        bus: &mut B,
-    ) -> Result<()> {
-        let signed_halfword_multiply = instruction & 0x0ff0_0090;
-        if matches!(
-            signed_halfword_multiply,
-            0x0100_0080 | 0x0140_0080 | 0x0160_0080
-        ) {
-            return self.execute_signed_halfword_multiply(instruction, pc);
-        }
-        if instruction & 0x0fc0_00f0 == 0x0000_0090 {
-            return self.execute_multiply(instruction, pc);
-        }
-        if instruction & 0x0f80_00f0 == 0x0080_0090 {
-            return self.execute_long_multiply(instruction, pc);
-        }
-        if instruction & 0x0e00_0090 == 0x0000_0090 {
-            return self.execute_half_transfer(instruction, pc, bus);
-        }
-        self.execute_data_processing(instruction, pc)
     }
 
     fn execute_data_processing(&mut self, instruction: u32, pc: u32) -> Result<()> {
@@ -914,6 +959,45 @@ impl Cpu {
     }
 }
 
+fn decode_arm_instruction(instruction: u32) -> ArmInstructionKind {
+    if instruction >> 28 == 0xf && instruction & 0x0e00_0000 == 0x0a00_0000 {
+        return ArmInstructionKind::BlxImmediate;
+    }
+    if instruction & 0x0fff_fff0 == 0x012f_ff10 {
+        return ArmInstructionKind::BranchExchange;
+    }
+    if instruction & 0x0fff_fff0 == 0x012f_ff30 {
+        return ArmInstructionKind::BranchLinkExchange;
+    }
+    if instruction & 0x0fff_0ff0 == 0x016f_0f10 {
+        return ArmInstructionKind::CountLeadingZeros;
+    }
+    let signed_halfword_multiply = instruction & 0x0ff0_0090;
+    if matches!(
+        signed_halfword_multiply,
+        0x0100_0080 | 0x0140_0080 | 0x0160_0080
+    ) {
+        return ArmInstructionKind::SignedHalfwordMultiply;
+    }
+    if instruction & 0x0fc0_00f0 == 0x0000_0090 {
+        return ArmInstructionKind::Multiply;
+    }
+    if instruction & 0x0f80_00f0 == 0x0080_0090 {
+        return ArmInstructionKind::LongMultiply;
+    }
+    if instruction & 0x0e00_0090 == 0x0000_0090 {
+        return ArmInstructionKind::HalfTransfer;
+    }
+    match (instruction >> 25) & 7 {
+        0 | 1 => ArmInstructionKind::DataProcessing,
+        2 | 3 => ArmInstructionKind::SingleTransfer,
+        4 => ArmInstructionKind::BlockTransfer,
+        5 => ArmInstructionKind::Branch,
+        7 if instruction & (1 << 24) != 0 => ArmInstructionKind::Svc,
+        _ => ArmInstructionKind::Unsupported,
+    }
+}
+
 fn add_with_carry(left: u32, right: u32, carry: u32) -> (u32, bool, bool) {
     let wide = u64::from(left) + u64::from(right) + u64::from(carry);
     let result = wide as u32;
@@ -962,6 +1046,7 @@ fn shift(value: u32, kind: u32, amount: u32, old_carry: bool, immediate: bool) -
 mod tests {
     use super::*;
 
+    #[derive(Clone)]
     struct TestBus {
         data: Vec<u8>,
         svc: Option<u32>,
@@ -1046,6 +1131,41 @@ mod tests {
         let mut cpu = Cpu::new(0, 0xf00, 0xffff_ffff);
         cpu.start();
         cpu
+    }
+
+    #[test]
+    fn decoded_arm_execution_matches_regular_steps() {
+        let instructions = [
+            0xe3a0_0001, // MOV r0, #1
+            0x03a0_0001, // MOVEQ r0, #1
+            0xe16f_0f11, // CLZ r0, r1
+            0xe000_0291, // MUL r0, r1, r2
+            0xe581_2000, // STR r2, [r1]
+            0xea00_0001, // B +4
+            0xef00_0123, // SVC #0x123
+        ];
+
+        for instruction in instructions {
+            let mut regular_bus = TestBus::new(&[instruction]);
+            let mut decoded_bus = regular_bus.clone();
+            let mut regular = running_cpu();
+            regular.r[1] = 0x20;
+            regular.r[2] = 3;
+            let mut decoded = regular.clone();
+
+            regular.step(&mut regular_bus).unwrap();
+            decoded
+                .step_fetched_arm(DecodedArmInstruction::decode(instruction), &mut decoded_bus)
+                .unwrap();
+
+            assert_eq!(decoded.r, regular.r);
+            assert_eq!(decoded.cpsr, regular.cpsr);
+            assert_eq!(decoded.instruction_count, regular.instruction_count);
+            assert_eq!(decoded.state, regular.state);
+            assert_eq!(decoded.running, regular.running);
+            assert_eq!(decoded_bus.data, regular_bus.data);
+            assert_eq!(decoded_bus.svc, regular_bus.svc);
+        }
     }
 
     #[test]

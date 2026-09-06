@@ -151,7 +151,7 @@ impl RuntimeBus<'_> {
             if address == 0 {
                 return 0;
             }
-            if self.memory.write32(address, stream).is_err() {
+            if self.write_memory(address, &stream.to_le_bytes()).is_err() {
                 self.deallocate(address);
                 return 0;
             }
@@ -224,7 +224,7 @@ impl RuntimeBus<'_> {
                 return Ok(0);
             }
             let data = self.files[&handle].data.clone();
-            self.memory.write_bytes(address, &data)?;
+            self.write_memory(address, &data)?;
             self.files.get_mut(&handle).unwrap().data_address = address;
             return Ok(address);
         }
@@ -250,7 +250,7 @@ impl RuntimeBus<'_> {
             file.position += length;
             data
         };
-        self.memory.write_bytes(destination, &data)?;
+        self.write_memory(destination, &data)?;
         Ok(if read_len != 0 {
             (data.len() / read_len as usize) as u32
         } else {
@@ -284,7 +284,7 @@ impl RuntimeBus<'_> {
             file.position += length;
             data
         };
-        self.memory.write_bytes(destination, &data)?;
+        self.write_memory(destination, &data)?;
         Ok(data.len() as u32 / size)
     }
 
@@ -423,8 +423,8 @@ impl RuntimeBus<'_> {
         let name = name.as_bytes();
         let length = name.len().min(FILE_SEARCH_NAME_CAPACITY - 1);
         let destination = data_address.wrapping_add(FILE_SEARCH_NAME_OFFSET);
-        self.memory.write_bytes(destination, &name[..length])?;
-        self.memory.write8(destination + length as u32, 0)
+        self.write_memory(destination, &name[..length])?;
+        self.write_memory(destination + length as u32, &[0])
     }
 
     pub(super) fn seek_file(&mut self, handle: u32, offset: i32, origin: u32) -> u32 {
@@ -485,9 +485,8 @@ impl RuntimeBus<'_> {
             return Ok(false);
         }
         let count = value.len().min(capacity.saturating_sub(1) as usize);
-        self.memory
-            .write_bytes(address, &value.as_bytes()[..count])?;
-        self.memory.write8(address + count as u32, 0)?;
+        self.write_memory(address, &value.as_bytes()[..count])?;
+        self.write_memory(address + count as u32, &[0])?;
         Ok(count == value.len())
     }
 }

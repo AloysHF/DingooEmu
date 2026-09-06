@@ -17,14 +17,14 @@ impl RuntimeBus<'_> {
             }
             "memset" => {
                 let data = vec![cpu.r[1] as u8; cpu.r[2] as usize];
-                self.memory.write_bytes(cpu.r[0], &data)?;
+                self.write_memory(cpu.r[0], &data)?;
             }
             "memcpy" | "memmove" => {
                 let data = self
                     .memory
                     .read_bytes(cpu.r[1], cpu.r[2] as usize)?
                     .to_vec();
-                self.memory.write_bytes(cpu.r[0], &data)?;
+                self.write_memory(cpu.r[0], &data)?;
             }
             "printf" | "fprintf" => cpu.r[0] = 0,
             "stricmp" | "strcasecmp" => {
@@ -54,7 +54,7 @@ impl RuntimeBus<'_> {
     pub(super) fn allocate_zeroed(&mut self, size: u32) -> Result<u32> {
         let address = self.allocate(size);
         if address != 0 && size != 0 {
-            self.memory.write_bytes(address, &vec![0; size as usize])?;
+            self.write_memory(address, &vec![0; size as usize])?;
         }
         Ok(address)
     }
@@ -77,8 +77,8 @@ impl RuntimeBus<'_> {
             }
         };
         let address = DYNAMIC_THUNK_BASE + index as u32 * 8;
-        self.memory.write32(address, 0xef80_0000 | index as u32)?;
-        self.memory.write32(address + 4, 0xe12f_ff1e)?;
+        self.write_memory(address, &(0xef80_0000 | index as u32).to_le_bytes())?;
+        self.write_memory(address + 4, &0xe12f_ff1e_u32.to_le_bytes())?;
         Ok(address)
     }
 }

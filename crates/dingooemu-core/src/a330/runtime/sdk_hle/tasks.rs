@@ -54,7 +54,7 @@ impl RuntimeBus<'_> {
                     Some(count) if *count > 0 => {
                         *count -= 1;
                         if cpu.r[2] != 0 {
-                            self.memory.write8(cpu.r[2], 0)?;
+                            self.write_memory(cpu.r[2], &[0])?;
                         }
                         cpu.r[0] = 0;
                     }
@@ -68,7 +68,7 @@ impl RuntimeBus<'_> {
                     }
                     None => {
                         if cpu.r[2] != 0 {
-                            self.memory.write8(cpu.r[2], 4)?;
+                            self.write_memory(cpu.r[2], &[4])?;
                         }
                         cpu.r[0] = 0;
                     }

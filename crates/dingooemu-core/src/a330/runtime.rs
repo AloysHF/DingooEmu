@@ -1,4 +1,4 @@
-use super::cpu::{Bus, Cpu};
+use super::cpu::{Bus, Cpu, DecodedArmInstruction, ExecutionState};
 use super::firmware_archive::FirmwareArchive;
 use super::memory::{
     Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE, LEGACY_GRAPHICS_STRIDE,
@@ -22,6 +22,10 @@ use std::path::PathBuf;
 mod sdk_hle;
 
 const INSTRUCTIONS_PER_SLICE: u64 = 1_750_000;
+const MAX_INSTRUCTION_BLOCK_LEN: usize = 64;
+const INSTRUCTION_BLOCK_CACHE_SLOTS: usize = 4_096;
+const INSTRUCTION_CACHE_PAGE_SHIFT: u32 = 12;
+const INSTRUCTION_CACHE_PAGE_SIZE: usize = 1 << INSTRUCTION_CACHE_PAGE_SHIFT;
 const APP_PATH_ADDRESS: u32 = STACK_BASE + 0x200;
 const LOCALE_ADDRESS: u32 = STACK_BASE + 0x600;
 const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
@@ -36,6 +40,27 @@ enum SliceEvent {
     Stop,
     Yield,
     Frame(u32),
+}
+
+struct CachedInstructionBlock {
+    start: u32,
+    len: u8,
+    instructions: [DecodedArmInstruction; MAX_INSTRUCTION_BLOCK_LEN],
+}
+
+fn instruction_block_cache_index(address: u32) -> usize {
+    (address as usize >> 2) & (INSTRUCTION_BLOCK_CACHE_SLOTS - 1)
+}
+
+fn empty_instruction_block_cache() -> Box<[CachedInstructionBlock]> {
+    std::iter::repeat_with(|| CachedInstructionBlock {
+        start: 0,
+        len: 0,
+        instructions: [DecodedArmInstruction::default(); MAX_INSTRUCTION_BLOCK_LEN],
+    })
+    .take(INSTRUCTION_BLOCK_CACHE_SLOTS)
+    .collect::<Vec<_>>()
+    .into_boxed_slice()
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -303,6 +328,8 @@ pub(crate) struct Runtime {
     framebuffer_bits: u32,
     firmware_archive: Option<FirmwareArchive>,
     console_output: Vec<u8>,
+    instruction_blocks: Box<[CachedInstructionBlock]>,
+    instruction_cache_pages: Box<[u16]>,
 }
 
 impl Runtime {
@@ -339,6 +366,8 @@ impl Runtime {
         let save_directory =
             (!content_directory.as_os_str().is_empty()).then(|| content_directory.clone());
         let firmware_archive = FirmwareArchive::discover(&content_directory);
+        let instruction_cache_page_count =
+            (package.program_size() as usize).div_ceil(INSTRUCTION_CACHE_PAGE_SIZE);
         Ok(Self {
             package,
             cpu,
@@ -368,6 +397,8 @@ impl Runtime {
             framebuffer_bits,
             firmware_archive,
             console_output: Vec::new(),
+            instruction_blocks: empty_instruction_block_cache(),
+            instruction_cache_pages: vec![0; instruction_cache_page_count].into_boxed_slice(),
         })
     }
 
@@ -572,6 +603,7 @@ impl Runtime {
         self.active_framebuffer = state.active_framebuffer;
         self.framebuffer_bits = state.framebuffer_bits;
         self.console_output.clear();
+        self.clear_instruction_cache();
         Ok(())
     }
 
@@ -597,9 +629,30 @@ impl Runtime {
         self.cheats.clear();
     }
 
+    pub(crate) fn system_ram_mut(&mut self) -> &mut [u8] {
+        self.clear_instruction_cache();
+        self.memory.system_ram_mut()
+    }
+
+    pub(crate) fn write_memory_u32(&mut self, address: u32, value: u32) -> Result<()> {
+        self.memory.write32(address, value)?;
+        self.clear_instruction_cache();
+        Ok(())
+    }
+
+    fn clear_instruction_cache(&mut self) {
+        for block in &mut self.instruction_blocks {
+            block.len = 0;
+        }
+        self.instruction_cache_pages.fill(0);
+    }
+
     pub(crate) fn tick(&mut self) -> Result<()> {
         if !self.is_running() {
             return Ok(());
+        }
+        if self.cheats.enabled_rules().next().is_some() {
+            self.clear_instruction_cache();
         }
         super::cheats::apply(&self.cheats, &mut self.memory, &mut self.cpu);
         let profile = self.memory.profile();
@@ -639,6 +692,9 @@ impl Runtime {
                     firmware_archive: self.firmware_archive.as_ref(),
                     console_output: &mut self.console_output,
                     event_pending: false,
+                    instruction_blocks: &mut self.instruction_blocks,
+                    instruction_cache_pages: &mut self.instruction_cache_pages,
+                    instruction_cache_invalidated: false,
                 };
                 let mut known_task_count = bus.tasks.len();
                 loop {
@@ -650,13 +706,20 @@ impl Runtime {
                     if self.cpu.r[15] == EXIT_ADDRESS {
                         break SliceEvent::Exit;
                     }
-                    let pc = self.cpu.r[15];
-                    if let Err(error) = self.cpu.step(&mut bus) {
+                    let mut error_pc = self.cpu.r[15];
+                    let remaining =
+                        (INSTRUCTIONS_PER_SLICE - (self.cpu.instruction_count - initial)) as usize;
+                    if let Err(error) = bus.execute_cached_block(
+                        &mut self.cpu,
+                        remaining,
+                        &mut previous_pc,
+                        &mut error_pc,
+                    ) {
                         return match error {
                             SimulatorError::MemoryError { .. }
                             | SimulatorError::InvalidInstruction { .. } => {
                                 Err(SimulatorError::CpuError {
-                                    pc,
+                                    pc: error_pc,
                                     message: format!(
                                         "{:?} state: {error}; previous_pc={previous_pc:#010x}, r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, sp={:#010x}, lr={:#010x}",
                                         self.cpu.execution_state(),
@@ -672,7 +735,6 @@ impl Runtime {
                             other => Err(other),
                         };
                     }
-                    previous_pc = pc;
                     if !bus.event_pending {
                         continue;
                     }
@@ -833,6 +895,9 @@ struct RuntimeBus<'a> {
     firmware_archive: Option<&'a FirmwareArchive>,
     console_output: &'a mut Vec<u8>,
     event_pending: bool,
+    instruction_blocks: &'a mut [CachedInstructionBlock],
+    instruction_cache_pages: &'a mut [u16],
+    instruction_cache_invalidated: bool,
 }
 
 fn framebuffer_is_solid(framebuffer: &[u8]) -> bool {
@@ -1298,6 +1363,30 @@ mod tests {
         heap.deallocate(third);
 
         assert_eq!(heap.allocate(48), first);
+    }
+
+    #[test]
+    fn cached_arm_block_stops_when_sequential_bx_enters_thumb_state() {
+        let mut package = svc_package("unused");
+        let origin = package.load_base();
+        let words = [
+            0xe12f_ff10_u32,
+            u32::from_le_bytes([0x07, 0x21, 0x70, 0x47]),
+        ];
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.imports.clear();
+
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime.cpu.r[0] = origin + 5;
+        runtime.cpu.r[14] = EXIT_ADDRESS | 1;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.cpu.r[1], 7);
+        assert_eq!(runtime.cpu.execution_state(), ExecutionState::Thumb);
     }
 
     #[test]
