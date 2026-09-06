@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 mod sdk_hle;
 
-const INSTRUCTIONS_PER_SLICE: u64 = 1_750_000;
+const INSTRUCTIONS_PER_SLICE: u64 = 3_000_000;
 const MAX_INSTRUCTION_BLOCK_LEN: usize = 64;
 const INSTRUCTION_BLOCK_CACHE_SLOTS: usize = 4_096;
 const INSTRUCTION_CACHE_PAGE_SHIFT: u32 = 12;
