@@ -142,7 +142,6 @@ impl RuntimeBus<'_> {
         let block_len = self.instruction_blocks[cache_index].len as usize;
         #[cfg(feature = "jit")]
         let jit_result = {
-            let bus = self as *mut RuntimeBus<'_> as *mut u8;
             let heap_base = self.memory.heap_base();
             let heap = self.memory.jit_heap_ptr();
             jit.execute(
@@ -153,7 +152,6 @@ impl RuntimeBus<'_> {
                 JitCpuContext {
                     registers: &mut cpu.r,
                     cpsr: &mut cpu.cpsr,
-                    bus,
                     heap,
                     heap_base,
                 },
@@ -232,52 +230,6 @@ impl RuntimeBus<'_> {
             cpu.r[15] = cpu.r[14] & !1;
         }
         Ok(())
-    }
-}
-
-#[cfg(feature = "jit")]
-pub(crate) unsafe extern "C" fn jit_read8(bus: *const u8, address: u32) -> u64 {
-    // SAFETY: JIT calls provide the live RuntimeBus pointer owned by the runtime.
-    let bus = unsafe { &*(bus.cast::<RuntimeBus<'_>>()) };
-    bus.memory
-        .read8(address)
-        .map_or(0, |value| (1_u64 << 32) | u64::from(value))
-}
-
-#[cfg(feature = "jit")]
-pub(crate) unsafe extern "C" fn jit_read32(bus: *const u8, address: u32) -> u64 {
-    // SAFETY: JIT calls provide the live RuntimeBus pointer owned by the runtime.
-    let bus = unsafe { &*(bus.cast::<RuntimeBus<'_>>()) };
-    bus.memory
-        .read32(address & !3)
-        .map_or(0, |value| (1_u64 << 32) | u64::from(value))
-}
-
-#[cfg(feature = "jit")]
-pub(crate) unsafe extern "C" fn jit_write8(bus: *mut u8, address: u32, value: u32) -> u64 {
-    // SAFETY: JIT calls provide the live RuntimeBus pointer owned by the runtime.
-    let bus = unsafe { &mut *(bus.cast::<RuntimeBus<'_>>()) };
-    if bus.write8(address, value as u8).is_err() {
-        return 0;
-    }
-    if bus.instruction_cache_invalidated {
-        2
-    } else {
-        1
-    }
-}
-
-#[cfg(feature = "jit")]
-pub(crate) unsafe extern "C" fn jit_write32(bus: *mut u8, address: u32, value: u32) -> u64 {
-    // SAFETY: JIT calls provide the live RuntimeBus pointer owned by the runtime.
-    let bus = unsafe { &mut *(bus.cast::<RuntimeBus<'_>>()) };
-    if bus.write32(address, value).is_err() {
-        return 0;
-    }
-    if bus.instruction_cache_invalidated {
-        2
-    } else {
-        1
     }
 }
 

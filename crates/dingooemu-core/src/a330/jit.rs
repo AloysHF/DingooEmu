@@ -2,7 +2,6 @@ use super::cpu::{ArmInstructionKind, DecodedArmInstruction};
 use super::memory::{
     HEAP_SIZE, HOMEBREW_HEAP_BASE, LEGACY_SYSTEM_MMIO_BASE, LEGACY_SYSTEM_MMIO_SIZE,
 };
-use super::runtime::{jit_read32, jit_read8, jit_write32, jit_write8};
 use cranelift::codegen::ir::{
     condcodes::IntCC, types, AbiParam, Function, InstBuilder, MemFlagsData, Signature, Value,
 };
@@ -22,7 +21,7 @@ const Z_FLAG: u32 = 1 << 30;
 const C_FLAG: u32 = 1 << 29;
 const V_FLAG: u32 = 1 << 28;
 
-type JitBlockFn = unsafe extern "C" fn(*mut u32, *mut u32, *mut u8, *mut u8) -> u64;
+type JitBlockFn = unsafe extern "C" fn(*mut u32, *mut u32, *mut u8) -> u64;
 
 #[derive(Clone, Copy)]
 struct CompiledBlock {
@@ -57,7 +56,6 @@ pub(crate) struct JitEngine {
 pub(crate) struct JitCpuContext<'a> {
     pub(crate) registers: &'a mut [u32; REGISTER_COUNT],
     pub(crate) cpsr: &'a mut u32,
-    pub(crate) bus: *mut u8,
     pub(crate) heap: *mut u8,
     pub(crate) heap_base: u32,
 }
@@ -119,12 +117,7 @@ impl JitEngine {
             // SAFETY: The compiled function uses this exact ABI and both pointers
             // remain valid for the duration of the call.
             let completed = unsafe {
-                (block.function)(
-                    cpu.registers.as_mut_ptr(),
-                    cpu.cpsr as *mut u32,
-                    cpu.bus,
-                    cpu.heap,
-                )
+                (block.function)(cpu.registers.as_mut_ptr(), cpu.cpsr as *mut u32, cpu.heap)
             } as usize;
             return (completed != 0).then_some(completed);
         }
@@ -153,12 +146,7 @@ impl JitEngine {
                 // SAFETY: The compiled function uses this exact ABI and both pointers
                 // remain valid for the duration of the call.
                 let completed = unsafe {
-                    (block.function)(
-                        cpu.registers.as_mut_ptr(),
-                        cpu.cpsr as *mut u32,
-                        cpu.bus,
-                        cpu.heap,
-                    )
+                    (block.function)(cpu.registers.as_mut_ptr(), cpu.cpsr as *mut u32, cpu.heap)
                 } as usize;
                 (completed != 0).then_some(completed)
             }
@@ -269,7 +257,6 @@ impl Compiler {
         signature.params.push(AbiParam::new(pointer_type));
         signature.params.push(AbiParam::new(pointer_type));
         signature.params.push(AbiParam::new(pointer_type));
-        signature.params.push(AbiParam::new(pointer_type));
         signature.returns.push(AbiParam::new(types::I64));
         self.context.func = Function::with_name_signature(
             cranelift::codegen::ir::UserFuncName::user(1, self.next_function_id as u32),
@@ -285,10 +272,9 @@ impl Compiler {
             builder.seal_block(entry);
             let registers = builder.block_params(entry)[0];
             let cpsr = builder.block_params(entry)[1];
-            let bus = builder.block_params(entry)[2];
-            let heap = builder.block_params(entry)[3];
+            let heap = builder.block_params(entry)[2];
             let mut state = LoweringState::new(registers, cpsr, heap, heap_base);
-            lower_block(&mut builder, &mut state, bus, start, instructions);
+            lower_block(&mut builder, &mut state, start, instructions);
             builder.finalize(target_config);
         }
 
@@ -382,13 +368,6 @@ impl LoweringState {
         self.cpsr_dirty = true;
     }
 
-    fn reset_cached_values(&mut self) {
-        self.values.fill(None);
-        self.dirty.fill(false);
-        self.cpsr_value = None;
-        self.cpsr_dirty = false;
-    }
-
     fn flush(&self, builder: &mut FunctionBuilder<'_>) {
         for index in 0..REGISTER_COUNT {
             if self.dirty[index] {
@@ -414,7 +393,6 @@ impl LoweringState {
 fn lower_block(
     builder: &mut FunctionBuilder<'_>,
     state: &mut LoweringState,
-    bus: Value,
     start: u32,
     instructions: &[DecodedArmInstruction],
 ) {
@@ -427,7 +405,7 @@ fn lower_block(
                 lower_data_processing(builder, state, instruction, condition)
             }
             ArmInstructionKind::SingleTransfer => {
-                lower_single_transfer(builder, state, bus, pc, index, instruction, condition)
+                lower_single_transfer(builder, state, pc, index, instruction, condition)
             }
             ArmInstructionKind::CountLeadingZeros => {
                 let rd = ((instruction >> 12) & 0xf) as usize;
@@ -590,7 +568,6 @@ fn lower_multiply(
 fn lower_single_transfer(
     builder: &mut FunctionBuilder<'_>,
     state: &mut LoweringState,
-    bus: Value,
     pc: u32,
     completed: usize,
     instruction: u32,
@@ -622,172 +599,84 @@ fn lower_single_transfer(
     let byte = instruction & (1 << 22) != 0;
     let load = instruction & (1 << 20) != 0;
     let store_value = (!load).then(|| state.read(builder, rd));
-
-    state.flush(builder);
+    let old_load_value = load.then(|| state.read(builder, rd));
     let execute_block = builder.create_block();
+    let mapped_block = builder.create_block();
+    let bailout_block = builder.create_block();
     let continuation_block = builder.create_block();
-    builder
-        .ins()
-        .brif(condition, execute_block, &[], continuation_block, &[]);
+    if load {
+        builder.append_block_param(continuation_block, types::I32);
+    }
+    let skipped_arguments = old_load_value.map_or_else(Vec::new, |value| vec![value.into()]);
+    builder.ins().brif(
+        condition,
+        execute_block,
+        &[],
+        continuation_block,
+        &skipped_arguments,
+    );
+
     builder.switch_to_block(execute_block);
     builder.seal_block(execute_block);
-
-    let packed = if load {
-        emit_heap_read(builder, state, bus, address, byte)
+    let access_address = if load && !byte {
+        builder.ins().band_imm_u(address, i64::from(!3_u32))
     } else {
-        emit_heap_write(
-            builder,
-            state,
-            bus,
-            address,
-            store_value.expect("store value was captured"),
-            byte,
-        )
+        address
     };
-    let status = if load {
-        builder.ins().ushr_imm_u(packed, 32)
-    } else {
-        packed
-    };
-    let failed = builder.ins().icmp_imm_u(IntCC::Equal, status, 0);
-    let failure_block = builder.create_block();
-    let success_block = builder.create_block();
+    let width = if byte { 1 } else { 4 };
+    let (host_address, mapped) = heap_address(builder, state, access_address, width, !load);
     builder
         .ins()
-        .brif(failed, failure_block, &[], success_block, &[]);
+        .brif(mapped, mapped_block, &[], bailout_block, &[]);
 
-    builder.switch_to_block(failure_block);
-    builder.seal_block(failure_block);
-    let current_pc = builder.ins().iconst(types::I32, i64::from(pc));
+    builder.switch_to_block(mapped_block);
+    builder.seal_block(mapped_block);
+    if load {
+        let load_type = if byte { types::I8 } else { types::I32 };
+        let loaded = builder
+            .ins()
+            .load(load_type, MemFlagsData::new(), host_address, 0);
+        let mut value = if byte {
+            builder.ins().uextend(types::I32, loaded)
+        } else {
+            loaded
+        };
+        if !byte {
+            let rotate = builder.ins().ishl_imm_u(address, 3);
+            value = builder.ins().rotr(value, rotate);
+        }
+        builder.ins().jump(continuation_block, &[value.into()]);
+    } else {
+        let value = store_value.expect("store value was captured");
+        let value = if byte {
+            builder.ins().ireduce(types::I8, value)
+        } else {
+            value
+        };
+        builder
+            .ins()
+            .store(MemFlagsData::new(), value, host_address, 0);
+        builder.ins().jump(continuation_block, &[]);
+    }
+
+    builder.switch_to_block(bailout_block);
+    builder.seal_block(bailout_block);
+    state.flush(builder);
+    let current_pc = iconst_u32(builder, pc);
     builder
         .ins()
         .store(MemFlagsData::new(), current_pc, state.registers, 15 * 4);
     let count = builder.ins().iconst(types::I64, completed as i64);
     builder.ins().return_(&[count]);
 
-    builder.switch_to_block(success_block);
-    builder.seal_block(success_block);
-    if load {
-        let mut value = builder.ins().ireduce(types::I32, packed);
-        if !byte {
-            let rotate = builder.ins().ishl_imm_u(address, 3);
-            value = builder.ins().rotr(value, rotate);
-        }
-        builder
-            .ins()
-            .store(MemFlagsData::new(), value, state.registers, (rd * 4) as i32);
-    }
-    if !pre || instruction & (1 << 21) != 0 {
-        builder.ins().store(
-            MemFlagsData::new(),
-            adjusted,
-            state.registers,
-            (rn * 4) as i32,
-        );
-    }
-    if !load {
-        let invalidated = builder.ins().icmp_imm_u(IntCC::Equal, status, 2);
-        let invalidated_block = builder.create_block();
-        builder
-            .ins()
-            .brif(invalidated, invalidated_block, &[], continuation_block, &[]);
-        builder.switch_to_block(invalidated_block);
-        builder.seal_block(invalidated_block);
-        let next_pc = iconst_u32(builder, pc.wrapping_add(4));
-        builder
-            .ins()
-            .store(MemFlagsData::new(), next_pc, state.registers, 15 * 4);
-        let count = builder.ins().iconst(types::I64, (completed + 1) as i64);
-        builder.ins().return_(&[count]);
-    } else {
-        builder.ins().jump(continuation_block, &[]);
-    }
-
     builder.switch_to_block(continuation_block);
     builder.seal_block(continuation_block);
-    state.reset_cached_values();
-}
-
-fn emit_heap_read(
-    builder: &mut FunctionBuilder<'_>,
-    state: &LoweringState,
-    bus: Value,
-    address: Value,
-    byte: bool,
-) -> Value {
-    let access_address = if byte {
-        address
-    } else {
-        builder.ins().band_imm_u(address, i64::from(!3_u32))
-    };
-    let width = if byte { 1 } else { 4 };
-    let (host_address, mapped) = heap_address(builder, state, access_address, width, false);
-    let fast = builder.create_block();
-    let slow = builder.create_block();
-    let merge = builder.create_block();
-    builder.append_block_param(merge, types::I64);
-    builder.ins().brif(mapped, fast, &[], slow, &[]);
-
-    builder.switch_to_block(fast);
-    builder.seal_block(fast);
-    let load_type = if byte { types::I8 } else { types::I32 };
-    let value = builder
-        .ins()
-        .load(load_type, MemFlagsData::new(), host_address, 0);
-    let value = builder.ins().uextend(types::I64, value);
-    let success = builder.ins().iconst(types::I64, 1_i64 << 32);
-    let packed = builder.ins().bor(success, value);
-    builder.ins().jump(merge, &[packed.into()]);
-
-    builder.switch_to_block(slow);
-    builder.seal_block(slow);
-    let callback = if byte { jit_read8 } else { jit_read32 };
-    let packed = emit_read_call(builder, bus, address, callback as usize);
-    builder.ins().jump(merge, &[packed.into()]);
-
-    builder.switch_to_block(merge);
-    builder.seal_block(merge);
-    builder.block_params(merge)[0]
-}
-
-fn emit_heap_write(
-    builder: &mut FunctionBuilder<'_>,
-    state: &LoweringState,
-    bus: Value,
-    address: Value,
-    value: Value,
-    byte: bool,
-) -> Value {
-    let width = if byte { 1 } else { 4 };
-    let (host_address, mapped) = heap_address(builder, state, address, width, true);
-    let fast = builder.create_block();
-    let slow = builder.create_block();
-    let merge = builder.create_block();
-    builder.append_block_param(merge, types::I64);
-    builder.ins().brif(mapped, fast, &[], slow, &[]);
-
-    builder.switch_to_block(fast);
-    builder.seal_block(fast);
-    let stored = if byte {
-        builder.ins().ireduce(types::I8, value)
-    } else {
-        value
-    };
-    builder
-        .ins()
-        .store(MemFlagsData::new(), stored, host_address, 0);
-    let success = builder.ins().iconst(types::I64, 1);
-    builder.ins().jump(merge, &[success.into()]);
-
-    builder.switch_to_block(slow);
-    builder.seal_block(slow);
-    let callback = if byte { jit_write8 } else { jit_write32 };
-    let status = emit_write_call(builder, bus, address, value, callback as usize);
-    builder.ins().jump(merge, &[status.into()]);
-
-    builder.switch_to_block(merge);
-    builder.seal_block(merge);
-    builder.block_params(merge)[0]
+    if load {
+        state.write(rd, builder.block_params(continuation_block)[0]);
+    }
+    if !pre || instruction & (1 << 21) != 0 {
+        state.write_conditionally(builder, rn, adjusted, condition);
+    }
 }
 
 fn heap_address(
@@ -822,44 +711,6 @@ fn heap_address(
     }
     let offset = builder.ins().uextend(types::I64, offset);
     (builder.ins().iadd(state.heap, offset), mapped)
-}
-
-fn emit_read_call(
-    builder: &mut FunctionBuilder<'_>,
-    bus: Value,
-    address: Value,
-    callback: usize,
-) -> Value {
-    let mut signature = Signature::new(builder.func.signature.call_conv);
-    signature.params.push(AbiParam::new(types::I64));
-    signature.params.push(AbiParam::new(types::I32));
-    signature.returns.push(AbiParam::new(types::I64));
-    let signature = builder.import_signature(signature);
-    let function = builder.ins().iconst(types::I64, callback as i64);
-    let call = builder
-        .ins()
-        .call_indirect(signature, function, &[bus, address]);
-    builder.inst_results(call)[0]
-}
-
-fn emit_write_call(
-    builder: &mut FunctionBuilder<'_>,
-    bus: Value,
-    address: Value,
-    value: Value,
-    callback: usize,
-) -> Value {
-    let mut signature = Signature::new(builder.func.signature.call_conv);
-    signature.params.push(AbiParam::new(types::I64));
-    signature.params.push(AbiParam::new(types::I32));
-    signature.params.push(AbiParam::new(types::I32));
-    signature.returns.push(AbiParam::new(types::I64));
-    let signature = builder.import_signature(signature);
-    let function = builder.ins().iconst(types::I64, callback as i64);
-    let call = builder
-        .ins()
-        .call_indirect(signature, function, &[bus, address, value]);
-    builder.inst_results(call)[0]
 }
 
 fn lower_branch(
@@ -1017,14 +868,8 @@ mod tests {
         registers[2] = 5;
 
         // SAFETY: The compiler created this function and the block performs no memory access.
-        let completed = unsafe {
-            (block.function)(
-                registers.as_mut_ptr(),
-                &mut cpsr,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let completed =
+            unsafe { (block.function)(registers.as_mut_ptr(), &mut cpsr, std::ptr::null_mut()) };
 
         assert_eq!(completed, 3);
         assert_eq!(registers[0], 11);
@@ -1057,7 +902,6 @@ mod tests {
                 equal_registers.as_mut_ptr(),
                 &mut equal_cpsr,
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
             )
         };
 
@@ -1078,7 +922,6 @@ mod tests {
             (block.function)(
                 different_registers.as_mut_ptr(),
                 &mut different_cpsr,
-                std::ptr::null_mut(),
                 std::ptr::null_mut(),
             )
         };
@@ -1110,14 +953,8 @@ mod tests {
         registers[0] = heap_base + 0x100;
 
         // SAFETY: The supplied heap contains both guest memory accesses.
-        let completed = unsafe {
-            (block.function)(
-                registers.as_mut_ptr(),
-                &mut cpsr,
-                std::ptr::null_mut(),
-                heap.as_mut_ptr(),
-            )
-        };
+        let completed =
+            unsafe { (block.function)(registers.as_mut_ptr(), &mut cpsr, heap.as_mut_ptr()) };
 
         assert_eq!(completed, 3);
         assert_eq!(registers[1], 42);
@@ -1126,6 +963,33 @@ mod tests {
             42
         );
         assert_eq!(registers[15], start + 12);
+    }
+
+    #[test]
+    fn compiled_block_bails_out_before_unmapped_access() {
+        let start = 0x1000_1000;
+        let instructions = [
+            DecodedArmInstruction::decode(0xe590_1000),
+            DecodedArmInstruction::decode(0xe281_1001),
+            DecodedArmInstruction::decode(0xe580_1004),
+        ];
+        let mut compiler = Compiler::new().unwrap();
+        let block = compiler
+            .compile(start, &instructions, 0x2100_0000)
+            .unwrap()
+            .unwrap();
+        let mut registers = [0_u32; REGISTER_COUNT];
+        let mut cpsr = 0_u32;
+        registers[0] = 0x1000_0200;
+        registers[1] = 9;
+
+        // SAFETY: The unmapped access exits before dereferencing the null heap pointer.
+        let completed =
+            unsafe { (block.function)(registers.as_mut_ptr(), &mut cpsr, std::ptr::null_mut()) };
+
+        assert_eq!(completed, 0);
+        assert_eq!(registers[1], 9);
+        assert_eq!(registers[15], start);
     }
 
     #[test]
