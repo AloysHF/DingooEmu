@@ -146,11 +146,12 @@ impl RuntimeBus<'_> {
             cpu.step_fetched_arm(instruction, self)?;
             *previous_pc = pc;
             completed += 1;
-            if self.instruction_cache_invalidated
-                || self.event_pending
-                || !cpu.is_running()
-                || cpu.execution_state() != ExecutionState::Arm
-                || cpu.r[15] != pc.wrapping_add(4)
+            if instruction.may_exit_block
+                && (self.instruction_cache_invalidated
+                    || self.event_pending
+                    || !cpu.is_running()
+                    || cpu.execution_state() != ExecutionState::Arm
+                    || cpu.r[15] != pc.wrapping_add(4))
             {
                 break;
             }

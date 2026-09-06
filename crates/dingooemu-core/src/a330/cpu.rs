@@ -31,13 +31,16 @@ pub(crate) enum ArmInstructionKind {
 pub(crate) struct DecodedArmInstruction {
     pub(crate) instruction: u32,
     pub(crate) kind: ArmInstructionKind,
+    pub(crate) may_exit_block: bool,
 }
 
 impl DecodedArmInstruction {
     pub(crate) fn decode(instruction: u32) -> Self {
+        let kind = decode_arm_instruction(instruction);
         Self {
             instruction,
-            kind: decode_arm_instruction(instruction),
+            kind,
+            may_exit_block: arm_instruction_may_exit_block(instruction, kind),
         }
     }
 }
@@ -998,6 +1001,28 @@ fn decode_arm_instruction(instruction: u32) -> ArmInstructionKind {
     }
 }
 
+fn arm_instruction_may_exit_block(instruction: u32, kind: ArmInstructionKind) -> bool {
+    match kind {
+        ArmInstructionKind::DataProcessing | ArmInstructionKind::CountLeadingZeros => {
+            (instruction >> 12) & 0xf == 15
+        }
+        ArmInstructionKind::SingleTransfer => {
+            instruction & (1 << 20) == 0 || (instruction >> 12) & 0xf == 15
+        }
+        ArmInstructionKind::BlxImmediate
+        | ArmInstructionKind::BranchExchange
+        | ArmInstructionKind::BranchLinkExchange
+        | ArmInstructionKind::HalfTransfer
+        | ArmInstructionKind::BlockTransfer
+        | ArmInstructionKind::Branch
+        | ArmInstructionKind::Svc
+        | ArmInstructionKind::Unsupported => true,
+        ArmInstructionKind::SignedHalfwordMultiply
+        | ArmInstructionKind::Multiply
+        | ArmInstructionKind::LongMultiply => false,
+    }
+}
+
 fn add_with_carry(left: u32, right: u32, carry: u32) -> (u32, bool, bool) {
     let wide = u64::from(left) + u64::from(right) + u64::from(carry);
     let result = wide as u32;
@@ -1165,6 +1190,16 @@ mod tests {
             assert_eq!(decoded.running, regular.running);
             assert_eq!(decoded_bus.data, regular_bus.data);
             assert_eq!(decoded_bus.svc, regular_bus.svc);
+        }
+    }
+
+    #[test]
+    fn decoded_arm_instructions_mark_only_required_block_exits() {
+        for instruction in [0xe1a0_0000, 0xe591_0000, 0xe000_0291] {
+            assert!(!DecodedArmInstruction::decode(instruction).may_exit_block);
+        }
+        for instruction in [0xe1a0_f000, 0xe591_f000, 0xe581_0000, 0xea00_0001] {
+            assert!(DecodedArmInstruction::decode(instruction).may_exit_block);
         }
     }
 

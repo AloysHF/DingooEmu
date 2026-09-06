@@ -1390,6 +1390,30 @@ mod tests {
     }
 
     #[test]
+    fn cached_arm_block_stops_after_self_modifying_store() {
+        let mut package = svc_package("unused");
+        let origin = package.load_base();
+        let words = [0xe581_2000_u32, 0xe3a0_0001, 0xe12f_ff1e];
+        package.data.resize(0x80 + words.len() * 4, 0);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.rawd.base.size = words.len() as u32 * 4;
+        package.rawd.program_size = words.len() as u32 * 4;
+        package.imports.clear();
+
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime.cpu.r[1] = origin + 4;
+        runtime.cpu.r[2] = 0xe3a0_0007;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.cpu.r[0], 7);
+        assert_eq!(runtime.memory.read32(origin + 4).unwrap(), 0xe3a0_0007);
+    }
+
+    #[test]
     fn a330_realloc_preserves_data_and_the_original_on_failure() {
         let mut runtime = Runtime::from_package(svc_package("realloc"), PathBuf::new()).unwrap();
         let first = runtime.heap.allocate(8);
