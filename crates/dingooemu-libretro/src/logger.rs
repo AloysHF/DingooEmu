@@ -8,9 +8,13 @@ struct LibretroLogger;
 
 static LOGGER: LibretroLogger = LibretroLogger;
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
+const VERBOSE_JIT_LOG_TARGET: &str = "cranelift_jit::backend";
 
 impl log::Log for LibretroLogger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        if metadata.target() == VERBOSE_JIT_LOG_TARGET && metadata.level() >= log::Level::Info {
+            return false;
+        }
         metadata.level() <= log::Level::Info || DEBUG_LOGGING.load(Ordering::Relaxed)
     }
 
@@ -59,5 +63,20 @@ mod tests {
         set_debug_logging(true);
         assert!(LOGGER.enabled(&debug));
         set_debug_logging(false);
+    }
+
+    #[test]
+    fn verbose_jit_backend_records_are_suppressed() {
+        let info = log::Metadata::builder()
+            .level(log::Level::Info)
+            .target(VERBOSE_JIT_LOG_TARGET)
+            .build();
+        let warn = log::Metadata::builder()
+            .level(log::Level::Warn)
+            .target(VERBOSE_JIT_LOG_TARGET)
+            .build();
+
+        assert!(!LOGGER.enabled(&info));
+        assert!(LOGGER.enabled(&warn));
     }
 }

@@ -211,6 +211,7 @@ fn main() -> anyhow::Result<()> {
 
     let default_log_filter = if args.debug_logging { "debug" } else { "info" };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_log_filter))
+        .filter_module("cranelift_jit::backend", log::LevelFilter::Warn)
         .format_timestamp_millis()
         .init();
 
