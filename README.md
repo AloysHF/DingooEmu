@@ -34,8 +34,8 @@ only then selects the A320 or A330 runtime.
 
 ## Features
 
-- **Two guest architectures** — Cached MIPS32 interpretation for A320 software and a pure Rust ARM32/Thumb interpreter with ARMv5TE fixed-point multiply support for A330 software
-- **Optional MIPS JIT** — Native translation of hot A320 blocks on 64-bit Android; A330 content always uses the ARM interpreter
+- **Two guest architectures** — Cached MIPS32 and ARM32/Thumb interpretation with ARMv5TE fixed-point multiply support for A330 software
+- **Optional native JIT** — Native translation of proven hot integer blocks for A320 and A330 software on supported 64-bit builds, with safe interpreter fallback
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
 - **HLE (High-Level Emulation)** — Architecture-specific SDK bridges for graphics, input, audio, timing, random-access files and directory enumeration, resources, tasks, and synchronization
 - **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and emit per-game JSON reports for review
@@ -139,6 +139,7 @@ crates/
 │       ├── a330/
 │       │   ├── runtime.rs       # Gemei A330 lifecycle and scheduler
 │       │   ├── cpu.rs           # ARM32/Thumb interpreter
+│       │   ├── jit.rs           # Optional native translator for hot ARM32 blocks
 │       │   ├── memory.rs        # A330 memory map and package loader
 │       │   ├── cheats.rs        # A330 cheat validation and application
 │       │   ├── firmware_archive.rs # Adjacent A330 firmware reader

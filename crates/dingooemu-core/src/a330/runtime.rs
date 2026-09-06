@@ -1,5 +1,7 @@
 use super::cpu::{Bus, Cpu, DecodedArmInstruction, ExecutionState};
 use super::firmware_archive::FirmwareArchive;
+#[cfg(feature = "jit")]
+use super::jit::JitEngine;
 use super::memory::{
     Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE, LEGACY_GRAPHICS_STRIDE,
     LEGACY_GRAPHICS_SURFACE, STACK_BASE, STACK_SIZE,
@@ -20,6 +22,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 mod sdk_hle;
+#[cfg(feature = "jit")]
+pub(crate) use sdk_hle::{jit_read32, jit_read8};
 
 const INSTRUCTIONS_PER_SLICE: u64 = 3_000_000;
 const MAX_INSTRUCTION_BLOCK_LEN: usize = 64;
@@ -330,6 +334,9 @@ pub(crate) struct Runtime {
     console_output: Vec<u8>,
     instruction_blocks: Box<[CachedInstructionBlock]>,
     instruction_cache_pages: Box<[u16]>,
+    code_generation: u64,
+    #[cfg(feature = "jit")]
+    jit: JitEngine,
 }
 
 impl Runtime {
@@ -399,6 +406,9 @@ impl Runtime {
             console_output: Vec::new(),
             instruction_blocks: empty_instruction_block_cache(),
             instruction_cache_pages: vec![0; instruction_cache_page_count].into_boxed_slice(),
+            code_generation: 1,
+            #[cfg(feature = "jit")]
+            jit: JitEngine::new(),
         })
     }
 
@@ -410,6 +420,13 @@ impl Runtime {
         self.running = false;
         self.cpu.stop();
         self.flush_save_files();
+    }
+
+    pub(crate) fn set_jit_enabled(&mut self, enabled: bool) {
+        #[cfg(feature = "jit")]
+        self.jit.set_enabled(enabled);
+        #[cfg(not(feature = "jit"))]
+        let _ = enabled;
     }
 
     fn present_early_exit(&mut self) {
@@ -434,6 +451,8 @@ impl Runtime {
         let save_directory = self.save_directory.clone();
         let cheats = self.cheats.clone();
         let instruction_policy = self.cpu.unknown_instruction_policy();
+        #[cfg(feature = "jit")]
+        let jit_enabled = self.jit.is_enabled();
         let mut replacement = Self::from_package(self.package.clone(), self.content_path.clone())?;
         replacement.unknown_hle_policy = policy;
         replacement.unknown_hle_allowlist = allowlist;
@@ -443,6 +462,8 @@ impl Runtime {
         replacement
             .cpu
             .set_unknown_instruction_policy(instruction_policy);
+        #[cfg(feature = "jit")]
+        replacement.jit.set_enabled(jit_enabled);
         self.memory.copy_state_from(&replacement.memory);
         std::mem::swap(&mut replacement.memory, &mut self.memory);
         if was_running {
@@ -645,6 +666,7 @@ impl Runtime {
             block.len = 0;
         }
         self.instruction_cache_pages.fill(0);
+        self.code_generation = self.code_generation.wrapping_add(1);
     }
 
     pub(crate) fn tick(&mut self) -> Result<()> {
@@ -654,6 +676,8 @@ impl Runtime {
         if self.cheats.enabled_rules().next().is_some() {
             self.clear_instruction_cache();
         }
+        #[cfg(feature = "jit")]
+        self.jit.begin_slice();
         super::cheats::apply(&self.cheats, &mut self.memory, &mut self.cpu);
         let profile = self.memory.profile();
         let mut frame_address = None;
@@ -695,6 +719,7 @@ impl Runtime {
                     instruction_blocks: &mut self.instruction_blocks,
                     instruction_cache_pages: &mut self.instruction_cache_pages,
                     instruction_cache_invalidated: false,
+                    code_generation: &mut self.code_generation,
                 };
                 let mut known_task_count = bus.tasks.len();
                 loop {
@@ -714,6 +739,8 @@ impl Runtime {
                         remaining,
                         &mut previous_pc,
                         &mut error_pc,
+                        #[cfg(feature = "jit")]
+                        &mut self.jit,
                     ) {
                         return match error {
                             SimulatorError::MemoryError { .. }
@@ -898,6 +925,7 @@ struct RuntimeBus<'a> {
     instruction_blocks: &'a mut [CachedInstructionBlock],
     instruction_cache_pages: &'a mut [u16],
     instruction_cache_invalidated: bool,
+    code_generation: &'a mut u64,
 }
 
 fn framebuffer_is_solid(framebuffer: &[u8]) -> bool {

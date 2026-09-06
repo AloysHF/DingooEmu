@@ -10,7 +10,7 @@ name = "dingoo-emu"
 path = "src/main.rs"
 
 [dependencies]
-dingooemu-core = { workspace = true, features = ["standalone"] }
+dingooemu-core = { workspace = true, features = ["standalone", "jit"] }
 clap.workspace = true
 minifb.workspace = true
 log.workspace = true

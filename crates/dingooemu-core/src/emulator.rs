@@ -144,8 +144,9 @@ impl Emulator {
     }
 
     pub fn set_jit_enabled(&mut self, enabled: bool) {
-        if let Runtime::A320(runtime) = &mut self.runtime {
-            runtime.set_jit_enabled(enabled);
+        match &mut self.runtime {
+            Runtime::A320(runtime) => runtime.set_jit_enabled(enabled),
+            Runtime::A330(runtime) => runtime.set_jit_enabled(enabled),
         }
     }
 

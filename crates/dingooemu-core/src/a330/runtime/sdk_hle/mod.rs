@@ -52,6 +52,7 @@ impl RuntimeBus<'_> {
         if overlap_start >= overlap_end {
             return;
         }
+        *self.code_generation = (*self.code_generation).wrapping_add(1);
         let first_page = ((overlap_start - program_start) >> INSTRUCTION_CACHE_PAGE_SHIFT) as usize;
         let last_page =
             ((overlap_end - 1 - program_start) >> INSTRUCTION_CACHE_PAGE_SHIFT) as usize;
@@ -89,6 +90,7 @@ impl RuntimeBus<'_> {
         instruction_limit: usize,
         previous_pc: &mut u32,
         error_pc: &mut u32,
+        #[cfg(feature = "jit")] jit: &mut JitEngine,
     ) -> Result<usize> {
         if cpu.execution_state() != ExecutionState::Arm {
             *error_pc = cpu.r[15];
@@ -138,6 +140,20 @@ impl RuntimeBus<'_> {
 
         self.instruction_cache_invalidated = false;
         let block_len = self.instruction_blocks[cache_index].len as usize;
+        #[cfg(feature = "jit")]
+        if let Some(completed) = jit.execute(
+            address,
+            *self.code_generation,
+            &self.instruction_blocks[cache_index].instructions[..block_len],
+            instruction_limit,
+            &mut cpu.r,
+            self.memory as *const Memory as *mut u8,
+        ) {
+            cpu.instruction_count = cpu.instruction_count.wrapping_add(completed as u64);
+            *previous_pc = cpu.r[15].wrapping_sub(4);
+            *error_pc = *previous_pc;
+            return Ok(completed);
+        }
         let mut completed = 0;
         for instruction_index in 0..block_len.min(instruction_limit) {
             let instruction = self.instruction_blocks[cache_index].instructions[instruction_index];
@@ -205,6 +221,24 @@ impl RuntimeBus<'_> {
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "jit")]
+pub(crate) unsafe extern "C" fn jit_read8(memory: *const u8, address: u32) -> u64 {
+    // SAFETY: JIT calls provide the live Memory pointer owned by the runtime.
+    let memory = unsafe { &*(memory.cast::<Memory>()) };
+    memory
+        .read8(address)
+        .map_or(0, |value| (1_u64 << 32) | u64::from(value))
+}
+
+#[cfg(feature = "jit")]
+pub(crate) unsafe extern "C" fn jit_read32(memory: *const u8, address: u32) -> u64 {
+    // SAFETY: JIT calls provide the live Memory pointer owned by the runtime.
+    let memory = unsafe { &*(memory.cast::<Memory>()) };
+    memory
+        .read32(address & !3)
+        .map_or(0, |value| (1_u64 << 32) | u64::from(value))
 }
 
 impl RuntimeBus<'_> {

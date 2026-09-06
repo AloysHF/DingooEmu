@@ -45,7 +45,7 @@ ARM32/Thumb runtime after metadata validation.
 | `package.rs` | Shared CCDL parsing and metadata validation |
 | `common/` | Device-independent audio, video conversion, logical input, cheat syntax, save-state codec, and execution policies |
 | `a320/` | A320 MIPS CPU, memory map, JIT, runtime, cheat backend, and SDK HLE |
-| `a330/` | A330 ARM32/Thumb CPU, memory map, runtime, cheat backend, firmware archive, and SDK HLE |
+| `a330/` | A330 ARM32/Thumb CPU, tiered JIT/interpreter runtime, memory map, cheat backend, firmware archive, and SDK HLE |
 | `dingooemu` / `dingooemu-libretro` | Standalone and libretro frontend integration |
 
 Dependencies point from the facade into one device runtime and from each
