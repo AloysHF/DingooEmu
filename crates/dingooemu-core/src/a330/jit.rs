@@ -13,7 +13,7 @@ use std::mem::transmute;
 
 const HOT_BLOCK_THRESHOLD: u16 = 128;
 const MIN_BLOCK_LEN: usize = 2;
-const CACHE_SLOTS: usize = 4_096;
+const CACHE_SLOTS: usize = 16_384;
 const MAX_COMPILES_PER_SLICE: u8 = 8;
 const REGISTER_COUNT: usize = 16;
 const N_FLAG: u32 = 1 << 31;
