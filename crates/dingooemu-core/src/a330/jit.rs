@@ -194,6 +194,15 @@ fn instruction_supported(decoded: &DecodedArmInstruction) -> bool {
             let rd = (instruction >> 12) & 0xf;
             rn != 15 && rd != 15 && transfer_offset_supported(instruction)
         }
+        ArmInstructionKind::HalfTransfer => {
+            let rn = (instruction >> 16) & 0xf;
+            let rd = (instruction >> 12) & 0xf;
+            let kind = (instruction >> 5) & 3;
+            let load = instruction & (1 << 20) != 0;
+            let valid_transfer = (load && matches!(kind, 1..=3)) || (!load && kind == 1);
+            let valid_offset = instruction & (1 << 22) != 0 || instruction & 0xf != 15;
+            rn != 15 && rd != 15 && valid_transfer && valid_offset
+        }
         ArmInstructionKind::CountLeadingZeros => (instruction >> 12) & 0xf != 15,
         ArmInstructionKind::Multiply => [
             (instruction >> 16) & 0xf,
@@ -406,6 +415,9 @@ fn lower_block(
             }
             ArmInstructionKind::SingleTransfer => {
                 lower_single_transfer(builder, state, pc, index, instruction, condition)
+            }
+            ArmInstructionKind::HalfTransfer => {
+                lower_half_transfer(builder, state, pc, index, instruction, condition)
             }
             ArmInstructionKind::CountLeadingZeros => {
                 let rd = ((instruction >> 12) & 0xf) as usize;
@@ -653,6 +665,101 @@ fn lower_single_transfer(
         } else {
             value
         };
+        builder
+            .ins()
+            .store(MemFlagsData::new(), value, host_address, 0);
+        builder.ins().jump(continuation_block, &[]);
+    }
+
+    builder.switch_to_block(bailout_block);
+    builder.seal_block(bailout_block);
+    state.flush(builder);
+    let current_pc = iconst_u32(builder, pc);
+    builder
+        .ins()
+        .store(MemFlagsData::new(), current_pc, state.registers, 15 * 4);
+    let count = builder.ins().iconst(types::I64, completed as i64);
+    builder.ins().return_(&[count]);
+
+    builder.switch_to_block(continuation_block);
+    builder.seal_block(continuation_block);
+    if load {
+        state.write(rd, builder.block_params(continuation_block)[0]);
+    }
+    if !pre || instruction & (1 << 21) != 0 {
+        state.write_conditionally(builder, rn, adjusted, condition);
+    }
+}
+
+fn lower_half_transfer(
+    builder: &mut FunctionBuilder<'_>,
+    state: &mut LoweringState,
+    pc: u32,
+    completed: usize,
+    instruction: u32,
+    condition: Value,
+) {
+    let rn = ((instruction >> 16) & 0xf) as usize;
+    let rd = ((instruction >> 12) & 0xf) as usize;
+    let base = state.read(builder, rn);
+    let offset = if instruction & (1 << 22) != 0 {
+        let immediate = ((instruction >> 4) & 0xf0) | (instruction & 0xf);
+        iconst_u32(builder, immediate)
+    } else {
+        state.read(builder, (instruction & 0xf) as usize)
+    };
+    let adjusted = if instruction & (1 << 23) != 0 {
+        builder.ins().iadd(base, offset)
+    } else {
+        builder.ins().isub(base, offset)
+    };
+    let pre = instruction & (1 << 24) != 0;
+    let address = if pre { adjusted } else { base };
+    let kind = (instruction >> 5) & 3;
+    let load = instruction & (1 << 20) != 0;
+    let width = if kind == 2 { 1 } else { 2 };
+    let store_value = (!load).then(|| state.read(builder, rd));
+    let old_load_value = load.then(|| state.read(builder, rd));
+    let execute_block = builder.create_block();
+    let mapped_block = builder.create_block();
+    let bailout_block = builder.create_block();
+    let continuation_block = builder.create_block();
+    if load {
+        builder.append_block_param(continuation_block, types::I32);
+    }
+    let skipped_arguments = old_load_value.map_or_else(Vec::new, |value| vec![value.into()]);
+    builder.ins().brif(
+        condition,
+        execute_block,
+        &[],
+        continuation_block,
+        &skipped_arguments,
+    );
+
+    builder.switch_to_block(execute_block);
+    builder.seal_block(execute_block);
+    let (host_address, mapped) = heap_address(builder, state, address, width, !load);
+    builder
+        .ins()
+        .brif(mapped, mapped_block, &[], bailout_block, &[]);
+
+    builder.switch_to_block(mapped_block);
+    builder.seal_block(mapped_block);
+    if load {
+        let load_type = if width == 1 { types::I8 } else { types::I16 };
+        let loaded = builder
+            .ins()
+            .load(load_type, MemFlagsData::new(), host_address, 0);
+        let value = if kind == 1 {
+            builder.ins().uextend(types::I32, loaded)
+        } else {
+            builder.ins().sextend(types::I32, loaded)
+        };
+        builder.ins().jump(continuation_block, &[value.into()]);
+    } else {
+        let value = builder
+            .ins()
+            .ireduce(types::I16, store_value.expect("store value was captured"));
         builder
             .ins()
             .store(MemFlagsData::new(), value, host_address, 0);
@@ -963,6 +1070,39 @@ mod tests {
             42
         );
         assert_eq!(registers[15], start + 12);
+    }
+
+    #[test]
+    fn compiled_block_accesses_halfwords_directly() {
+        let start = 0x1000_1000;
+        let heap_base = 0x2100_0000;
+        let instructions = [
+            DecodedArmInstruction::decode(0xe1c0_10b2),
+            DecodedArmInstruction::decode(0xe1d0_20b2),
+            DecodedArmInstruction::decode(0xe1d0_30d1),
+            DecodedArmInstruction::decode(0xe1d0_40f2),
+        ];
+        let mut heap = vec![0_u8; 0x1000];
+        heap[0x101] = 0x80;
+        let mut compiler = Compiler::new().unwrap();
+        let block = compiler
+            .compile(start, &instructions, heap_base)
+            .unwrap()
+            .unwrap();
+        let mut registers = [0_u32; REGISTER_COUNT];
+        let mut cpsr = 0_u32;
+        registers[0] = heap_base + 0x100;
+        registers[1] = 0xff80;
+
+        // SAFETY: The supplied heap contains every guest memory access.
+        let completed =
+            unsafe { (block.function)(registers.as_mut_ptr(), &mut cpsr, heap.as_mut_ptr()) };
+
+        assert_eq!(completed, 4);
+        assert_eq!(registers[2], 0xff80);
+        assert_eq!(registers[3], 0xffff_ff80);
+        assert_eq!(registers[4], 0xffff_ff80);
+        assert_eq!(registers[15], start + 16);
     }
 
     #[test]
