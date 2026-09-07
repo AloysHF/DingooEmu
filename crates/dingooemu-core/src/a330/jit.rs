@@ -234,8 +234,8 @@ fn transfer_offset_supported(instruction: u32) -> bool {
 impl Compiler {
     fn new() -> anyhow::Result<Self> {
         let mut flag_builder = settings::builder();
-        flag_builder.set("opt_level", "speed")?;
-        flag_builder.set("enable_alias_analysis", "true")?;
+        flag_builder.set("opt_level", "none")?;
+        flag_builder.set("enable_alias_analysis", "false")?;
         let isa_builder = cranelift_native::builder()
             .map_err(|error| anyhow::anyhow!("unsupported JIT host: {error}"))?;
         let isa = isa_builder.finish(settings::Flags::new(flag_builder))?;
@@ -859,36 +859,64 @@ fn lower_condition(
     if condition == 14 {
         return builder.ins().iconst(types::I8, 1);
     }
-    let n = flag_value(builder, state, N_FLAG);
-    let z = flag_value(builder, state, Z_FLAG);
-    let c = flag_value(builder, state, C_FLAG);
-    let v = flag_value(builder, state, V_FLAG);
+    // Each condition reads only the flags it needs, so hot conditional code
+    // lowers to the smallest possible instruction sequence.
     match condition {
-        0 => z,
-        1 => invert_bool(builder, z),
-        2 => c,
-        3 => invert_bool(builder, c),
-        4 => n,
-        5 => invert_bool(builder, n),
-        6 => v,
-        7 => invert_bool(builder, v),
+        0 => flag_value(builder, state, Z_FLAG),
+        1 => {
+            let z = flag_value(builder, state, Z_FLAG);
+            invert_bool(builder, z)
+        }
+        2 => flag_value(builder, state, C_FLAG),
+        3 => {
+            let c = flag_value(builder, state, C_FLAG);
+            invert_bool(builder, c)
+        }
+        4 => flag_value(builder, state, N_FLAG),
+        5 => {
+            let n = flag_value(builder, state, N_FLAG);
+            invert_bool(builder, n)
+        }
+        6 => flag_value(builder, state, V_FLAG),
+        7 => {
+            let v = flag_value(builder, state, V_FLAG);
+            invert_bool(builder, v)
+        }
         8 => {
+            let z = flag_value(builder, state, Z_FLAG);
             let not_z = invert_bool(builder, z);
+            let c = flag_value(builder, state, C_FLAG);
             builder.ins().band(c, not_z)
         }
         9 => {
+            let c = flag_value(builder, state, C_FLAG);
             let not_c = invert_bool(builder, c);
+            let z = flag_value(builder, state, Z_FLAG);
             builder.ins().bor(not_c, z)
         }
-        10 => builder.ins().icmp(IntCC::Equal, n, v),
-        11 => builder.ins().icmp(IntCC::NotEqual, n, v),
+        10 | 11 => {
+            let n = flag_value(builder, state, N_FLAG);
+            let v = flag_value(builder, state, V_FLAG);
+            let equal = builder.ins().icmp(IntCC::Equal, n, v);
+            if condition == 10 {
+                equal
+            } else {
+                invert_bool(builder, equal)
+            }
+        }
         12 => {
+            let z = flag_value(builder, state, Z_FLAG);
             let not_z = invert_bool(builder, z);
+            let n = flag_value(builder, state, N_FLAG);
+            let v = flag_value(builder, state, V_FLAG);
             let equal = builder.ins().icmp(IntCC::Equal, n, v);
             builder.ins().band(not_z, equal)
         }
         13 => {
+            let n = flag_value(builder, state, N_FLAG);
+            let v = flag_value(builder, state, V_FLAG);
             let unequal = builder.ins().icmp(IntCC::NotEqual, n, v);
+            let z = flag_value(builder, state, Z_FLAG);
             builder.ins().bor(z, unequal)
         }
         _ => unreachable!("condition support checked before lowering"),
@@ -920,6 +948,21 @@ fn update_flags(
     condition: Value,
 ) {
     let old = state.read_cpsr(builder);
+    // The N flag sits at bit 31 exactly like in the result, and every other
+    // flag is a shifted boolean, so the new flag bits are built as one mask
+    // instead of one select per flag.
+    let mut mask = builder.ins().band_imm_u(result, i64::from(N_FLAG));
+    let zero = builder.ins().icmp_imm_u(IntCC::Equal, result, 0);
+    let zero_bit = flag_bit(builder, zero, Z_FLAG);
+    mask = builder.ins().bor(mask, zero_bit);
+    if let Some(carry) = carry {
+        let carry_bit = flag_bit(builder, carry, C_FLAG);
+        mask = builder.ins().bor(mask, carry_bit);
+    }
+    if let Some(overflow) = overflow {
+        let overflow_bit = flag_bit(builder, overflow, V_FLAG);
+        mask = builder.ins().bor(mask, overflow_bit);
+    }
     let mut clear_mask = N_FLAG | Z_FLAG;
     if carry.is_some() {
         clear_mask |= C_FLAG;
@@ -927,25 +970,17 @@ fn update_flags(
     if overflow.is_some() {
         clear_mask |= V_FLAG;
     }
-    let mut updated = builder.ins().band_imm_u(old, i64::from(!clear_mask));
-    let negative = bit_is_set(builder, result, 31);
-    let zero = builder.ins().icmp_imm_u(IntCC::Equal, result, 0);
-    updated = insert_flag(builder, updated, negative, N_FLAG);
-    updated = insert_flag(builder, updated, zero, Z_FLAG);
-    if let Some(carry) = carry {
-        updated = insert_flag(builder, updated, carry, C_FLAG);
-    }
-    if let Some(overflow) = overflow {
-        updated = insert_flag(builder, updated, overflow, V_FLAG);
-    }
+    let cleared = builder.ins().band_imm_u(old, i64::from(!clear_mask));
+    let updated = builder.ins().bor(cleared, mask);
     state.write_cpsr(builder.ins().select(condition, updated, old));
 }
 
-fn insert_flag(builder: &mut FunctionBuilder<'_>, cpsr: Value, enabled: Value, flag: u32) -> Value {
-    let set = iconst_u32(builder, flag);
-    let clear = iconst_u32(builder, 0);
-    let value = builder.ins().select(enabled, set, clear);
-    builder.ins().bor(cpsr, value)
+/// Moves a boolean value into its CPSR flag bit position.
+fn flag_bit(builder: &mut FunctionBuilder<'_>, enabled: Value, flag: u32) -> Value {
+    let widened = builder.ins().uextend(types::I32, enabled);
+    builder
+        .ins()
+        .ishl_imm_u(widened, i64::from(flag.trailing_zeros()))
 }
 
 fn iconst_u32(builder: &mut FunctionBuilder<'_>, value: u32) -> Value {
