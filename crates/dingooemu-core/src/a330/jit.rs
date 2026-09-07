@@ -12,7 +12,7 @@ use cranelift_module::{default_libcall_names, Linkage, Module};
 use std::mem::transmute;
 
 const HOT_BLOCK_THRESHOLD: u16 = 128;
-const MIN_BLOCK_LEN: usize = 3;
+const MIN_BLOCK_LEN: usize = 2;
 const CACHE_SLOTS: usize = 4_096;
 const MAX_COMPILES_PER_SLICE: u8 = 8;
 const REGISTER_COUNT: usize = 16;
