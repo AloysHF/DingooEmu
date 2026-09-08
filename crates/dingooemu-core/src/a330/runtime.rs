@@ -332,6 +332,7 @@ pub(crate) struct Runtime {
     console_output: Vec<u8>,
     instruction_blocks: Box<[CachedInstructionBlock]>,
     instruction_cache_pages: Box<[u16]>,
+    code_page_generations: Box<[u64]>,
     code_generation: u64,
     #[cfg(feature = "jit")]
     jit: JitEngine,
@@ -404,6 +405,7 @@ impl Runtime {
             console_output: Vec::new(),
             instruction_blocks: empty_instruction_block_cache(),
             instruction_cache_pages: vec![0; instruction_cache_page_count].into_boxed_slice(),
+            code_page_generations: vec![1; instruction_cache_page_count].into_boxed_slice(),
             code_generation: 1,
             #[cfg(feature = "jit")]
             jit: JitEngine::new(),
@@ -665,6 +667,7 @@ impl Runtime {
         }
         self.instruction_cache_pages.fill(0);
         self.code_generation = self.code_generation.wrapping_add(1);
+        self.code_page_generations.fill(self.code_generation);
     }
 
     pub(crate) fn tick(&mut self) -> Result<()> {
@@ -716,6 +719,7 @@ impl Runtime {
                     event_pending: false,
                     instruction_blocks: &mut self.instruction_blocks,
                     instruction_cache_pages: &mut self.instruction_cache_pages,
+                    code_page_generations: &mut self.code_page_generations,
                     instruction_cache_invalidated: false,
                     code_generation: &mut self.code_generation,
                 };
@@ -922,6 +926,7 @@ struct RuntimeBus<'a> {
     event_pending: bool,
     instruction_blocks: &'a mut [CachedInstructionBlock],
     instruction_cache_pages: &'a mut [u16],
+    code_page_generations: &'a mut [u64],
     instruction_cache_invalidated: bool,
     code_generation: &'a mut u64,
 }
@@ -1437,6 +1442,34 @@ mod tests {
 
         assert_eq!(runtime.cpu.r[0], 7);
         assert_eq!(runtime.memory.read32(origin + 4).unwrap(), 0xe3a0_0007);
+        assert_eq!(runtime.code_page_generations[0], 2);
+    }
+
+    #[test]
+    fn data_write_on_other_page_preserves_code_page_generation() {
+        let mut package = svc_package("unused");
+        let origin = package.load_base();
+        let words = [0xe581_2000_u32, 0xe12f_ff1e];
+        package.data.resize(0x80 + 0x1400, 0);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.rawd.base.size = 0x1400;
+        package.rawd.program_size = 0x1400;
+        package.imports.clear();
+
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        let data_address = origin + 0x1000;
+        runtime.cpu.r[1] = data_address;
+        runtime.cpu.r[2] = 0x1234_5678;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.memory.read32(data_address).unwrap(), 0x1234_5678);
+        assert_eq!(runtime.code_generation, 2);
+        assert_eq!(runtime.code_page_generations[0], 1);
+        assert_eq!(runtime.code_page_generations[1], 2);
     }
 
     #[test]

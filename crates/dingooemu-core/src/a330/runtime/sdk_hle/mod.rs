@@ -56,6 +56,7 @@ impl RuntimeBus<'_> {
         let first_page = ((overlap_start - program_start) >> INSTRUCTION_CACHE_PAGE_SHIFT) as usize;
         let last_page =
             ((overlap_end - 1 - program_start) >> INSTRUCTION_CACHE_PAGE_SHIFT) as usize;
+        self.code_page_generations[first_page..=last_page].fill(*self.code_generation);
         if self.instruction_cache_pages[first_page..=last_page]
             .iter()
             .all(|count| *count == 0)
@@ -144,9 +145,14 @@ impl RuntimeBus<'_> {
         let jit_result = {
             let heap_base = self.memory.heap_base();
             let heap = self.memory.jit_heap_ptr();
+            let generation = self
+                .block_page_range(address, block_len as u8)
+                .map(|page| self.code_page_generations[page])
+                .max()
+                .unwrap_or_default();
             jit.execute(
                 address,
-                *self.code_generation,
+                generation,
                 &self.instruction_blocks[cache_index].instructions[..block_len],
                 instruction_limit,
                 JitCpuContext {
