@@ -19,11 +19,16 @@ impl RuntimeBus<'_> {
                 if count == 0 || count > 4 * 1024 * 1024 {
                     cpu.r[0] = 0;
                 } else if !self.audio.can_write() && self.profile == ArmProfile::Retail {
+                    // The device buffer is full; the guest retries the same
+                    // write once the consumed audio frees space. Waiting for
+                    // playback must not burn a scheduler slice.
                     cpu.r[15] = cpu.r[15].wrapping_sub(4);
-                    self.yield_requested = true;
+                    self.sleep_requested = true;
                 } else {
                     let data = self.memory.read_bytes(buffer, count as usize)?;
-                    cpu.r[0] = u32::from(self.audio.write(data));
+                    let written = self.audio.write(data);
+                    *self.audio_written |= written;
+                    cpu.r[0] = u32::from(written);
                 }
             }
             "waveout_try_write" => {
@@ -32,7 +37,9 @@ impl RuntimeBus<'_> {
                     0
                 } else {
                     let data = self.memory.read_bytes(cpu.r[1], count as usize)?;
-                    u32::from(self.audio.write(data))
+                    let written = self.audio.write(data);
+                    *self.audio_written |= written;
+                    u32::from(written)
                 };
             }
             "waveout_can_write" | "waveout_can_write_nonblocking" | "pcm_can_write" => {

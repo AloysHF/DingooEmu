@@ -28,9 +28,8 @@ impl RuntimeBus<'_> {
             }
             "SysLcdClear" => {
                 let clear = vec![0; FRAMEBUFFER_SIZE];
-                self.memory.write_bytes(FRAMEBUFFER_BASE, &clear)?;
-                self.memory
-                    .write_bytes(LEGACY_FRAMEBUFFER_ADDRESS, &clear)?;
+                self.write_memory(FRAMEBUFFER_BASE, &clear)?;
+                self.write_memory(LEGACY_FRAMEBUFFER_ADDRESS, &clear)?;
                 cpu.r[0] = 0;
             }
             "FlushDCache" | "__dcache_writeback_all" => {
@@ -40,6 +39,10 @@ impl RuntimeBus<'_> {
                 }
                 cpu.r[0] = 0;
             }
+            "InvalidICache" => {
+                self.clear_instruction_cache();
+                cpu.r[0] = 0;
+            }
             "BMF_SelectPixelFunc"
             | "LCDEnableDoubleFB"
             | "LCDDisableDoubleFB"
@@ -47,7 +50,6 @@ impl RuntimeBus<'_> {
             | "LCDInit"
             | "LCDSetRefreshRate"
             | "LCDSetBrightness"
-            | "InvalidICache"
             | "fsys_RefreshCache"
             | "consoleEnable"
             | "consoleDisable"

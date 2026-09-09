@@ -176,10 +176,12 @@ never replaces a non-solid frame that the guest already rendered.
 ## Performance
 
 Use a release build for normal gameplay. APP content uses the cached MIPS
-interpreter and may use the optional Android JIT in libretro builds. A330
-content uses the ARM32/Thumb interpreter. Both runtimes treat guest frame
-submission as a frontend frame boundary and coordinate task, input, video, and
-audio work through the same 60 Hz host-facing loop.
+interpreter and may use the optional JIT in supported 64-bit builds. A330
+content uses a tiered ARM32/Thumb runtime that translates proven hot integer
+blocks and falls back to the interpreter for all other instructions. Both
+runtimes treat guest frame submission as a frontend frame boundary and
+coordinate task, input, video, and audio work through the same 60 Hz
+host-facing loop.
 
 ## Screenshot Mode
 

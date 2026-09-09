@@ -1,5 +1,7 @@
-use super::cpu::{Bus, Cpu};
+use super::cpu::{Bus, Cpu, DecodedArmInstruction, ExecutionState};
 use super::firmware_archive::FirmwareArchive;
+#[cfg(feature = "jit")]
+use super::jit::{JitCpuContext, JitEngine};
 use super::memory::{
     Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE, LEGACY_GRAPHICS_STRIDE,
     LEGACY_GRAPHICS_SURFACE, STACK_BASE, STACK_SIZE,
@@ -21,7 +23,11 @@ use std::path::PathBuf;
 
 mod sdk_hle;
 
-const INSTRUCTIONS_PER_SLICE: u64 = 1_000_000;
+const INSTRUCTIONS_PER_SLICE: u64 = 3_000_000;
+const MAX_INSTRUCTION_BLOCK_LEN: usize = 64;
+const INSTRUCTION_BLOCK_CACHE_SLOTS: usize = 4_096;
+const INSTRUCTION_CACHE_PAGE_SHIFT: u32 = 12;
+const INSTRUCTION_CACHE_PAGE_SIZE: usize = 1 << INSTRUCTION_CACHE_PAGE_SHIFT;
 const APP_PATH_ADDRESS: u32 = STACK_BASE + 0x200;
 const LOCALE_ADDRESS: u32 = STACK_BASE + 0x600;
 const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
@@ -29,6 +35,40 @@ const FRAMEBUFFER_BITS_EXPLICIT: u32 = 1 << 31;
 const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
 const FILE_SEARCH_NAME_CAPACITY: usize = 256;
 const CONSOLE_OUTPUT_LIMIT: usize = 4096;
+
+enum SliceEvent {
+    BudgetExhausted,
+    Exit,
+    Stop,
+    Yield,
+    Sleep,
+    Frame(u32),
+}
+
+/// Instruction budget for a supplemental task rotation. Peer tasks only need
+/// a short round to refill the audio device buffer, not a full slice.
+const SUPPLEMENTAL_QUANTUM: u64 = 256_000;
+
+struct CachedInstructionBlock {
+    start: u32,
+    len: u8,
+    instructions: [DecodedArmInstruction; MAX_INSTRUCTION_BLOCK_LEN],
+}
+
+fn instruction_block_cache_index(address: u32) -> usize {
+    (address as usize >> 2) & (INSTRUCTION_BLOCK_CACHE_SLOTS - 1)
+}
+
+fn empty_instruction_block_cache() -> Box<[CachedInstructionBlock]> {
+    std::iter::repeat_with(|| CachedInstructionBlock {
+        start: 0,
+        len: 0,
+        instructions: [DecodedArmInstruction::default(); MAX_INSTRUCTION_BLOCK_LEN],
+    })
+    .take(INSTRUCTION_BLOCK_CACHE_SLOTS)
+    .collect::<Vec<_>>()
+    .into_boxed_slice()
+}
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct GuestFile {
@@ -295,6 +335,12 @@ pub(crate) struct Runtime {
     framebuffer_bits: u32,
     firmware_archive: Option<FirmwareArchive>,
     console_output: Vec<u8>,
+    instruction_blocks: Box<[CachedInstructionBlock]>,
+    instruction_cache_pages: Box<[u16]>,
+    code_page_generations: Box<[u64]>,
+    code_generation: u64,
+    #[cfg(feature = "jit")]
+    jit: JitEngine,
 }
 
 impl Runtime {
@@ -331,6 +377,8 @@ impl Runtime {
         let save_directory =
             (!content_directory.as_os_str().is_empty()).then(|| content_directory.clone());
         let firmware_archive = FirmwareArchive::discover(&content_directory);
+        let instruction_cache_page_count =
+            (package.program_size() as usize).div_ceil(INSTRUCTION_CACHE_PAGE_SIZE);
         Ok(Self {
             package,
             cpu,
@@ -360,6 +408,12 @@ impl Runtime {
             framebuffer_bits,
             firmware_archive,
             console_output: Vec::new(),
+            instruction_blocks: empty_instruction_block_cache(),
+            instruction_cache_pages: vec![0; instruction_cache_page_count].into_boxed_slice(),
+            code_page_generations: vec![1; instruction_cache_page_count].into_boxed_slice(),
+            code_generation: 1,
+            #[cfg(feature = "jit")]
+            jit: JitEngine::new(),
         })
     }
 
@@ -371,6 +425,13 @@ impl Runtime {
         self.running = false;
         self.cpu.stop();
         self.flush_save_files();
+    }
+
+    pub(crate) fn set_jit_enabled(&mut self, enabled: bool) {
+        #[cfg(feature = "jit")]
+        self.jit.set_enabled(enabled);
+        #[cfg(not(feature = "jit"))]
+        let _ = enabled;
     }
 
     fn present_early_exit(&mut self) {
@@ -395,6 +456,8 @@ impl Runtime {
         let save_directory = self.save_directory.clone();
         let cheats = self.cheats.clone();
         let instruction_policy = self.cpu.unknown_instruction_policy();
+        #[cfg(feature = "jit")]
+        let jit_enabled = self.jit.is_enabled();
         let mut replacement = Self::from_package(self.package.clone(), self.content_path.clone())?;
         replacement.unknown_hle_policy = policy;
         replacement.unknown_hle_allowlist = allowlist;
@@ -404,6 +467,8 @@ impl Runtime {
         replacement
             .cpu
             .set_unknown_instruction_policy(instruction_policy);
+        #[cfg(feature = "jit")]
+        replacement.jit.set_enabled(jit_enabled);
         self.memory.copy_state_from(&replacement.memory);
         std::mem::swap(&mut replacement.memory, &mut self.memory);
         if was_running {
@@ -564,6 +629,7 @@ impl Runtime {
         self.active_framebuffer = state.active_framebuffer;
         self.framebuffer_bits = state.framebuffer_bits;
         self.console_output.clear();
+        self.clear_instruction_cache();
         Ok(())
     }
 
@@ -589,22 +655,163 @@ impl Runtime {
         self.cheats.clear();
     }
 
+    pub(crate) fn system_ram_mut(&mut self) -> &mut [u8] {
+        self.clear_instruction_cache();
+        self.memory.system_ram_mut()
+    }
+
+    pub(crate) fn write_memory_u32(&mut self, address: u32, value: u32) -> Result<()> {
+        self.memory.write32(address, value)?;
+        self.clear_instruction_cache();
+        Ok(())
+    }
+
+    fn clear_instruction_cache(&mut self) {
+        for block in &mut self.instruction_blocks {
+            block.len = 0;
+        }
+        self.instruction_cache_pages.fill(0);
+        self.code_generation = self.code_generation.wrapping_add(1);
+        self.code_page_generations.fill(self.code_generation);
+    }
+
     pub(crate) fn tick(&mut self) -> Result<()> {
         if !self.is_running() {
             return Ok(());
         }
+        if self.cheats.enabled_rules().next().is_some() {
+            self.clear_instruction_cache();
+        }
+        #[cfg(feature = "jit")]
+        self.jit.begin_slice();
         super::cheats::apply(&self.cheats, &mut self.memory, &mut self.cpu);
         let profile = self.memory.profile();
         let mut frame_address = None;
         let mut presented_frame_address = None;
+        let mut audio_written = false;
         let mut slices_remaining = self.tasks.len() + 1;
+        // A frame event or the first successful audio write can arm short
+        // rotation rounds so a timed peer task can refill the device buffer.
+        let mut supplemental_rounds = 0usize;
+        let mut audio_rounds_armed = false;
         'scheduler: loop {
             let initial = self.cpu.instruction_count;
             let mut previous_pc = self.cpu.r[15];
-            while self.cpu.is_running()
-                && self.cpu.instruction_count - initial < INSTRUCTIONS_PER_SLICE
-            {
-                if self.cpu.r[15] == EXIT_ADDRESS {
+            let event = {
+                let mut bus = RuntimeBus {
+                    memory: &mut self.memory,
+                    package: &self.package,
+                    imports: &self.package.imports,
+                    profile,
+                    unknown_hle_calls: &mut self.unknown_hle_calls,
+                    unknown_hle_policy: self.unknown_hle_policy,
+                    unknown_hle_allowlist: &self.unknown_hle_allowlist,
+                    heap: &mut self.heap,
+                    frame_address: &mut frame_address,
+                    stop_requested: false,
+                    dynamic_imports: &mut self.dynamic_imports,
+                    tasks: &mut self.tasks,
+                    current_priority: self.current_priority,
+                    yield_requested: false,
+                    finish_current: false,
+                    content_directory: &self.content_directory,
+                    save_directory: self.save_directory.as_deref(),
+                    files: &mut self.files,
+                    file_searches: &mut self.file_searches,
+                    next_file_handle: &mut self.next_file_handle,
+                    semaphores: &mut self.semaphores,
+                    active_framebuffer: &mut self.active_framebuffer,
+                    framebuffer_bits: &mut self.framebuffer_bits,
+                    audio: &mut self.audio,
+                    audio_written: &mut audio_written,
+                    input: &mut self.input,
+                    firmware_archive: self.firmware_archive.as_ref(),
+                    console_output: &mut self.console_output,
+                    event_pending: false,
+                    sleep_requested: false,
+                    instruction_blocks: &mut self.instruction_blocks,
+                    instruction_cache_pages: &mut self.instruction_cache_pages,
+                    code_page_generations: &mut self.code_page_generations,
+                    instruction_cache_invalidated: false,
+                    code_generation: &mut self.code_generation,
+                };
+                let mut known_task_count = bus.tasks.len();
+                let quantum = if supplemental_rounds > 0 {
+                    SUPPLEMENTAL_QUANTUM
+                } else {
+                    INSTRUCTIONS_PER_SLICE
+                };
+                loop {
+                    if !self.cpu.is_running() || self.cpu.instruction_count - initial >= quantum {
+                        break SliceEvent::BudgetExhausted;
+                    }
+                    if self.cpu.r[15] == EXIT_ADDRESS {
+                        break SliceEvent::Exit;
+                    }
+                    let mut error_pc = self.cpu.r[15];
+                    let remaining =
+                        (INSTRUCTIONS_PER_SLICE - (self.cpu.instruction_count - initial)) as usize;
+                    if let Err(error) = bus.execute_cached_block(
+                        &mut self.cpu,
+                        remaining,
+                        &mut previous_pc,
+                        &mut error_pc,
+                        #[cfg(feature = "jit")]
+                        &mut self.jit,
+                    ) {
+                        return match error {
+                            SimulatorError::MemoryError { .. }
+                            | SimulatorError::InvalidInstruction { .. } => {
+                                Err(SimulatorError::CpuError {
+                                    pc: error_pc,
+                                    message: format!(
+                                        "{:?} state: {error}; previous_pc={previous_pc:#010x}, r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, sp={:#010x}, lr={:#010x}",
+                                        self.cpu.execution_state(),
+                                        self.cpu.r[0],
+                                        self.cpu.r[1],
+                                        self.cpu.r[2],
+                                        self.cpu.r[3],
+                                        self.cpu.r[13],
+                                        self.cpu.r[14]
+                                    ),
+                                })
+                            }
+                            other => Err(other),
+                        };
+                    }
+                    if !bus.event_pending {
+                        continue;
+                    }
+                    bus.event_pending = false;
+                    let current_task_count = bus.tasks.len();
+                    if current_task_count >= known_task_count {
+                        slices_remaining += current_task_count - known_task_count;
+                    } else {
+                        slices_remaining = slices_remaining
+                            .saturating_sub(known_task_count - current_task_count)
+                            .max(1);
+                    }
+                    known_task_count = current_task_count;
+                    if bus.stop_requested {
+                        break SliceEvent::Stop;
+                    }
+                    if bus.finish_current {
+                        self.cpu.r[15] = EXIT_ADDRESS;
+                        bus.finish_current = false;
+                    }
+                    if bus.sleep_requested {
+                        break SliceEvent::Sleep;
+                    }
+                    if bus.yield_requested {
+                        break SliceEvent::Yield;
+                    }
+                    if let Some(address) = bus.frame_address.take() {
+                        break SliceEvent::Frame(address);
+                    }
+                }
+            };
+            match event {
+                SliceEvent::Exit => {
                     if !self.boot_complete {
                         self.boot_complete = true;
                         if let Some(entry) = self.app_main {
@@ -628,104 +835,64 @@ impl Runtime {
                     }
                     continue 'scheduler;
                 }
-                let queued_tasks_before = self.tasks.len();
-                let (stop_requested, yield_requested, finish_current, queued_tasks_after) = {
-                    let mut bus = RuntimeBus {
-                        memory: &mut self.memory,
-                        package: &self.package,
-                        imports: &self.package.imports,
-                        profile,
-                        unknown_hle_calls: &mut self.unknown_hle_calls,
-                        unknown_hle_policy: self.unknown_hle_policy,
-                        unknown_hle_allowlist: &self.unknown_hle_allowlist,
-                        heap: &mut self.heap,
-                        frame_address: &mut frame_address,
-                        stop_requested: false,
-                        dynamic_imports: &mut self.dynamic_imports,
-                        tasks: &mut self.tasks,
-                        current_priority: self.current_priority,
-                        yield_requested: false,
-                        finish_current: false,
-                        content_directory: &self.content_directory,
-                        save_directory: self.save_directory.as_deref(),
-                        files: &mut self.files,
-                        file_searches: &mut self.file_searches,
-                        next_file_handle: &mut self.next_file_handle,
-                        semaphores: &mut self.semaphores,
-                        active_framebuffer: &mut self.active_framebuffer,
-                        framebuffer_bits: &mut self.framebuffer_bits,
-                        audio: &mut self.audio,
-                        input: &mut self.input,
-                        firmware_archive: self.firmware_archive.as_ref(),
-                        console_output: &mut self.console_output,
-                    };
-                    let pc = self.cpu.r[15];
-                    if let Err(error) = self.cpu.step(&mut bus) {
-                        return match error {
-                            SimulatorError::MemoryError { .. }
-                            | SimulatorError::InvalidInstruction { .. } => {
-                                Err(SimulatorError::CpuError {
-                                    pc,
-                                    message: format!(
-                                        "{:?} state: {error}; previous_pc={previous_pc:#010x}, r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, sp={:#010x}, lr={:#010x}",
-                                        self.cpu.execution_state(),
-                                        self.cpu.r[0],
-                                        self.cpu.r[1],
-                                        self.cpu.r[2],
-                                        self.cpu.r[3],
-                                        self.cpu.r[13],
-                                        self.cpu.r[14]
-                                    ),
-                                })
-                            }
-                            other => Err(other),
-                        };
-                    }
-                    previous_pc = pc;
-                    (
-                        bus.stop_requested,
-                        bus.yield_requested,
-                        bus.finish_current,
-                        bus.tasks.len(),
-                    )
-                };
-                if queued_tasks_after >= queued_tasks_before {
-                    slices_remaining += queued_tasks_after - queued_tasks_before;
-                } else {
-                    slices_remaining = slices_remaining
-                        .saturating_sub(queued_tasks_before - queued_tasks_after)
-                        .max(1);
-                }
-                if stop_requested {
+                SliceEvent::Stop => {
                     self.present_early_exit();
                     self.stop();
                     break 'scheduler;
                 }
-                if finish_current {
-                    self.cpu.r[15] = EXIT_ADDRESS;
-                }
-                if yield_requested {
+                SliceEvent::Sleep => {
                     self.rotate_task();
-                    slices_remaining -= 1;
-                    if slices_remaining == 0 {
-                        break 'scheduler;
+                    if supplemental_rounds > 0 {
+                        supplemental_rounds -= 1;
+                        if supplemental_rounds == 0 {
+                            break 'scheduler;
+                        }
+                    } else if audio_written && !audio_rounds_armed && !self.tasks.is_empty() {
+                        audio_rounds_armed = true;
+                        supplemental_rounds = 2 * self.tasks.len();
+                    } else {
+                        slices_remaining -= 1;
+                        if slices_remaining == 0 {
+                            break 'scheduler;
+                        }
                     }
                     continue 'scheduler;
                 }
-                if let Some(address) = frame_address.take() {
+                SliceEvent::Yield | SliceEvent::BudgetExhausted => {
+                    self.rotate_task();
+                    if supplemental_rounds > 0 {
+                        supplemental_rounds -= 1;
+                        if supplemental_rounds == 0 {
+                            break 'scheduler;
+                        }
+                    } else {
+                        slices_remaining -= 1;
+                        if slices_remaining == 0 {
+                            break 'scheduler;
+                        }
+                    }
+                    continue 'scheduler;
+                }
+                SliceEvent::Frame(address) => {
                     presented_frame_address = Some(address);
                     self.rotate_task();
-                    slices_remaining -= 1;
-                    if slices_remaining == 0 {
-                        break 'scheduler;
+                    if self.tasks.is_empty() {
+                        slices_remaining -= 1;
+                        if slices_remaining == 0 {
+                            break 'scheduler;
+                        }
+                    } else if supplemental_rounds == 0 {
+                        // Arm the rounds only when the frame phase starts so a
+                        // fast-rendering task cannot keep re-arming them.
+                        supplemental_rounds = 2 * self.tasks.len() + 1;
+                    } else {
+                        supplemental_rounds -= 1;
+                        if supplemental_rounds == 0 {
+                            break 'scheduler;
+                        }
                     }
                     continue 'scheduler;
                 }
-            }
-            self.rotate_task();
-            slices_remaining -= 1;
-            if slices_remaining == 0 {
-                break 'scheduler;
             }
         }
         if let Some(address) = presented_frame_address {
@@ -801,9 +968,17 @@ struct RuntimeBus<'a> {
     active_framebuffer: &'a mut u32,
     framebuffer_bits: &'a mut u32,
     audio: &'a mut Audio,
+    audio_written: &'a mut bool,
     input: &'a mut Input,
     firmware_archive: Option<&'a FirmwareArchive>,
     console_output: &'a mut Vec<u8>,
+    event_pending: bool,
+    sleep_requested: bool,
+    instruction_blocks: &'a mut [CachedInstructionBlock],
+    instruction_cache_pages: &'a mut [u16],
+    code_page_generations: &'a mut [u64],
+    instruction_cache_invalidated: bool,
+    code_generation: &'a mut u64,
 }
 
 fn framebuffer_is_solid(framebuffer: &[u8]) -> bool {
@@ -1222,6 +1397,36 @@ mod tests {
         package
     }
 
+    fn audio_sleep_loop_package() -> PackageImage {
+        let mut package = svc_package("waveout_write");
+        let origin = package.load_base();
+        let words = [0xef00_0000_u32, 0xef00_0001, 0xeaff_fffc];
+        package.data.resize(0x80 + 0x30, 0);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.rawd.base.size = 0x30;
+        package.rawd.program_size = 0x30;
+        package.imports = vec![
+            SymbolEntry {
+                string_offset: 0,
+                unknown0: 0,
+                unknown1: 0,
+                address: origin + 0x20,
+                name: "waveout_write".into(),
+            },
+            SymbolEntry {
+                string_offset: 0,
+                unknown0: 0,
+                unknown1: 0,
+                address: origin + 0x28,
+                name: "OSTimeDly".into(),
+            },
+        ];
+        package
+    }
+
     fn memory_c_string(memory: &Memory, address: u32) -> String {
         let bytes = (0..256)
             .map(|offset| memory.read8(address + offset).unwrap())
@@ -1269,6 +1474,82 @@ mod tests {
         heap.deallocate(third);
 
         assert_eq!(heap.allocate(48), first);
+    }
+
+    #[test]
+    fn cached_arm_block_stops_when_sequential_bx_enters_thumb_state() {
+        let mut package = svc_package("unused");
+        let origin = package.load_base();
+        let words = [
+            0xe12f_ff10_u32,
+            u32::from_le_bytes([0x07, 0x21, 0x70, 0x47]),
+        ];
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.imports.clear();
+
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime.cpu.r[0] = origin + 5;
+        runtime.cpu.r[14] = EXIT_ADDRESS | 1;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.cpu.r[1], 7);
+        assert_eq!(runtime.cpu.execution_state(), ExecutionState::Thumb);
+    }
+
+    #[test]
+    fn cached_arm_block_stops_after_self_modifying_store() {
+        let mut package = svc_package("unused");
+        let origin = package.load_base();
+        let words = [0xe581_2000_u32, 0xe3a0_0001, 0xe12f_ff1e];
+        package.data.resize(0x80 + words.len() * 4, 0);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.rawd.base.size = words.len() as u32 * 4;
+        package.rawd.program_size = words.len() as u32 * 4;
+        package.imports.clear();
+
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime.cpu.r[1] = origin + 4;
+        runtime.cpu.r[2] = 0xe3a0_0007;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.cpu.r[0], 7);
+        assert_eq!(runtime.memory.read32(origin + 4).unwrap(), 0xe3a0_0007);
+        assert_eq!(runtime.code_page_generations[0], 2);
+    }
+
+    #[test]
+    fn data_write_on_other_page_preserves_code_page_generation() {
+        let mut package = svc_package("unused");
+        let origin = package.load_base();
+        let words = [0xe581_2000_u32, 0xe12f_ff1e];
+        package.data.resize(0x80 + 0x1400, 0);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.rawd.base.size = 0x1400;
+        package.rawd.program_size = 0x1400;
+        package.imports.clear();
+
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        let data_address = origin + 0x1000;
+        runtime.cpu.r[1] = data_address;
+        runtime.cpu.r[2] = 0x1234_5678;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.memory.read32(data_address).unwrap(), 0x1234_5678);
+        assert_eq!(runtime.code_generation, 2);
+        assert_eq!(runtime.code_page_generations[0], 1);
+        assert_eq!(runtime.code_page_generations[1], 2);
     }
 
     #[test]
@@ -1719,6 +2000,74 @@ mod tests {
 
         assert_eq!(runtime.current_priority, 3);
         assert!(runtime.tasks.is_empty());
+    }
+
+    #[test]
+    fn supplemental_rounds_are_bounded_when_peer_tasks_submit_frames() {
+        let mut package = svc_package("lcd_set_frame");
+        let origin = package.load_base();
+        let words = [
+            0xef00_0000_u32, // Import thunk patched by the loader
+            0xe12f_ff1e,     // Retail import thunk return
+            0xe254_4001,     // SUBS r4, r4, #1
+            0xef00_0000,     // SVC lcd_set_frame
+            0x1aff_fffc,     // BNE origin + 8
+            0xe12f_ff1e,     // BX lr
+        ];
+        package.data.resize(0x80 + words.len() * 4, 0);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.rawd.base.size = (words.len() * 4) as u32;
+        package.rawd.entry = origin + 8;
+        package.rawd.program_size = (words.len() * 4) as u32;
+
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime.cpu.r[4] = 10;
+        let mut peer = Cpu::new(origin + 8, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
+        peer.r[4] = 10;
+        peer.start();
+        runtime.tasks.push_back((peer, 7));
+        runtime.start();
+
+        runtime.tick().unwrap();
+
+        let queued = &runtime.tasks.front().unwrap().0;
+        assert_eq!(
+            (
+                runtime.cpu.r[4],
+                runtime.cpu.r[15],
+                runtime.cpu.instruction_count,
+                queued.r[4],
+                queued.r[15],
+                queued.instruction_count,
+            ),
+            (8, origin + 16, 5, 8, origin + 16, 5)
+        );
+    }
+
+    #[test]
+    fn audio_sleep_arms_supplemental_rounds_without_a_frame_event() {
+        let mut runtime =
+            Runtime::from_package(audio_sleep_loop_package(), PathBuf::new()).unwrap();
+        #[cfg(feature = "standalone")]
+        runtime.audio.set_host_output_enabled(false);
+        assert!(runtime
+            .audio
+            .open(AudioConfig::new(16_000, 16, 1, 40).unwrap()));
+        let buffer = runtime.memory.heap_base();
+        runtime.memory.write_bytes(buffer, &[1; 320]).unwrap();
+        runtime.cpu.r[1] = buffer;
+        runtime.cpu.r[2] = 320;
+        let mut peer = Cpu::new(EXIT_ADDRESS, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
+        peer.start();
+        runtime.tasks.push_back((peer, 7));
+        runtime.start();
+
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.cpu.instruction_count, 8);
     }
 
     #[test]

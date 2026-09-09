@@ -144,8 +144,9 @@ impl Emulator {
     }
 
     pub fn set_jit_enabled(&mut self, enabled: bool) {
-        if let Runtime::A320(runtime) = &mut self.runtime {
-            runtime.set_jit_enabled(enabled);
+        match &mut self.runtime {
+            Runtime::A320(runtime) => runtime.set_jit_enabled(enabled),
+            Runtime::A330(runtime) => runtime.set_jit_enabled(enabled),
         }
     }
 
@@ -307,7 +308,7 @@ impl Emulator {
     pub fn system_ram_mut(&mut self) -> &mut [u8] {
         match &mut self.runtime {
             Runtime::A320(runtime) => runtime.system_ram_mut(),
-            Runtime::A330(runtime) => runtime.memory.system_ram_mut(),
+            Runtime::A330(runtime) => runtime.system_ram_mut(),
         }
     }
 
@@ -342,7 +343,7 @@ impl Emulator {
     pub fn write_memory_u32(&mut self, address: u32, value: u32) -> Result<()> {
         match &mut self.runtime {
             Runtime::A320(runtime) => runtime.write_memory_u32(address, value),
-            Runtime::A330(runtime) => runtime.memory.write32(address, value),
+            Runtime::A330(runtime) => runtime.write_memory_u32(address, value),
         }
     }
 

@@ -54,7 +54,7 @@ impl RuntimeBus<'_> {
                     Some(count) if *count > 0 => {
                         *count -= 1;
                         if cpu.r[2] != 0 {
-                            self.memory.write8(cpu.r[2], 0)?;
+                            self.write_memory(cpu.r[2], &[0])?;
                         }
                         cpu.r[0] = 0;
                     }
@@ -68,7 +68,7 @@ impl RuntimeBus<'_> {
                     }
                     None => {
                         if cpu.r[2] != 0 {
-                            self.memory.write8(cpu.r[2], 4)?;
+                            self.write_memory(cpu.r[2], &[4])?;
                         }
                         cpu.r[0] = 0;
                     }
@@ -92,7 +92,10 @@ impl RuntimeBus<'_> {
             }
             "OSTimeDly" | "delay" | "delay_ms" | "OSTimeDlyHMSM" => {
                 cpu.r[0] = 0;
-                self.yield_requested = true;
+                // A timed delay hands control to the other tasks without
+                // spending a scheduler slice; the delay is paced by the
+                // scheduler's post-frame rotation rounds, not a host timer.
+                self.sleep_requested = true;
             }
             "OSTimeGet" => cpu.r[0] = (cpu.instruction_count / 150_000) as u32,
             "GetTickCount" => cpu.r[0] = (cpu.instruction_count / 15_000) as u32,

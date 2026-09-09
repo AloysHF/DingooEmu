@@ -147,7 +147,7 @@ Reset and save-state loads while content remains loaded.
 | Swap A/B Buttons | `disabled`, `enabled` | `disabled` | Exchanges the emulated A and B button meanings. |
 | Performance Diagnostic Log | `disabled`, `enabled` | `disabled` | Writes a compact `dingooemu-diagnostic.txt` performance report to the frontend save directory without enabling verbose frontend logs. |
 | Unknown Guest Instruction Policy | `skip`, `stop` | `skip` | Logs and skips unsupported MIPS or ARM instructions, or stops with an execution error. Memory failures always remain errors. |
-| CPU Execution Engine (64-bit Android) | `jit`, `interpreter` | `jit` | Selects native translation or cached interpretation for APP/MIPS content on arm64-v8a and x86_64 Android. A330 content always uses the ARM interpreter. |
+| CPU Execution Engine (64-bit Android) | `jit`, `interpreter` | `jit` | Selects native translation or cached interpretation for APP/MIPS content on arm64-v8a and x86_64 Android. A330 content also translates supported hot ARM blocks and safely falls back for the rest. |
 
 Core option changes are applied while content is running and restored after a
 RetroArch reset.
