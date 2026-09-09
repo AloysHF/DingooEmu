@@ -885,6 +885,11 @@ impl Runtime {
                         // Arm the rounds only when the frame phase starts so a
                         // fast-rendering task cannot keep re-arming them.
                         supplemental_rounds = 2 * self.tasks.len() + 1;
+                    } else {
+                        supplemental_rounds -= 1;
+                        if supplemental_rounds == 0 {
+                            break 'scheduler;
+                        }
                     }
                     continue 'scheduler;
                 }
@@ -1995,6 +2000,51 @@ mod tests {
 
         assert_eq!(runtime.current_priority, 3);
         assert!(runtime.tasks.is_empty());
+    }
+
+    #[test]
+    fn supplemental_rounds_are_bounded_when_peer_tasks_submit_frames() {
+        let mut package = svc_package("lcd_set_frame");
+        let origin = package.load_base();
+        let words = [
+            0xef00_0000_u32, // Import thunk patched by the loader
+            0xe12f_ff1e,     // Retail import thunk return
+            0xe254_4001,     // SUBS r4, r4, #1
+            0xef00_0000,     // SVC lcd_set_frame
+            0x1aff_fffc,     // BNE origin + 8
+            0xe12f_ff1e,     // BX lr
+        ];
+        package.data.resize(0x80 + words.len() * 4, 0);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.rawd.base.size = (words.len() * 4) as u32;
+        package.rawd.entry = origin + 8;
+        package.rawd.program_size = (words.len() * 4) as u32;
+
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime.cpu.r[4] = 10;
+        let mut peer = Cpu::new(origin + 8, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
+        peer.r[4] = 10;
+        peer.start();
+        runtime.tasks.push_back((peer, 7));
+        runtime.start();
+
+        runtime.tick().unwrap();
+
+        let queued = &runtime.tasks.front().unwrap().0;
+        assert_eq!(
+            (
+                runtime.cpu.r[4],
+                runtime.cpu.r[15],
+                runtime.cpu.instruction_count,
+                queued.r[4],
+                queued.r[15],
+                queued.instruction_count,
+            ),
+            (8, origin + 16, 5, 8, origin + 16, 5)
+        );
     }
 
     #[test]
