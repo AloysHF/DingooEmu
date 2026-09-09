@@ -13,6 +13,8 @@ impl RuntimeBus<'_> {
                     task.r[0] = cpu.r[1];
                     task.start();
                     self.tasks.push_back((task, cpu.r[3] & 0xff));
+                    self.task_wakes.push_back(self.guest_ticks);
+                    self.task_audio_producers.push_back(false);
                 }
                 cpu.r[0] = 0;
             }
@@ -35,6 +37,8 @@ impl RuntimeBus<'_> {
                     self.tasks.iter().position(|(_, value)| *value == priority)
                 {
                     self.tasks.remove(index);
+                    self.task_wakes.remove(index);
+                    self.task_audio_producers.remove(index);
                     cpu.r[0] = 0;
                 } else {
                     cpu.r[0] = 41;
@@ -91,15 +95,13 @@ impl RuntimeBus<'_> {
                 };
             }
             "OSTimeDly" | "delay" | "delay_ms" | "OSTimeDlyHMSM" => {
-                cpu.r[0] = 0;
-                // A timed delay hands control to the other tasks without
-                // spending a scheduler slice; the delay is paced by the
-                // scheduler's post-frame rotation rounds, not a host timer.
-                self.sleep_requested = true;
+                // The reference runtime leaves r0 holding the requested delay.
+                self.delay_ticks = Some(cpu.r[0].max(1));
+                self.yield_requested = true;
             }
-            "OSTimeGet" => cpu.r[0] = (cpu.instruction_count / 150_000) as u32,
-            "GetTickCount" => cpu.r[0] = (cpu.instruction_count / 15_000) as u32,
-            "OSTimerGetTickTimeus" => cpu.r[0] = (cpu.instruction_count / 15) as u32,
+            "OSTimeGet" => cpu.r[0] = self.guest_ticks as u32,
+            "GetTickCount" => cpu.r[0] = (self.guest_ticks * 10) as u32,
+            "OSTimerGetTickTimeus" => cpu.r[0] = (self.guest_ticks * 10_000) as u32,
             _ => return Ok(false),
         }
         Ok(true)

@@ -35,7 +35,29 @@ impl RuntimeBus<'_> {
             "TaskMediaFunStop" | "get_current_language" => cpu.r[0] = 0,
             "GetDLHandle" | "get_dl_handle" => cpu.r[0] = STACK_BASE + 0x100,
             "__to_locale_ansi" | "_to_locale_ansi" => cpu.r[0] = LOCALE_ADDRESS,
-            "dl_get_proc" => cpu.r[0] = self.dynamic_import(cpu.r[1])?,
+            "dl_get_proc" => {
+                // Resolve the requested symbol against the package exports and
+                // imports first so callers receive the game's own thunk
+                // addresses; only unknown symbols get dynamic thunks.
+                let name = self.read_c_string(cpu.r[1], 128)?;
+                let resolved = self
+                    .package
+                    .exports
+                    .iter()
+                    .find(|symbol| symbol.name == name)
+                    .map(|symbol| symbol.address)
+                    .or_else(|| {
+                        self.package
+                            .imports
+                            .iter()
+                            .find(|symbol| symbol.name == name)
+                            .map(|symbol| symbol.address)
+                    });
+                cpu.r[0] = match resolved {
+                    Some(address) => address,
+                    None => self.dynamic_import(cpu.r[1])?,
+                };
+            }
             "cmGetSysModel" => {
                 cpu.r[0] = u32::from(!self.write_guest_string(cpu.r[0], cpu.r[1], "CC1800")?);
             }
@@ -48,7 +70,7 @@ impl RuntimeBus<'_> {
     }
 
     pub(super) fn allocate(&mut self, size: u32) -> u32 {
-        self.heap.allocate(size)
+        self.heap.allocate(self.memory, size)
     }
 
     pub(super) fn allocate_zeroed(&mut self, size: u32) -> Result<u32> {

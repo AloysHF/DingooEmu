@@ -20,14 +20,16 @@ impl RuntimeBus<'_> {
                     cpu.r[0] = 0;
                 } else if !self.audio.can_write() && self.profile == ArmProfile::Retail {
                     // The device buffer is full; the guest retries the same
-                    // write once the consumed audio frees space. Waiting for
-                    // playback must not burn a scheduler slice.
+                    // write once the consumed audio frees space.
                     cpu.r[15] = cpu.r[15].wrapping_sub(4);
-                    self.sleep_requested = true;
+                    self.yield_requested = true;
                 } else {
                     let data = self.memory.read_bytes(buffer, count as usize)?;
                     let written = self.audio.write(data);
                     *self.audio_written |= written;
+                    if written {
+                        self.audio_producer_marked = true;
+                    }
                     cpu.r[0] = u32::from(written);
                 }
             }
@@ -39,6 +41,9 @@ impl RuntimeBus<'_> {
                     let data = self.memory.read_bytes(cpu.r[1], count as usize)?;
                     let written = self.audio.write(data);
                     *self.audio_written |= written;
+                    if written {
+                        self.audio_producer_marked = true;
+                    }
                     u32::from(written)
                 };
             }
