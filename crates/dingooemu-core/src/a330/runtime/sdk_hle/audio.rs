@@ -26,7 +26,9 @@ impl RuntimeBus<'_> {
                     self.sleep_requested = true;
                 } else {
                     let data = self.memory.read_bytes(buffer, count as usize)?;
-                    cpu.r[0] = u32::from(self.audio.write(data));
+                    let written = self.audio.write(data);
+                    *self.audio_written |= written;
+                    cpu.r[0] = u32::from(written);
                 }
             }
             "waveout_try_write" => {
@@ -35,7 +37,9 @@ impl RuntimeBus<'_> {
                     0
                 } else {
                     let data = self.memory.read_bytes(cpu.r[1], count as usize)?;
-                    u32::from(self.audio.write(data))
+                    let written = self.audio.write(data);
+                    *self.audio_written |= written;
+                    u32::from(written)
                 };
             }
             "waveout_can_write" | "waveout_can_write_nonblocking" | "pcm_can_write" => {
