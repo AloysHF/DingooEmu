@@ -92,7 +92,10 @@ impl RuntimeBus<'_> {
             }
             "OSTimeDly" | "delay" | "delay_ms" | "OSTimeDlyHMSM" => {
                 cpu.r[0] = 0;
-                self.yield_requested = true;
+                // A timed delay hands control to the other tasks without
+                // spending a scheduler slice; the delay is paced by the
+                // scheduler's post-frame rotation rounds, not a host timer.
+                self.sleep_requested = true;
             }
             "OSTimeGet" => cpu.r[0] = (cpu.instruction_count / 150_000) as u32,
             "GetTickCount" => cpu.r[0] = (cpu.instruction_count / 15_000) as u32,

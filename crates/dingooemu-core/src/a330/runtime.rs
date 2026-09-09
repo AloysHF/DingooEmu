@@ -41,8 +41,14 @@ enum SliceEvent {
     Exit,
     Stop,
     Yield,
+    Sleep,
     Frame(u32),
 }
+
+/// Instruction budget for one task rotation after the tick's frame was
+/// presented. The frame boundary only needs each peer task to get a short
+/// round (the audio task writes its next device buffer), not a full slice.
+const POST_FRAME_QUANTUM: u64 = 256_000;
 
 struct CachedInstructionBlock {
     start: u32,
@@ -684,6 +690,11 @@ impl Runtime {
         let mut frame_address = None;
         let mut presented_frame_address = None;
         let mut slices_remaining = self.tasks.len() + 1;
+        // After the frame event the tick runs short rotation rounds so a timed
+        // peer task (the audio task's delay loop) can act again before the
+        // tick ends; two rounds per peer let the audio task refill the device
+        // buffer at the consumption rate.
+        let mut post_frame_rounds = 0usize;
         'scheduler: loop {
             let initial = self.cpu.instruction_count;
             let mut previous_pc = self.cpu.r[15];
@@ -717,6 +728,7 @@ impl Runtime {
                     firmware_archive: self.firmware_archive.as_ref(),
                     console_output: &mut self.console_output,
                     event_pending: false,
+                    sleep_requested: false,
                     instruction_blocks: &mut self.instruction_blocks,
                     instruction_cache_pages: &mut self.instruction_cache_pages,
                     code_page_generations: &mut self.code_page_generations,
@@ -724,10 +736,13 @@ impl Runtime {
                     code_generation: &mut self.code_generation,
                 };
                 let mut known_task_count = bus.tasks.len();
+                let quantum = if post_frame_rounds > 0 {
+                    POST_FRAME_QUANTUM
+                } else {
+                    INSTRUCTIONS_PER_SLICE
+                };
                 loop {
-                    if !self.cpu.is_running()
-                        || self.cpu.instruction_count - initial >= INSTRUCTIONS_PER_SLICE
-                    {
+                    if !self.cpu.is_running() || self.cpu.instruction_count - initial >= quantum {
                         break SliceEvent::BudgetExhausted;
                     }
                     if self.cpu.r[15] == EXIT_ADDRESS {
@@ -784,6 +799,9 @@ impl Runtime {
                         self.cpu.r[15] = EXIT_ADDRESS;
                         bus.finish_current = false;
                     }
+                    if bus.sleep_requested {
+                        break SliceEvent::Sleep;
+                    }
                     if bus.yield_requested {
                         break SliceEvent::Yield;
                     }
@@ -822,29 +840,36 @@ impl Runtime {
                     self.stop();
                     break 'scheduler;
                 }
-                SliceEvent::Yield => {
+                SliceEvent::Yield | SliceEvent::Sleep | SliceEvent::BudgetExhausted => {
                     self.rotate_task();
-                    slices_remaining -= 1;
-                    if slices_remaining == 0 {
-                        break 'scheduler;
+                    if post_frame_rounds > 0 {
+                        post_frame_rounds -= 1;
+                        if post_frame_rounds == 0 {
+                            break 'scheduler;
+                        }
+                    } else {
+                        slices_remaining -= 1;
+                        if slices_remaining == 0 {
+                            break 'scheduler;
+                        }
                     }
                     continue 'scheduler;
                 }
                 SliceEvent::Frame(address) => {
                     presented_frame_address = Some(address);
                     self.rotate_task();
-                    slices_remaining -= 1;
-                    if slices_remaining == 0 {
-                        break 'scheduler;
+                    if self.tasks.is_empty() {
+                        slices_remaining -= 1;
+                        if slices_remaining == 0 {
+                            break 'scheduler;
+                        }
+                    } else if post_frame_rounds == 0 {
+                        // Arm the rounds only when the frame phase starts so a
+                        // fast-rendering task cannot keep re-arming them.
+                        post_frame_rounds = 2 * self.tasks.len() + 1;
                     }
                     continue 'scheduler;
                 }
-                SliceEvent::BudgetExhausted => {}
-            }
-            self.rotate_task();
-            slices_remaining -= 1;
-            if slices_remaining == 0 {
-                break 'scheduler;
             }
         }
         if let Some(address) = presented_frame_address {
@@ -924,6 +949,7 @@ struct RuntimeBus<'a> {
     firmware_archive: Option<&'a FirmwareArchive>,
     console_output: &'a mut Vec<u8>,
     event_pending: bool,
+    sleep_requested: bool,
     instruction_blocks: &'a mut [CachedInstructionBlock],
     instruction_cache_pages: &'a mut [u16],
     code_page_generations: &'a mut [u64],
