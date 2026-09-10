@@ -48,7 +48,7 @@ impl RuntimeBus<'_> {
     }
 
     pub(super) fn allocate(&mut self, size: u32) -> u32 {
-        self.heap.allocate(size)
+        self.heap.allocate(self.memory, size)
     }
 
     pub(super) fn allocate_zeroed(&mut self, size: u32) -> Result<u32> {

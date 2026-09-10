@@ -109,7 +109,7 @@ impl GuestHeap {
         }
     }
 
-    fn allocate(&mut self, requested: u32) -> u32 {
+    fn allocate(&mut self, memory: &mut Memory, requested: u32) -> u32 {
         let Some(size) = requested.max(1).checked_add(7).map(|size| size & !7) else {
             return 0;
         };
@@ -134,6 +134,8 @@ impl GuestHeap {
             } else {
                 self.blocks[index].size += remaining;
             }
+            // Guest allocations are zero-initialized, including reused blocks.
+            let _ = memory.write_bytes(address, &vec![0; size as usize]);
             return address;
         }
 
@@ -151,6 +153,7 @@ impl GuestHeap {
             size,
             free: false,
         });
+        let _ = memory.write_bytes(address, &vec![0; size as usize]);
         address
     }
 
@@ -182,7 +185,7 @@ impl GuestHeap {
 
     fn reallocate(&mut self, memory: &mut Memory, address: u32, requested: u32) -> Result<u32> {
         if address == 0 {
-            return Ok(self.allocate(requested));
+            return Ok(self.allocate(memory, requested));
         }
         if requested == 0 {
             self.deallocate(address);
@@ -226,7 +229,7 @@ impl GuestHeap {
         }
 
         let old_size = self.blocks[index].size;
-        let new_address = self.allocate(requested);
+        let new_address = self.allocate(memory, requested);
         if new_address == 0 {
             return Ok(0);
         }
@@ -1461,19 +1464,22 @@ mod tests {
     }
 
     #[test]
-    fn a330_heap_reuses_and_coalesces_freed_blocks() {
+    fn a330_heap_reuses_zeroed_blocks_and_coalesces() {
+        let mut memory = Memory::from_package(&svc_package("heap")).unwrap();
         let mut heap = GuestHeap::new(0x2100_0000);
-        let first = heap.allocate(16);
-        let second = heap.allocate(16);
-        let third = heap.allocate(16);
+        let first = heap.allocate(&mut memory, 16);
+        let second = heap.allocate(&mut memory, 16);
+        let third = heap.allocate(&mut memory, 16);
 
+        memory.write32(second, 0x1234_5678).unwrap();
         heap.deallocate(second);
-        assert_eq!(heap.allocate(8), second);
+        assert_eq!(heap.allocate(&mut memory, 8), second);
+        assert_eq!(memory.read32(second).unwrap(), 0);
         heap.deallocate(first);
         heap.deallocate(second);
         heap.deallocate(third);
 
-        assert_eq!(heap.allocate(48), first);
+        assert_eq!(heap.allocate(&mut memory, 48), first);
     }
 
     #[test]
@@ -1555,9 +1561,9 @@ mod tests {
     #[test]
     fn a330_realloc_preserves_data_and_the_original_on_failure() {
         let mut runtime = Runtime::from_package(svc_package("realloc"), PathBuf::new()).unwrap();
-        let first = runtime.heap.allocate(8);
+        let first = runtime.heap.allocate(&mut runtime.memory, 8);
         runtime.memory.write32(first, 0x1234_5678).unwrap();
-        runtime.heap.allocate(8);
+        runtime.heap.allocate(&mut runtime.memory, 8);
 
         let moved = runtime
             .heap
@@ -1688,7 +1694,7 @@ mod tests {
         runtime.input.set_buttons(BUTTON_A | BUTTON_START);
         let audio_config = AudioConfig::new(16_000, 16, 1, 40).unwrap();
         assert!(runtime.audio.open(audio_config));
-        let allocation = runtime.heap.allocate(16);
+        let allocation = runtime.heap.allocate(&mut runtime.memory, 16);
         runtime.memory.write32(allocation, 0xfeed_beef).unwrap();
         runtime.running = true;
         runtime.cpu.start();
