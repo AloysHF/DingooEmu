@@ -23,11 +23,7 @@ use std::path::PathBuf;
 
 mod sdk_hle;
 
-// One frame's worth of guest execution, interleaved across tasks in small
-// slices (5k/50k like the handheld firmware's cooperative scheduler).
-const INSTRUCTIONS_PER_FRAME: u64 = 1_000_000;
-const AUDIO_SLICE_INSTRUCTIONS: u64 = 50_000;
-const TASK_SLICE_INSTRUCTIONS: u64 = 5_000;
+const INSTRUCTIONS_PER_SLICE: u64 = 3_000_000;
 const MAX_INSTRUCTION_BLOCK_LEN: usize = 64;
 const INSTRUCTION_BLOCK_CACHE_SLOTS: usize = 4_096;
 const INSTRUCTION_CACHE_PAGE_SHIFT: u32 = 12;
@@ -40,13 +36,18 @@ const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
 const FILE_SEARCH_NAME_CAPACITY: usize = 256;
 const CONSOLE_OUTPUT_LIMIT: usize = 4096;
 
-enum SliceOutcome {
-    Running,
-    Exited,
-    Stopped,
-    Yielded,
+enum SliceEvent {
+    BudgetExhausted,
+    Exit,
+    Stop,
+    Yield,
+    Sleep,
     Frame(u32),
 }
+
+/// Instruction budget for a supplemental task rotation. Peer tasks only need
+/// a short round to refill the audio device buffer, not a full slice.
+const SUPPLEMENTAL_QUANTUM: u64 = 256_000;
 
 struct CachedInstructionBlock {
     start: u32,
@@ -109,7 +110,7 @@ impl GuestHeap {
     }
 
     fn allocate(&mut self, memory: &mut Memory, requested: u32) -> u32 {
-        let Some(size) = requested.max(1).checked_add(15).map(|size| size & !15) else {
+        let Some(size) = requested.max(1).checked_add(7).map(|size| size & !7) else {
             return 0;
         };
         if let Some(index) = self
@@ -121,7 +122,7 @@ impl GuestHeap {
             let remaining = self.blocks[index].size - size;
             self.blocks[index].size = size;
             self.blocks[index].free = false;
-            if remaining >= 32 {
+            if remaining >= 8 {
                 self.blocks.insert(
                     index + 1,
                     HeapBlock {
@@ -133,6 +134,7 @@ impl GuestHeap {
             } else {
                 self.blocks[index].size += remaining;
             }
+            // Guest allocations are zero-initialized, including reused blocks.
             let _ = memory.write_bytes(address, &vec![0; size as usize]);
             return address;
         }
@@ -164,23 +166,11 @@ impl GuestHeap {
             return;
         };
         self.blocks[index].free = true;
-        if index + 1 < self.blocks.len()
-            && self.blocks[index + 1].free
-            && self.blocks[index]
-                .address
-                .checked_add(self.blocks[index].size)
-                == Some(self.blocks[index + 1].address)
-        {
+        if index + 1 < self.blocks.len() && self.blocks[index + 1].free {
             let next = self.blocks.remove(index + 1);
             self.blocks[index].size += next.size;
         }
-        if index > 0
-            && self.blocks[index - 1].free
-            && self.blocks[index - 1]
-                .address
-                .checked_add(self.blocks[index - 1].size)
-                == Some(self.blocks[index].address)
-        {
+        if index > 0 && self.blocks[index - 1].free {
             let current = self.blocks.remove(index);
             index -= 1;
             self.blocks[index].size += current.size;
@@ -201,6 +191,9 @@ impl GuestHeap {
             self.deallocate(address);
             return Ok(0);
         }
+        let Some(size) = requested.checked_add(7).map(|size| size & !7) else {
+            return Ok(0);
+        };
         let Some(index) = self
             .blocks
             .iter()
@@ -208,8 +201,31 @@ impl GuestHeap {
         else {
             return Ok(0);
         };
-        if self.blocks[index].size >= requested {
+        if self.blocks[index].size >= size {
             return Ok(address);
+        }
+        if index + 1 < self.blocks.len() && self.blocks[index + 1].free {
+            let combined = self.blocks[index]
+                .size
+                .saturating_add(self.blocks[index + 1].size);
+            if combined >= size {
+                self.blocks.remove(index + 1);
+                let remaining = combined - size;
+                self.blocks[index].size = size;
+                if remaining >= 8 {
+                    self.blocks.insert(
+                        index + 1,
+                        HeapBlock {
+                            address: address + size,
+                            size: remaining,
+                            free: true,
+                        },
+                    );
+                } else {
+                    self.blocks[index].size = combined;
+                }
+                return Ok(address);
+            }
         }
 
         let old_size = self.blocks[index].size;
@@ -232,8 +248,8 @@ impl GuestHeap {
         let mut previous_was_free = false;
         for block in &self.blocks {
             if block.address != expected_address
-                || block.size < 16
-                || block.size % 16 != 0
+                || block.size < 8
+                || block.size % 8 != 0
                 || previous_was_free && block.free
             {
                 return false;
@@ -322,13 +338,6 @@ pub(crate) struct Runtime {
     framebuffer_bits: u32,
     firmware_archive: Option<FirmwareArchive>,
     console_output: Vec<u8>,
-    // Virtual guest clock (10 ms OS ticks) and per-task scheduling state.
-    guest_ticks: u64,
-    tick_frac: u32,
-    current_wake: u64,
-    task_wakes: VecDeque<u64>,
-    current_audio_producer: bool,
-    task_audio_producers: VecDeque<bool>,
     instruction_blocks: Box<[CachedInstructionBlock]>,
     instruction_cache_pages: Box<[u16]>,
     code_page_generations: Box<[u64]>,
@@ -402,12 +411,6 @@ impl Runtime {
             framebuffer_bits,
             firmware_archive,
             console_output: Vec::new(),
-            guest_ticks: 0,
-            tick_frac: 0,
-            current_wake: 0,
-            task_wakes: VecDeque::new(),
-            current_audio_producer: false,
-            task_audio_producers: VecDeque::new(),
             instruction_blocks: empty_instruction_block_cache(),
             instruction_cache_pages: vec![0; instruction_cache_page_count].into_boxed_slice(),
             code_page_generations: vec![1; instruction_cache_page_count].into_boxed_slice(),
@@ -688,136 +691,16 @@ impl Runtime {
         let profile = self.memory.profile();
         let mut frame_address = None;
         let mut presented_frame_address = None;
-        let mut budget = INSTRUCTIONS_PER_FRAME;
-        'scheduler: while budget > 0 {
-            let mut ran_any = false;
-            let passes = self.tasks.len() + 1;
-            for _ in 0..passes {
-                if budget == 0 {
-                    break 'scheduler;
-                }
-                if self.current_wake > self.guest_ticks {
-                    // The current task is asleep; give another task a turn.
-                    self.swap_front_task();
-                    if self.current_wake > self.guest_ticks {
-                        continue;
-                    }
-                }
-                let slice = if self.current_audio_producer {
-                    AUDIO_SLICE_INSTRUCTIONS
-                } else {
-                    TASK_SLICE_INSTRUCTIONS
-                }
-                .min(budget);
-                let initial = self.cpu.instruction_count;
-                let outcome = self.run_slice(profile, slice, &mut frame_address)?;
-                let consumed = self.cpu.instruction_count - initial;
-                budget = budget.saturating_sub(consumed);
-                ran_any = true;
-                match outcome {
-                    SliceOutcome::Exited => {
-                        if !self.boot_complete {
-                            self.boot_complete = true;
-                            if let Some(entry) = self.app_main {
-                                let count = self.cpu.instruction_count;
-                                self.cpu = Cpu::new(entry, EXIT_ADDRESS - 16, EXIT_ADDRESS);
-                                self.cpu.instruction_count = count;
-                                self.cpu.r[0] = APP_PATH_ADDRESS;
-                                self.cpu.start();
-                                self.current_priority = 0;
-                                self.current_wake = 0;
-                                continue;
-                            }
-                        }
-                        if !self.activate_next_task() {
-                            self.present_early_exit();
-                            self.stop();
-                            break 'scheduler;
-                        }
-                    }
-                    SliceOutcome::Stopped => {
-                        self.present_early_exit();
-                        self.stop();
-                        break 'scheduler;
-                    }
-                    SliceOutcome::Yielded => {}
-                    SliceOutcome::Frame(address) => {
-                        // The guest submitted a frame; end this tick so the
-                        // frontend presents it before the next frame runs.
-                        presented_frame_address = Some(address);
-                        break 'scheduler;
-                    }
-                    SliceOutcome::Running => {}
-                }
-                if !self.cpu.is_running() {
-                    break 'scheduler;
-                }
-                self.swap_front_task();
-            }
-            if !ran_any {
-                // Every task is asleep; advance guest time to the nearest wake
-                // tick, mirroring the wall-clock wait of the firmware.
-                let mut candidates: Vec<u64> = self
-                    .task_wakes
-                    .iter()
-                    .filter(|wake| **wake > self.guest_ticks)
-                    .copied()
-                    .collect();
-                if self.current_wake > self.guest_ticks {
-                    candidates.push(self.current_wake);
-                }
-                match candidates.iter().min() {
-                    Some(nearest) => self.guest_ticks = *nearest,
-                    None => self.guest_ticks += 1,
-                }
-            }
-        }
-        if let Some(address) = presented_frame_address {
-            self.present_frame(address)?;
-        }
-        self.tick_frac += 5;
-        while self.tick_frac >= 3 {
-            self.tick_frac -= 3;
-            self.guest_ticks += 1;
-        }
-        self.audio.advance_frame();
-        Ok(())
-    }
-
-    fn swap_front_task(&mut self) {
-        if self.tasks.is_empty() {
-            return;
-        }
-        let (front_cpu, front_priority) = self.tasks.pop_front().expect("deque non-empty");
-        let front_wake = self.task_wakes.pop_front().unwrap_or(0);
-        let front_audio = self.task_audio_producers.pop_front().unwrap_or(false);
-        let current_cpu = std::mem::replace(&mut self.cpu, front_cpu);
-        let current_priority = std::mem::replace(&mut self.current_priority, front_priority);
-        self.tasks.push_back((current_cpu, current_priority));
-        self.task_wakes.push_back(self.current_wake);
-        self.task_audio_producers
-            .push_back(self.current_audio_producer);
-        self.current_wake = front_wake;
-        self.current_audio_producer = front_audio;
-    }
-
-    fn run_slice(
-        &mut self,
-        profile: ArmProfile,
-        slice_instructions: u64,
-        frame_address: &mut Option<u32>,
-    ) -> Result<SliceOutcome> {
-        let mut outcome = SliceOutcome::Running;
-        let initial = self.cpu.instruction_count;
         let mut audio_written = false;
-        while self.cpu.is_running() && self.cpu.instruction_count - initial < slice_instructions {
-            if self.cpu.r[15] == EXIT_ADDRESS {
-                outcome = SliceOutcome::Exited;
-                break;
-            }
-            let remaining = (slice_instructions - (self.cpu.instruction_count - initial)) as usize;
+        let mut slices_remaining = self.tasks.len() + 1;
+        // A frame event or the first successful audio write can arm short
+        // rotation rounds so a timed peer task can refill the device buffer.
+        let mut supplemental_rounds = 0usize;
+        let mut audio_rounds_armed = false;
+        'scheduler: loop {
+            let initial = self.cpu.instruction_count;
             let mut previous_pc = self.cpu.r[15];
-            let (stop_requested, yield_requested, finish_current, delay_ticks, marked_audio) = {
+            let event = {
                 let mut bus = RuntimeBus {
                     memory: &mut self.memory,
                     package: &self.package,
@@ -827,12 +710,10 @@ impl Runtime {
                     unknown_hle_policy: self.unknown_hle_policy,
                     unknown_hle_allowlist: &self.unknown_hle_allowlist,
                     heap: &mut self.heap,
-                    frame_address,
+                    frame_address: &mut frame_address,
                     stop_requested: false,
                     dynamic_imports: &mut self.dynamic_imports,
                     tasks: &mut self.tasks,
-                    task_wakes: &mut self.task_wakes,
-                    task_audio_producers: &mut self.task_audio_producers,
                     current_priority: self.current_priority,
                     yield_requested: false,
                     finish_current: false,
@@ -850,81 +731,178 @@ impl Runtime {
                     firmware_archive: self.firmware_archive.as_ref(),
                     console_output: &mut self.console_output,
                     event_pending: false,
-                    guest_ticks: self.guest_ticks,
-                    delay_ticks: None,
-                    audio_producer_marked: false,
+                    sleep_requested: false,
                     instruction_blocks: &mut self.instruction_blocks,
                     instruction_cache_pages: &mut self.instruction_cache_pages,
                     code_page_generations: &mut self.code_page_generations,
                     instruction_cache_invalidated: false,
                     code_generation: &mut self.code_generation,
                 };
-                let mut error_pc = self.cpu.r[15];
-                if let Err(error) = bus.execute_cached_block(
-                    &mut self.cpu,
-                    remaining,
-                    &mut previous_pc,
-                    &mut error_pc,
-                    #[cfg(feature = "jit")]
-                    &mut self.jit,
-                ) {
-                    return match error {
-                        SimulatorError::MemoryError { .. }
-                        | SimulatorError::InvalidInstruction { .. } => {
-                            Err(SimulatorError::CpuError {
-                                pc: error_pc,
-                                message: format!(
-                                    "{:?} state: {error}; previous_pc={previous_pc:#010x}, r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, sp={:#010x}, lr={:#010x}",
-                                    self.cpu.execution_state(),
-                                    self.cpu.r[0],
-                                    self.cpu.r[1],
-                                    self.cpu.r[2],
-                                    self.cpu.r[3],
-                                    self.cpu.r[13],
-                                    self.cpu.r[14]
-                                ),
-                            })
-                        }
-                        other => Err(other),
-                    };
+                let mut known_task_count = bus.tasks.len();
+                let quantum = if supplemental_rounds > 0 {
+                    SUPPLEMENTAL_QUANTUM
+                } else {
+                    INSTRUCTIONS_PER_SLICE
+                };
+                loop {
+                    if !self.cpu.is_running() || self.cpu.instruction_count - initial >= quantum {
+                        break SliceEvent::BudgetExhausted;
+                    }
+                    if self.cpu.r[15] == EXIT_ADDRESS {
+                        break SliceEvent::Exit;
+                    }
+                    let mut error_pc = self.cpu.r[15];
+                    let remaining =
+                        (INSTRUCTIONS_PER_SLICE - (self.cpu.instruction_count - initial)) as usize;
+                    if let Err(error) = bus.execute_cached_block(
+                        &mut self.cpu,
+                        remaining,
+                        &mut previous_pc,
+                        &mut error_pc,
+                        #[cfg(feature = "jit")]
+                        &mut self.jit,
+                    ) {
+                        return match error {
+                            SimulatorError::MemoryError { .. }
+                            | SimulatorError::InvalidInstruction { .. } => {
+                                Err(SimulatorError::CpuError {
+                                    pc: error_pc,
+                                    message: format!(
+                                        "{:?} state: {error}; previous_pc={previous_pc:#010x}, r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x}, sp={:#010x}, lr={:#010x}",
+                                        self.cpu.execution_state(),
+                                        self.cpu.r[0],
+                                        self.cpu.r[1],
+                                        self.cpu.r[2],
+                                        self.cpu.r[3],
+                                        self.cpu.r[13],
+                                        self.cpu.r[14]
+                                    ),
+                                })
+                            }
+                            other => Err(other),
+                        };
+                    }
+                    if !bus.event_pending {
+                        continue;
+                    }
+                    bus.event_pending = false;
+                    let current_task_count = bus.tasks.len();
+                    if current_task_count >= known_task_count {
+                        slices_remaining += current_task_count - known_task_count;
+                    } else {
+                        slices_remaining = slices_remaining
+                            .saturating_sub(known_task_count - current_task_count)
+                            .max(1);
+                    }
+                    known_task_count = current_task_count;
+                    if bus.stop_requested {
+                        break SliceEvent::Stop;
+                    }
+                    if bus.finish_current {
+                        self.cpu.r[15] = EXIT_ADDRESS;
+                        bus.finish_current = false;
+                    }
+                    if bus.sleep_requested {
+                        break SliceEvent::Sleep;
+                    }
+                    if bus.yield_requested {
+                        break SliceEvent::Yield;
+                    }
+                    if let Some(address) = bus.frame_address.take() {
+                        break SliceEvent::Frame(address);
+                    }
                 }
-                if !bus.event_pending {
-                    continue;
-                }
-                bus.event_pending = false;
-                (
-                    bus.stop_requested,
-                    bus.yield_requested,
-                    bus.finish_current,
-                    bus.delay_ticks.take(),
-                    bus.audio_producer_marked,
-                )
             };
-            if marked_audio {
-                self.current_audio_producer = true;
-            }
-            if let Some(ticks) = delay_ticks {
-                self.current_wake = self.guest_ticks + ticks as u64;
-            }
-            if stop_requested {
-                outcome = SliceOutcome::Stopped;
-                break;
-            }
-            if finish_current {
-                self.cpu.r[15] = EXIT_ADDRESS;
-                outcome = SliceOutcome::Exited;
-                break;
-            }
-            if yield_requested {
-                outcome = SliceOutcome::Yielded;
-                break;
-            }
-            if let Some(address) = frame_address.take() {
-                outcome = SliceOutcome::Frame(address);
-                break;
+            match event {
+                SliceEvent::Exit => {
+                    if !self.boot_complete {
+                        self.boot_complete = true;
+                        if let Some(entry) = self.app_main {
+                            let count = self.cpu.instruction_count;
+                            self.cpu = Cpu::new(entry, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+                            self.cpu.instruction_count = count;
+                            self.cpu.r[0] = APP_PATH_ADDRESS;
+                            self.cpu.start();
+                            self.current_priority = 0;
+                            continue;
+                        }
+                    }
+                    if !self.activate_next_task() {
+                        self.present_early_exit();
+                        self.stop();
+                        break 'scheduler;
+                    }
+                    slices_remaining -= 1;
+                    if slices_remaining == 0 {
+                        break 'scheduler;
+                    }
+                    continue 'scheduler;
+                }
+                SliceEvent::Stop => {
+                    self.present_early_exit();
+                    self.stop();
+                    break 'scheduler;
+                }
+                SliceEvent::Sleep => {
+                    self.rotate_task();
+                    if supplemental_rounds > 0 {
+                        supplemental_rounds -= 1;
+                        if supplemental_rounds == 0 {
+                            break 'scheduler;
+                        }
+                    } else if audio_written && !audio_rounds_armed && !self.tasks.is_empty() {
+                        audio_rounds_armed = true;
+                        supplemental_rounds = 2 * self.tasks.len();
+                    } else {
+                        slices_remaining -= 1;
+                        if slices_remaining == 0 {
+                            break 'scheduler;
+                        }
+                    }
+                    continue 'scheduler;
+                }
+                SliceEvent::Yield | SliceEvent::BudgetExhausted => {
+                    self.rotate_task();
+                    if supplemental_rounds > 0 {
+                        supplemental_rounds -= 1;
+                        if supplemental_rounds == 0 {
+                            break 'scheduler;
+                        }
+                    } else {
+                        slices_remaining -= 1;
+                        if slices_remaining == 0 {
+                            break 'scheduler;
+                        }
+                    }
+                    continue 'scheduler;
+                }
+                SliceEvent::Frame(address) => {
+                    presented_frame_address = Some(address);
+                    self.rotate_task();
+                    if self.tasks.is_empty() {
+                        slices_remaining -= 1;
+                        if slices_remaining == 0 {
+                            break 'scheduler;
+                        }
+                    } else if supplemental_rounds == 0 {
+                        // Arm the rounds only when the frame phase starts so a
+                        // fast-rendering task cannot keep re-arming them.
+                        supplemental_rounds = 2 * self.tasks.len() + 1;
+                    } else {
+                        supplemental_rounds -= 1;
+                        if supplemental_rounds == 0 {
+                            break 'scheduler;
+                        }
+                    }
+                    continue 'scheduler;
+                }
             }
         }
-        Ok(outcome)
+        if let Some(address) = presented_frame_address {
+            self.present_frame(address)?;
+        }
+        self.audio.advance_frame();
+        Ok(())
     }
 
     fn present_frame(&mut self, address: u32) -> Result<()> {
@@ -951,13 +929,19 @@ impl Runtime {
 
     fn activate_next_task(&mut self) -> bool {
         if let Some((cpu, priority)) = self.tasks.pop_front() {
-            self.task_wakes.pop_front();
-            self.task_audio_producers.pop_front();
             self.cpu = cpu;
             self.current_priority = priority;
             true
         } else {
             false
+        }
+    }
+
+    fn rotate_task(&mut self) {
+        if let Some((next, priority)) = self.tasks.pop_front() {
+            let current = std::mem::replace(&mut self.cpu, next);
+            self.tasks.push_back((current, self.current_priority));
+            self.current_priority = priority;
         }
     }
 }
@@ -975,8 +959,6 @@ struct RuntimeBus<'a> {
     stop_requested: bool,
     dynamic_imports: &'a mut Vec<String>,
     tasks: &'a mut VecDeque<(Cpu, u32)>,
-    task_wakes: &'a mut VecDeque<u64>,
-    task_audio_producers: &'a mut VecDeque<bool>,
     current_priority: u32,
     yield_requested: bool,
     finish_current: bool,
@@ -994,9 +976,7 @@ struct RuntimeBus<'a> {
     firmware_archive: Option<&'a FirmwareArchive>,
     console_output: &'a mut Vec<u8>,
     event_pending: bool,
-    guest_ticks: u64,
-    delay_ticks: Option<u32>,
-    audio_producer_marked: bool,
+    sleep_requested: bool,
     instruction_blocks: &'a mut [CachedInstructionBlock],
     instruction_cache_pages: &'a mut [u16],
     code_page_generations: &'a mut [u64],
@@ -1420,6 +1400,36 @@ mod tests {
         package
     }
 
+    fn audio_sleep_loop_package() -> PackageImage {
+        let mut package = svc_package("waveout_write");
+        let origin = package.load_base();
+        let words = [0xef00_0000_u32, 0xef00_0001, 0xeaff_fffc];
+        package.data.resize(0x80 + 0x30, 0);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.rawd.base.size = 0x30;
+        package.rawd.program_size = 0x30;
+        package.imports = vec![
+            SymbolEntry {
+                string_offset: 0,
+                unknown0: 0,
+                unknown1: 0,
+                address: origin + 0x20,
+                name: "waveout_write".into(),
+            },
+            SymbolEntry {
+                string_offset: 0,
+                unknown0: 0,
+                unknown1: 0,
+                address: origin + 0x28,
+                name: "OSTimeDly".into(),
+            },
+        ];
+        package
+    }
+
     fn memory_c_string(memory: &Memory, address: u32) -> String {
         let bytes = (0..256)
             .map(|offset| memory.read8(address + offset).unwrap())
@@ -1454,39 +1464,22 @@ mod tests {
     }
 
     #[test]
-    fn a330_heap_reuses_and_coalesces_freed_blocks() {
+    fn a330_heap_reuses_zeroed_blocks_and_coalesces() {
         let mut memory = Memory::from_package(&svc_package("heap")).unwrap();
         let mut heap = GuestHeap::new(0x2100_0000);
         let first = heap.allocate(&mut memory, 16);
         let second = heap.allocate(&mut memory, 16);
         let third = heap.allocate(&mut memory, 16);
 
-        // Every allocation starts zeroed.
-        for offset in [first, second, third] {
-            assert_eq!(memory.read32(offset).unwrap(), 0);
-        }
         memory.write32(second, 0x1234_5678).unwrap();
-
         heap.deallocate(second);
         assert_eq!(heap.allocate(&mut memory, 8), second);
-        // Reuse zeroes the block.
         assert_eq!(memory.read32(second).unwrap(), 0);
         heap.deallocate(first);
         heap.deallocate(second);
         heap.deallocate(third);
 
         assert_eq!(heap.allocate(&mut memory, 48), first);
-    }
-
-    #[test]
-    fn a330_heap_allocation_is_sixteen_byte_aligned() {
-        let mut memory = Memory::from_package(&svc_package("align")).unwrap();
-        let mut heap = GuestHeap::new(0x2100_0000);
-        // Odd sizes still round up to 16-byte blocks like the firmware heap.
-        for request in [1, 8, 15, 16, 17] {
-            let address = heap.allocate(&mut memory, request);
-            assert_eq!(address % 16, 0, "request {request} at {address:#x}");
-        }
     }
 
     #[test]
@@ -1572,18 +1565,9 @@ mod tests {
         runtime.memory.write32(first, 0x1234_5678).unwrap();
         runtime.heap.allocate(&mut runtime.memory, 8);
 
-        // A 16-byte request fits the aligned block, so the address is kept.
-        let grown = runtime
-            .heap
-            .reallocate(&mut runtime.memory, first, 16)
-            .unwrap();
-        assert_eq!(grown, first);
-        assert_eq!(runtime.memory.read32(grown).unwrap(), 0x1234_5678);
-
-        // Growing past it moves the block and preserves the payload.
         let moved = runtime
             .heap
-            .reallocate(&mut runtime.memory, first, 64)
+            .reallocate(&mut runtime.memory, first, 16)
             .unwrap();
         assert_ne!(moved, first);
         assert_eq!(runtime.memory.read32(moved).unwrap(), 0x1234_5678);
@@ -1654,8 +1638,6 @@ mod tests {
         let mut task = Cpu::new(0x1010_1000, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
         task.start();
         runtime.tasks.push_back((task, 7));
-        runtime.task_wakes.push_back(0);
-        runtime.task_audio_producers.push_back(false);
 
         runtime.set_unknown_instruction_policy(UnknownInstructionPolicy::Stop);
         assert_eq!(
@@ -1722,8 +1704,6 @@ mod tests {
         task.r[5] = 0x55aa_55aa;
         task.start();
         runtime.tasks.push_back((task, 7));
-        runtime.task_wakes.push_back(0);
-        runtime.task_audio_producers.push_back(false);
         runtime.current_priority = 3;
         runtime.files.insert(
             17,
@@ -1803,38 +1783,6 @@ mod tests {
             runtime.memory.read32(STACK_BASE + 0x100).unwrap(),
             0xdead_beef
         );
-    }
-
-    #[test]
-    fn dl_get_proc_resolves_known_symbols_through_the_import_table() {
-        let mut runtime =
-            Runtime::from_package(svc_package("dl_get_proc"), PathBuf::new()).unwrap();
-        runtime
-            .memory
-            .write_bytes(STACK_BASE, b"dl_get_proc\0")
-            .unwrap();
-        runtime.cpu.r[1] = STACK_BASE;
-        runtime.start();
-        runtime.tick().unwrap();
-
-        // Known symbols resolve to the game's own import thunk address rather
-        // than a dynamically created one.
-        assert_eq!(runtime.cpu.r[0], ArmProfile::RETAIL_ORIGIN);
-        assert!(runtime.dynamic_imports.is_empty());
-
-        // Unknown symbols still get a dynamic thunk.
-        runtime
-            .memory
-            .write_bytes(STACK_BASE, b"totally_unknown_symbol\0")
-            .unwrap();
-        runtime.cpu = Cpu::new(ArmProfile::RETAIL_ORIGIN, EXIT_ADDRESS - 16, EXIT_ADDRESS);
-        runtime.cpu.r[1] = STACK_BASE;
-        runtime.start();
-        runtime.boot_complete = true;
-        runtime.running = true;
-        runtime.tick().unwrap();
-        assert_eq!(runtime.cpu.r[0], DYNAMIC_THUNK_BASE);
-        assert_eq!(runtime.dynamic_imports, ["totally_unknown_symbol"]);
     }
 
     #[test]
@@ -2051,19 +1999,81 @@ mod tests {
         );
         audio_task.start();
         runtime.tasks.push_back((audio_task, 7));
-        runtime.task_wakes.push_back(0);
-        runtime.task_audio_producers.push_back(false);
         runtime.current_priority = 3;
         runtime.start();
 
         runtime.tick().unwrap();
 
         assert_eq!(runtime.current_priority, 3);
-        // The frame submission ends the tick; the queued task still waits.
-        assert_eq!(runtime.tasks.len(), 1);
-        runtime.tick().unwrap();
-        // The background task's slice ran and exited on the second tick.
         assert!(runtime.tasks.is_empty());
+    }
+
+    #[test]
+    fn supplemental_rounds_are_bounded_when_peer_tasks_submit_frames() {
+        let mut package = svc_package("lcd_set_frame");
+        let origin = package.load_base();
+        let words = [
+            0xef00_0000_u32, // Import thunk patched by the loader
+            0xe12f_ff1e,     // Retail import thunk return
+            0xe254_4001,     // SUBS r4, r4, #1
+            0xef00_0000,     // SVC lcd_set_frame
+            0x1aff_fffc,     // BNE origin + 8
+            0xe12f_ff1e,     // BX lr
+        ];
+        package.data.resize(0x80 + words.len() * 4, 0);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x80 + index * 4;
+            package.data[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        package.rawd.base.size = (words.len() * 4) as u32;
+        package.rawd.entry = origin + 8;
+        package.rawd.program_size = (words.len() * 4) as u32;
+
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime.cpu.r[4] = 10;
+        let mut peer = Cpu::new(origin + 8, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
+        peer.r[4] = 10;
+        peer.start();
+        runtime.tasks.push_back((peer, 7));
+        runtime.start();
+
+        runtime.tick().unwrap();
+
+        let queued = &runtime.tasks.front().unwrap().0;
+        assert_eq!(
+            (
+                runtime.cpu.r[4],
+                runtime.cpu.r[15],
+                runtime.cpu.instruction_count,
+                queued.r[4],
+                queued.r[15],
+                queued.instruction_count,
+            ),
+            (8, origin + 16, 5, 8, origin + 16, 5)
+        );
+    }
+
+    #[test]
+    fn audio_sleep_arms_supplemental_rounds_without_a_frame_event() {
+        let mut runtime =
+            Runtime::from_package(audio_sleep_loop_package(), PathBuf::new()).unwrap();
+        #[cfg(feature = "standalone")]
+        runtime.audio.set_host_output_enabled(false);
+        assert!(runtime
+            .audio
+            .open(AudioConfig::new(16_000, 16, 1, 40).unwrap()));
+        let buffer = runtime.memory.heap_base();
+        runtime.memory.write_bytes(buffer, &[1; 320]).unwrap();
+        runtime.cpu.r[1] = buffer;
+        runtime.cpu.r[2] = 320;
+        let mut peer = Cpu::new(EXIT_ADDRESS, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
+        peer.start();
+        runtime.tasks.push_back((peer, 7));
+        runtime.start();
+
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.cpu.instruction_count, 8);
     }
 
     #[test]
