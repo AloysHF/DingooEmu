@@ -1,3 +1,4 @@
+mod gamepad;
 mod gamepad_overlay;
 mod keyboard;
 mod scaler;
@@ -12,6 +13,7 @@ use dingooemu_core::{
 use minifb::{Key, Window, WindowOptions};
 use std::path::{Path, PathBuf};
 
+use gamepad::GamepadMapper;
 use keyboard::{KeyboardMapper, RemapSpec};
 use scaler::{DisplayScaler, ScaleFilter};
 
@@ -151,6 +153,10 @@ struct Args {
     /// Swap the emulated A and B buttons
     #[arg(long = "swap-ab")]
     swap_ab: bool,
+
+    /// Disable physical gamepad input (keyboard remains available)
+    #[arg(long = "no-gamepad")]
+    no_gamepad: bool,
 
     /// Pixel scaling filter for display output
     #[arg(long, value_enum, default_value_t = ScaleFilter::Nearest)]
@@ -297,12 +303,13 @@ fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
         // Limit to ~60fps
         window.set_target_fps(60);
         let keyboard = KeyboardMapper::new(&args.remappings, args.swap_ab);
+        let mut gamepad = GamepadMapper::new(!args.no_gamepad, args.swap_ab);
         let mut display_scaler = DisplayScaler::new(args.filter);
 
         // Main loop
         while window.is_open() && !window.is_key_down(Key::Escape) {
             // Poll input
-            let buttons = keyboard.pressed_buttons(&window);
+            let buttons = keyboard.pressed_buttons(&window) | gamepad.pressed_buttons();
             emu.set_buttons(buttons);
 
             // Run one frame
@@ -486,6 +493,17 @@ mod tests {
             Args::try_parse_from(["dingoo-emu", "--swap-ab", "game.app"])
                 .unwrap()
                 .swap_ab
+        );
+    }
+
+    #[test]
+    fn no_gamepad_flag_is_parsed() {
+        let defaults = Args::try_parse_from(["dingoo-emu", "game.app"]).unwrap();
+        assert!(!defaults.no_gamepad);
+        assert!(
+            Args::try_parse_from(["dingoo-emu", "--no-gamepad", "game.app"])
+                .unwrap()
+                .no_gamepad
         );
     }
 
