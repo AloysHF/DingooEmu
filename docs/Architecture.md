@@ -56,6 +56,29 @@ Both device runtimes keep their SDK bridges under `runtime/sdk_hle/`. A330 HLE
 dispatch is divided into display, files/resources, input, audio, system/memory,
 tasks/synchronization, and semihosting services.
 
+## A330 Guest Clock and Delays
+
+A330 retail/homebrew content is paced with a wall-clock guest epoch (1 OS tick =
+10 ms, uC/OS-II `OS_TICKS_PER_SECOND = 100`):
+
+- `GetTickCount` returns elapsed guest milliseconds.
+- `OSTimeGet` returns elapsed guest OS ticks.
+- `OSTimerGetTickTimeus` returns elapsed guest microseconds.
+- `OSTimeDly` / `delay` park the current task for the requested OS ticks.
+- `delay_ms` / `OSTimeDlyHMSM` convert milliseconds (or H:M:S:mS) to OS ticks.
+- `waveout_write` backpressure and retail `OSSemPend` waits park the task for
+  one OS tick instead of spinning the scheduler slice.
+- `OSTimeDly(1)` / `delay(1)` on a waveout producer only yields. That lets
+  supplemental rounds burst-fill the host device queue (~120 ms depth) within
+  one host frame; parking the audio task for a full OS tick starves playback
+  and causes underruns. Ready audio producers are scheduled ahead of other
+  tasks.
+
+When every task is delayed, `tick()` sleeps on the host until the earliest wake
+or the 60 Hz frame budget, then returns. Titles that throttle heavily through
+`OSTimeDly` (for example *7 Days Salvation*) therefore run at real-time pace
+instead of racing ahead.
+
 ## Extending Format Support
 
 When adding a format, keep category detection and device detection separate:
