@@ -20,10 +20,14 @@ use crate::error::{Result, SimulatorError};
 use crate::package::PackageImage;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 mod sdk_hle;
 
 const INSTRUCTIONS_PER_SLICE: u64 = 3_000_000;
+/// uC/OS-II default tick rate used by the GA330 SDK (10 ms per tick).
+pub(crate) const OS_TICKS_PER_SECOND: u64 = 100;
+const HOST_FRAME_MICROS: u64 = 1_000_000 / 60;
 const MAX_INSTRUCTION_BLOCK_LEN: usize = 64;
 const INSTRUCTION_BLOCK_CACHE_SLOTS: usize = 4_096;
 const INSTRUCTION_CACHE_PAGE_SHIFT: u32 = 12;
@@ -68,6 +72,31 @@ fn empty_instruction_block_cache() -> Box<[CachedInstructionBlock]> {
     .take(INSTRUCTION_BLOCK_CACHE_SLOTS)
     .collect::<Vec<_>>()
     .into_boxed_slice()
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct GuestTask {
+    pub(crate) cpu: Cpu,
+    pub(crate) priority: u32,
+    /// Guest OS tick when this task may run again. 0 means ready now.
+    pub(crate) wake_tick: u64,
+    /// True once this task has opened or written the waveout device.
+    pub(crate) audio_producer: bool,
+}
+
+impl GuestTask {
+    fn new(cpu: Cpu, priority: u32) -> Self {
+        Self {
+            cpu,
+            priority,
+            wake_tick: 0,
+            audio_producer: false,
+        }
+    }
+
+    fn is_ready(&self, now_tick: u64) -> bool {
+        self.wake_tick <= now_tick
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -278,8 +307,10 @@ struct A330StateRef<'a> {
     running: bool,
     boot_complete: bool,
     dynamic_imports: &'a [String],
-    tasks: &'a VecDeque<(Cpu, u32)>,
+    tasks: &'a VecDeque<GuestTask>,
     current_priority: u32,
+    current_wake_tick: u64,
+    guest_elapsed_micros: u64,
     files: BTreeMap<u32, GuestFile>,
     file_searches: &'a BTreeMap<u32, FileSearch>,
     next_file_handle: u32,
@@ -299,8 +330,10 @@ struct A330State {
     running: bool,
     boot_complete: bool,
     dynamic_imports: Vec<String>,
-    tasks: VecDeque<(Cpu, u32)>,
+    tasks: VecDeque<GuestTask>,
     current_priority: u32,
+    current_wake_tick: u64,
+    guest_elapsed_micros: u64,
     files: BTreeMap<u32, GuestFile>,
     file_searches: BTreeMap<u32, FileSearch>,
     next_file_handle: u32,
@@ -325,8 +358,11 @@ pub(crate) struct Runtime {
     boot_complete: bool,
     app_main: Option<u32>,
     dynamic_imports: Vec<String>,
-    tasks: VecDeque<(Cpu, u32)>,
+    tasks: VecDeque<GuestTask>,
     current_priority: u32,
+    current_wake_tick: u64,
+    current_audio_producer: bool,
+    guest_epoch: Instant,
     content_path: PathBuf,
     content_directory: PathBuf,
     save_directory: Option<PathBuf>,
@@ -400,6 +436,9 @@ impl Runtime {
             dynamic_imports: Vec::new(),
             tasks: VecDeque::new(),
             current_priority: 0,
+            current_wake_tick: 0,
+            current_audio_producer: false,
+            guest_epoch: Instant::now(),
             content_path: path,
             content_directory,
             save_directory,
@@ -481,7 +520,51 @@ impl Runtime {
         Ok(())
     }
     pub(crate) fn is_running(&self) -> bool {
-        self.running && self.cpu.is_running()
+        self.running
+    }
+
+    pub(crate) fn guest_micros(&self) -> u64 {
+        self.guest_epoch
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64
+    }
+
+    pub(crate) fn guest_os_tick(&self) -> u64 {
+        self.guest_micros() / 10_000
+    }
+
+    pub(crate) fn delay_current_task_ticks(&mut self, ticks: u32) {
+        let ticks = u64::from(ticks).max(1);
+        self.current_wake_tick = self.guest_os_tick().saturating_add(ticks);
+    }
+
+    fn earliest_wake_instant(&self) -> Option<Instant> {
+        let mut earliest = if self.current_wake_tick > self.guest_os_tick() {
+            Some(self.current_wake_tick)
+        } else {
+            None
+        };
+        let now = self.guest_os_tick();
+        for task in &self.tasks {
+            if task.wake_tick > now {
+                earliest = Some(earliest.map_or(task.wake_tick, |value| value.min(task.wake_tick)));
+            }
+        }
+        earliest.map(|tick| self.guest_epoch + Duration::from_micros(tick * 10_000))
+    }
+
+    fn sleep_until_next_wake(&self) {
+        let Some(target) = self.earliest_wake_instant() else {
+            return;
+        };
+        let now = Instant::now();
+        if target > now {
+            let remaining = target - now;
+            // Cap the host sleep so a long OSTimeDly cannot freeze the UI loop.
+            let capped = remaining.min(Duration::from_micros(HOST_FRAME_MICROS));
+            std::thread::sleep(capped);
+        }
     }
     pub(crate) fn format(&self) -> ContentFormat {
         self.package.format()
@@ -511,8 +594,8 @@ impl Runtime {
 
     pub(crate) fn set_unknown_instruction_policy(&mut self, policy: UnknownInstructionPolicy) {
         self.cpu.set_unknown_instruction_policy(policy);
-        for (cpu, _) in &mut self.tasks {
-            cpu.set_unknown_instruction_policy(policy);
+        for task in &mut self.tasks {
+            task.cpu.set_unknown_instruction_policy(policy);
         }
     }
 
@@ -563,6 +646,8 @@ impl Runtime {
             dynamic_imports: &self.dynamic_imports,
             tasks: &self.tasks,
             current_priority: self.current_priority,
+            current_wake_tick: self.current_wake_tick,
+            guest_elapsed_micros: self.guest_micros(),
             files,
             file_searches: &self.file_searches,
             next_file_handle: self.next_file_handle,
@@ -625,6 +710,10 @@ impl Runtime {
         self.dynamic_imports = state.dynamic_imports;
         self.tasks = state.tasks;
         self.current_priority = state.current_priority;
+        self.current_wake_tick = state.current_wake_tick;
+        self.guest_epoch = Instant::now()
+            .checked_sub(Duration::from_micros(state.guest_elapsed_micros))
+            .unwrap_or_else(Instant::now);
         self.files = state.files;
         self.file_searches = state.file_searches;
         self.next_file_handle = state.next_file_handle;
@@ -679,8 +768,19 @@ impl Runtime {
     }
 
     pub(crate) fn tick(&mut self) -> Result<()> {
-        if !self.is_running() {
+        if !self.running {
             return Ok(());
+        }
+        // If the active task is still delayed, park it and pick a ready peer.
+        // When every task is delayed, sleep on the host until the earliest wake.
+        if self.current_wake_tick > self.guest_os_tick() {
+            self.park_current_task();
+            if !self.activate_ready_task() {
+                self.restore_earliest_delayed_task();
+                self.sleep_until_next_wake();
+                self.audio.advance_frame();
+                return Ok(());
+            }
         }
         if self.cheats.enabled_rules().next().is_some() {
             self.clear_instruction_cache();
@@ -698,8 +798,18 @@ impl Runtime {
         let mut supplemental_rounds = 0usize;
         let mut audio_rounds_armed = false;
         'scheduler: loop {
+            if self.current_wake_tick > self.guest_os_tick() {
+                self.park_current_task();
+                if !self.activate_ready_task() {
+                    self.restore_earliest_delayed_task();
+                    break 'scheduler;
+                }
+            }
             let initial = self.cpu.instruction_count;
             let mut previous_pc = self.cpu.r[15];
+            let guest_micros = self.guest_micros();
+            let guest_os_tick = self.guest_os_tick();
+            let mut pending_delay_ticks = 0u32;
             let event = {
                 let mut bus = RuntimeBus {
                     memory: &mut self.memory,
@@ -737,6 +847,10 @@ impl Runtime {
                     code_page_generations: &mut self.code_page_generations,
                     instruction_cache_invalidated: false,
                     code_generation: &mut self.code_generation,
+                    guest_micros,
+                    guest_os_tick,
+                    requested_delay_ticks: 0,
+                    current_audio_producer: &mut self.current_audio_producer,
                 };
                 let mut known_task_count = bus.tasks.len();
                 let quantum = if supplemental_rounds > 0 {
@@ -803,9 +917,11 @@ impl Runtime {
                         bus.finish_current = false;
                     }
                     if bus.sleep_requested {
+                        pending_delay_ticks = bus.requested_delay_ticks;
                         break SliceEvent::Sleep;
                     }
                     if bus.yield_requested {
+                        pending_delay_ticks = bus.requested_delay_ticks;
                         break SliceEvent::Yield;
                     }
                     if let Some(address) = bus.frame_address.take() {
@@ -813,6 +929,9 @@ impl Runtime {
                     }
                 }
             };
+            if pending_delay_ticks > 0 {
+                self.delay_current_task_ticks(pending_delay_ticks);
+            }
             match event {
                 SliceEvent::Exit => {
                     if !self.boot_complete {
@@ -845,6 +964,10 @@ impl Runtime {
                 }
                 SliceEvent::Sleep => {
                     self.rotate_task();
+                    if self.current_wake_tick > self.guest_os_tick() {
+                        self.sleep_until_next_wake();
+                        break 'scheduler;
+                    }
                     if supplemental_rounds > 0 {
                         supplemental_rounds -= 1;
                         if supplemental_rounds == 0 {
@@ -863,6 +986,10 @@ impl Runtime {
                 }
                 SliceEvent::Yield | SliceEvent::BudgetExhausted => {
                     self.rotate_task();
+                    if self.current_wake_tick > self.guest_os_tick() {
+                        self.sleep_until_next_wake();
+                        break 'scheduler;
+                    }
                     if supplemental_rounds > 0 {
                         supplemental_rounds -= 1;
                         if supplemental_rounds == 0 {
@@ -928,22 +1055,109 @@ impl Runtime {
     }
 
     fn activate_next_task(&mut self) -> bool {
-        if let Some((cpu, priority)) = self.tasks.pop_front() {
-            self.cpu = cpu;
-            self.current_priority = priority;
+        if let Some(task) = self.tasks.pop_front() {
+            self.cpu = task.cpu;
+            self.current_priority = task.priority;
+            self.current_wake_tick = 0;
+            self.current_audio_producer = task.audio_producer;
             true
         } else {
             false
         }
     }
 
+    fn activate_ready_task(&mut self) -> bool {
+        let now = self.guest_os_tick();
+        // Prefer a ready audio producer so the host device queue stays topped up.
+        if let Some(index) = self
+            .tasks
+            .iter()
+            .position(|task| task.audio_producer && task.is_ready(now))
+        {
+            let task = self.tasks.remove(index).expect("index was enumerated");
+            self.cpu = task.cpu;
+            self.current_priority = task.priority;
+            self.current_wake_tick = 0;
+            self.current_audio_producer = true;
+            return true;
+        }
+        let count = self.tasks.len();
+        for _ in 0..count {
+            let Some(task) = self.tasks.pop_front() else {
+                break;
+            };
+            if task.is_ready(now) {
+                self.cpu = task.cpu;
+                self.current_priority = task.priority;
+                self.current_wake_tick = 0;
+                self.current_audio_producer = task.audio_producer;
+                return true;
+            }
+            self.tasks.push_back(task);
+        }
+        false
+    }
+
+    fn park_current_task(&mut self) {
+        let cpu = std::mem::replace(&mut self.cpu, idle_cpu());
+        let audio_producer = self.current_audio_producer;
+        self.tasks.push_back(GuestTask {
+            cpu,
+            priority: self.current_priority,
+            wake_tick: self.current_wake_tick,
+            audio_producer,
+        });
+        self.current_wake_tick = 0;
+    }
+
+    fn restore_earliest_delayed_task(&mut self) {
+        let now = self.guest_os_tick();
+        let Some(index) = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| task.wake_tick > now)
+            .min_by_key(|(_, task)| task.wake_tick)
+            .map(|(index, _)| index)
+        else {
+            return;
+        };
+        let task = self.tasks.remove(index).expect("index was enumerated");
+        self.cpu = task.cpu;
+        self.current_priority = task.priority;
+        self.current_wake_tick = task.wake_tick;
+        self.current_audio_producer = task.audio_producer;
+    }
+
     fn rotate_task(&mut self) {
-        if let Some((next, priority)) = self.tasks.pop_front() {
-            let current = std::mem::replace(&mut self.cpu, next);
-            self.tasks.push_back((current, self.current_priority));
-            self.current_priority = priority;
+        let cpu = std::mem::replace(&mut self.cpu, idle_cpu());
+        let priority = self.current_priority;
+        let wake_tick = self.current_wake_tick;
+        let audio_producer = self.current_audio_producer;
+        self.tasks.push_back(GuestTask {
+            cpu,
+            priority,
+            wake_tick,
+            audio_producer,
+        });
+        self.current_wake_tick = 0;
+        if !self.activate_ready_task() {
+            // Keep a live CPU as the current context so is_running stays true
+            // while every queued task is waiting on its wake tick.
+            if let Some(task) = self.tasks.pop_back() {
+                self.cpu = task.cpu;
+                self.current_priority = task.priority;
+                self.current_wake_tick = task.wake_tick;
+                self.current_audio_producer = task.audio_producer;
+            }
         }
     }
+}
+
+fn idle_cpu() -> Cpu {
+    let mut cpu = Cpu::new(EXIT_ADDRESS, EXIT_ADDRESS - 16, EXIT_ADDRESS);
+    cpu.start();
+    cpu
 }
 
 struct RuntimeBus<'a> {
@@ -958,7 +1172,7 @@ struct RuntimeBus<'a> {
     frame_address: &'a mut Option<u32>,
     stop_requested: bool,
     dynamic_imports: &'a mut Vec<String>,
-    tasks: &'a mut VecDeque<(Cpu, u32)>,
+    tasks: &'a mut VecDeque<GuestTask>,
     current_priority: u32,
     yield_requested: bool,
     finish_current: bool,
@@ -982,6 +1196,10 @@ struct RuntimeBus<'a> {
     code_page_generations: &'a mut [u64],
     instruction_cache_invalidated: bool,
     code_generation: &'a mut u64,
+    guest_micros: u64,
+    guest_os_tick: u64,
+    requested_delay_ticks: u32,
+    current_audio_producer: &'a mut bool,
 }
 
 fn framebuffer_is_solid(framebuffer: &[u8]) -> bool {
@@ -1637,7 +1855,7 @@ mod tests {
         let video_ram_pointer = runtime.memory.framebuffer().as_ptr();
         let mut task = Cpu::new(0x1010_1000, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
         task.start();
-        runtime.tasks.push_back((task, 7));
+        runtime.tasks.push_back(GuestTask::new(task, 7));
 
         runtime.set_unknown_instruction_policy(UnknownInstructionPolicy::Stop);
         assert_eq!(
@@ -1645,7 +1863,7 @@ mod tests {
             UnknownInstructionPolicy::Stop
         );
         assert_eq!(
-            runtime.tasks[0].0.unknown_instruction_policy(),
+            runtime.tasks[0].cpu.unknown_instruction_policy(),
             UnknownInstructionPolicy::Stop
         );
 
@@ -1703,7 +1921,7 @@ mod tests {
         let mut task = Cpu::new(0x1010_1000, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
         task.r[5] = 0x55aa_55aa;
         task.start();
-        runtime.tasks.push_back((task, 7));
+        runtime.tasks.push_back(GuestTask::new(task, 7));
         runtime.current_priority = 3;
         runtime.files.insert(
             17,
@@ -1759,8 +1977,8 @@ mod tests {
         assert!(runtime.is_running());
         assert!(runtime.boot_complete);
         assert_eq!(runtime.dynamic_imports, ["dynamic_call"]);
-        assert_eq!(runtime.tasks[0].0.r[5], 0x55aa_55aa);
-        assert_eq!(runtime.tasks[0].1, 7);
+        assert_eq!(runtime.tasks[0].cpu.r[5], 0x55aa_55aa);
+        assert_eq!(runtime.tasks[0].priority, 7);
         assert_eq!(runtime.current_priority, 3);
         assert_eq!(runtime.files[&17].data, [1, 2, 3, 4]);
         assert_eq!(runtime.files[&17].position, 2);
@@ -1998,7 +2216,7 @@ mod tests {
             EXIT_ADDRESS,
         );
         audio_task.start();
-        runtime.tasks.push_back((audio_task, 7));
+        runtime.tasks.push_back(GuestTask::new(audio_task, 7));
         runtime.current_priority = 3;
         runtime.start();
 
@@ -2034,12 +2252,12 @@ mod tests {
         let mut peer = Cpu::new(origin + 8, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
         peer.r[4] = 10;
         peer.start();
-        runtime.tasks.push_back((peer, 7));
+        runtime.tasks.push_back(GuestTask::new(peer, 7));
         runtime.start();
 
         runtime.tick().unwrap();
 
-        let queued = &runtime.tasks.front().unwrap().0;
+        let queued = &runtime.tasks.front().unwrap().cpu;
         assert_eq!(
             (
                 runtime.cpu.r[4],
@@ -2050,6 +2268,47 @@ mod tests {
                 queued.instruction_count,
             ),
             (8, origin + 16, 5, 8, origin + 16, 5)
+        );
+    }
+
+    #[test]
+    fn ostimedly_parks_the_task_until_the_guest_clock_advances() {
+        let mut runtime = Runtime::from_package(svc_package("OSTimeDly"), PathBuf::new()).unwrap();
+        runtime.cpu.r[0] = 3;
+        runtime.start();
+        runtime.tick().unwrap();
+
+        assert_eq!(runtime.cpu.r[0], 0);
+        assert!(
+            runtime.current_wake_tick >= 3,
+            "OSTimeDly(3) should park for at least 3 OS ticks, got {}",
+            runtime.current_wake_tick
+        );
+        // The guest clock is wall-based, so the wake tick is in the future.
+        assert!(runtime.current_wake_tick > runtime.guest_os_tick());
+    }
+
+    #[test]
+    fn get_tick_count_tracks_wall_clock_milliseconds() {
+        let mut runtime =
+            Runtime::from_package(svc_package("GetTickCount"), PathBuf::new()).unwrap();
+        runtime.start();
+        runtime.tick().unwrap();
+        let first = runtime.cpu.r[0];
+        std::thread::sleep(Duration::from_millis(5));
+        // Re-enter the import SVC without relying on a guest loop.
+        runtime.cpu = Cpu::new(
+            runtime.package.entry_point(),
+            EXIT_ADDRESS - 16,
+            EXIT_ADDRESS,
+        );
+        runtime.cpu.start();
+        runtime.running = true;
+        runtime.tick().unwrap();
+        let second = runtime.cpu.r[0];
+        assert!(
+            second >= first + 5,
+            "GetTickCount advanced {first} -> {second}"
         );
     }
 
@@ -2066,14 +2325,18 @@ mod tests {
         runtime.memory.write_bytes(buffer, &[1; 320]).unwrap();
         runtime.cpu.r[1] = buffer;
         runtime.cpu.r[2] = 320;
+        runtime.cpu.r[0] = 0;
         let mut peer = Cpu::new(EXIT_ADDRESS, EXIT_ADDRESS - 0x100, EXIT_ADDRESS);
         peer.start();
-        runtime.tasks.push_back((peer, 7));
+        runtime.tasks.push_back(GuestTask::new(peer, 7));
         runtime.start();
 
         runtime.tick().unwrap();
 
-        assert_eq!(runtime.cpu.instruction_count, 8);
+        // Audio producer OSTimeDly(1) only yields, so the loop can burst-fill
+        // the device queue within one host frame instead of parking 10 ms.
+        assert!(runtime.cpu.instruction_count >= 6);
+        assert!(runtime.current_audio_producer);
     }
 
     #[test]

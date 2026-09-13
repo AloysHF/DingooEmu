@@ -12,14 +12,14 @@ impl RuntimeBus<'_> {
                     task.set_unknown_instruction_policy(cpu.unknown_instruction_policy());
                     task.r[0] = cpu.r[1];
                     task.start();
-                    self.tasks.push_back((task, cpu.r[3] & 0xff));
+                    self.tasks.push_back(GuestTask::new(task, cpu.r[3] & 0xff));
                 }
                 cpu.r[0] = 0;
             }
             "OSTaskQuery" => {
                 let priority = cpu.r[0] & 0xff;
                 cpu.r[0] = if priority == self.current_priority
-                    || self.tasks.iter().any(|(_, value)| *value == priority)
+                    || self.tasks.iter().any(|task| task.priority == priority)
                 {
                     0
                 } else {
@@ -32,7 +32,7 @@ impl RuntimeBus<'_> {
                     self.finish_current = true;
                     cpu.r[0] = 0;
                 } else if let Some(index) =
-                    self.tasks.iter().position(|(_, value)| *value == priority)
+                    self.tasks.iter().position(|task| task.priority == priority)
                 {
                     self.tasks.remove(index);
                     cpu.r[0] = 0;
@@ -60,6 +60,7 @@ impl RuntimeBus<'_> {
                     }
                     Some(_) if self.profile == ArmProfile::Retail => {
                         cpu.r[15] = cpu.r[15].wrapping_sub(4);
+                        self.requested_delay_ticks = 1;
                         self.yield_requested = true;
                     }
                     Some(_) => {
@@ -90,18 +91,53 @@ impl RuntimeBus<'_> {
                     41
                 };
             }
-            "OSTimeDly" | "delay" | "delay_ms" | "OSTimeDlyHMSM" => {
+            "OSTimeDly" | "delay" => {
+                let ticks = cpu.r[0];
                 cpu.r[0] = 0;
-                // A timed delay hands control to the other tasks without
-                // spending a scheduler slice; the delay is paced by the
-                // scheduler's post-frame rotation rounds, not a host timer.
+                if ticks == 1 && *self.current_audio_producer {
+                    // Audio pacing yield only. The guest is about to refill the
+                    // device buffer; parking here for a full OS tick starves
+                    // the host queue and causes underruns. Supplemental rounds
+                    // let this task write again within the same host frame.
+                    self.sleep_requested = true;
+                } else {
+                    // OSTimeDly/delay take uC/OS-II ticks (10 ms each).
+                    self.requested_delay_ticks = ticks.max(1);
+                    self.sleep_requested = true;
+                }
+            }
+            "delay_ms" => {
+                let milliseconds = cpu.r[0];
+                cpu.r[0] = 0;
+                let ticks = milliseconds_to_os_ticks(milliseconds as u64);
+                self.requested_delay_ticks = ticks;
                 self.sleep_requested = true;
             }
-            "OSTimeGet" => cpu.r[0] = (cpu.instruction_count / 150_000) as u32,
-            "GetTickCount" => cpu.r[0] = (cpu.instruction_count / 15_000) as u32,
-            "OSTimerGetTickTimeus" => cpu.r[0] = (cpu.instruction_count / 15) as u32,
+            "OSTimeDlyHMSM" => {
+                let hours = cpu.r[0];
+                let minutes = cpu.r[1];
+                let seconds = cpu.r[2];
+                let milliseconds = cpu.r[3];
+                cpu.r[0] = 0;
+                let total_ms = (u64::from(hours) * 3_600_000)
+                    + (u64::from(minutes) * 60_000)
+                    + (u64::from(seconds) * 1_000)
+                    + u64::from(milliseconds);
+                self.requested_delay_ticks = milliseconds_to_os_ticks(total_ms);
+                self.sleep_requested = true;
+            }
+            "OSTimeGet" => cpu.r[0] = self.guest_os_tick as u32,
+            "GetTickCount" => cpu.r[0] = (self.guest_micros / 1_000) as u32,
+            "OSTimerGetTickTimeus" => cpu.r[0] = self.guest_micros as u32,
             _ => return Ok(false),
         }
         Ok(true)
     }
+}
+
+fn milliseconds_to_os_ticks(milliseconds: u64) -> u32 {
+    let ticks = milliseconds
+        .saturating_mul(OS_TICKS_PER_SECOND)
+        .div_ceil(1_000);
+    ticks.clamp(1, u32::MAX as u64) as u32
 }

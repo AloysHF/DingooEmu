@@ -12,12 +12,15 @@ const VIDEO_FRAMES_PER_SECOND: u32 = 60;
 #[cfg(not(feature = "standalone"))]
 const MAX_QUEUED_AUDIO_FRAMES: usize = OUTPUT_SAMPLE_RATE as usize / 2;
 #[cfg(feature = "standalone")]
-const MAX_QUEUED_AUDIO_BUFFERS: usize = 4;
-
-#[cfg(feature = "standalone")]
 fn host_output_enabled_default() -> bool {
     true
 }
+
+/// Target queued-audio depth before `can_write` reports false. Matches the
+/// ~130 ms device buffer used by real handheld SDKs and avoids underruns when
+/// the guest only produces one PCM chunk per host frame.
+#[cfg(feature = "standalone")]
+const TARGET_QUEUED_MICROS: u64 = 120_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SampleFormat {
@@ -78,6 +81,12 @@ pub struct Audio {
     #[cfg(feature = "standalone")]
     #[serde(skip)]
     virtual_buffered_frame_units: u64,
+    #[cfg(feature = "standalone")]
+    #[serde(skip)]
+    queued_micros: u64,
+    #[cfg(feature = "standalone")]
+    #[serde(skip)]
+    last_queue_account: Option<std::time::Instant>,
     #[cfg(not(feature = "standalone"))]
     pending_samples: VecDeque<i16>,
     #[cfg(not(feature = "standalone"))]
@@ -103,6 +112,10 @@ impl Audio {
             host_output_enabled: true,
             #[cfg(feature = "standalone")]
             virtual_buffered_frame_units: 0,
+            #[cfg(feature = "standalone")]
+            queued_micros: 0,
+            #[cfg(feature = "standalone")]
+            last_queue_account: None,
             #[cfg(not(feature = "standalone"))]
             pending_samples: VecDeque::new(),
             #[cfg(not(feature = "standalone"))]
@@ -119,6 +132,8 @@ impl Audio {
         #[cfg(feature = "standalone")]
         {
             self.virtual_buffered_frame_units = 0;
+            self.queued_micros = 0;
+            self.last_queue_account = None;
         }
 
         #[cfg(feature = "standalone")]
@@ -165,6 +180,8 @@ impl Audio {
                 player.stop();
             }
             self.virtual_buffered_frame_units = 0;
+            self.queued_micros = 0;
+            self.last_queue_account = None;
         }
 
         #[cfg(not(feature = "standalone"))]
@@ -178,7 +195,7 @@ impl Audio {
         true
     }
 
-    pub fn can_write(&self) -> bool {
+    pub fn can_write(&mut self) -> bool {
         if self.config.is_none() || self.muted || self.volume == 0 {
             return true;
         }
@@ -186,9 +203,8 @@ impl Audio {
         #[cfg(feature = "standalone")]
         {
             if self.host_output_enabled {
-                self.player
-                    .as_ref()
-                    .is_none_or(|player| player.len() < MAX_QUEUED_AUDIO_BUFFERS)
+                self.account_queued_audio();
+                self.queued_micros < TARGET_QUEUED_MICROS
             } else {
                 self.config.is_some_and(|config| {
                     self.virtual_buffered_frame_units < u64::from(config.sample_rate) * 30
@@ -200,6 +216,23 @@ impl Audio {
         {
             self.pending_samples.len() / 2 < MAX_QUEUED_AUDIO_FRAMES
         }
+    }
+
+    #[cfg(feature = "standalone")]
+    fn account_queued_audio(&mut self) {
+        let now = std::time::Instant::now();
+        let Some(previous) = self.last_queue_account.replace(now) else {
+            return;
+        };
+        let played = now.duration_since(previous).as_micros() as u64;
+        self.queued_micros = self.queued_micros.saturating_sub(played);
+    }
+
+    #[cfg(feature = "standalone")]
+    fn note_queued_audio(&mut self, frames: usize, config: &AudioConfig) {
+        self.account_queued_audio();
+        let micros = (frames as u64).saturating_mul(1_000_000) / u64::from(config.sample_rate);
+        self.queued_micros = self.queued_micros.saturating_add(micros);
     }
 
     pub fn write(&mut self, data: &[u8]) -> bool {
@@ -238,11 +271,13 @@ impl Audio {
             };
             let channels = NonZero::<u16>::new(config.channels as u16).unwrap();
             let sample_rate = NonZero::<u32>::new(config.sample_rate).unwrap();
+            let frames = samples.len() / config.channels as usize;
             player.append(rodio::buffer::SamplesBuffer::new(
                 channels,
                 sample_rate,
                 samples,
             ));
+            self.note_queued_audio(frames, &config);
         }
 
         #[cfg(not(feature = "standalone"))]

@@ -4,6 +4,7 @@ impl RuntimeBus<'_> {
     pub(super) fn dispatch_audio(&mut self, cpu: &mut Cpu, name: &str) -> Result<bool> {
         match name {
             "_waveout_open" | "waveout_open" => {
+                *self.current_audio_producer = true;
                 let address = cpu.r[0];
                 let config = AudioConfig::new(
                     self.memory.read32(address)?,
@@ -14,6 +15,7 @@ impl RuntimeBus<'_> {
                 cpu.r[0] = u32::from(config.is_some_and(|config| self.audio.open(config)));
             }
             "waveout_write" => {
+                *self.current_audio_producer = true;
                 let buffer = cpu.r[1];
                 let count = cpu.r[2];
                 if count == 0 || count > 4 * 1024 * 1024 {
@@ -23,6 +25,7 @@ impl RuntimeBus<'_> {
                     // write once the consumed audio frees space. Waiting for
                     // playback must not burn a scheduler slice.
                     cpu.r[15] = cpu.r[15].wrapping_sub(4);
+                    self.requested_delay_ticks = 1;
                     self.sleep_requested = true;
                 } else {
                     let data = self.memory.read_bytes(buffer, count as usize)?;
@@ -32,6 +35,7 @@ impl RuntimeBus<'_> {
                 }
             }
             "waveout_try_write" => {
+                *self.current_audio_producer = true;
                 let count = cpu.r[2];
                 cpu.r[0] = if count == 0 || count > 4 * 1024 * 1024 || !self.audio.can_write() {
                     0

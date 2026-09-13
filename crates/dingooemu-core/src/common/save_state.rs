@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 const MAGIC: &[u8; 8] = b"DINGSTAT";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const HEADER_SIZE: usize = 32;
 // A Dingoo snapshot always contains the 32 MiB guest RAM and may also contain
 // resources that the guest deliberately keeps open. Real applications can
