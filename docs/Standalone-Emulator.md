@@ -15,6 +15,12 @@ You can also build it from source:
 cargo build -p dingooemu --release
 ```
 
+On Linux, install the audio, window, and gamepad development packages first:
+
+```bash
+sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev libudev-dev
+```
+
 The binary is produced at `target/release/dingoo-emu` (`dingoo-emu.exe` on
 Windows).
 
