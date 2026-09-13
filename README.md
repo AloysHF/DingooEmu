@@ -186,6 +186,12 @@ screenshots.
 The standalone defaults match RetroArch's standard keyboard bindings for the
 equivalent RetroPad buttons.
 
+Physical gamepads are also supported in the standalone emulator. The first
+connected pad is polled each frame; D-pad and sticks map to the D-pad, and
+face buttons follow the RetroPad layout (South→B, East→A, West→Y, North→X).
+Pass `--no-gamepad` to disable physical controllers. See
+[Standalone-Emulator.md](docs/Standalone-Emulator.md) for the full mapping.
+
 ## Contribute
 
 Contributions are welcome! Whether you're interested in fixing bugs, adding features, improving documentation, or testing game compatibility, we'd love your help. See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for details.

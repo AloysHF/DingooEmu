@@ -1,8 +1,8 @@
 # Standalone Emulator
 
 This guide covers installing and running the standalone `dingoo-emu` binary,
-loading Dingoo A320 and Gemei A330 native software, keyboard controls,
-screenshot mode, and every command-line option.
+loading Dingoo A320 and Gemei A330 native software, keyboard and gamepad
+controls, screenshot mode, and every command-line option.
 
 ## Installation
 
@@ -54,6 +54,7 @@ dingoo-emu [OPTIONS] <PATH>
 | `--debug-logging` | flag | off | Enable debug-level emulator logging unless `RUST_LOG` overrides it. |
 | `--remap <BUTTON:KEY>` | mapping | — | Replace a button's default keyboard mapping; may be repeated. |
 | `--swap-ab` | flag | off | Exchange the emulated A and B button masks. |
+| `--no-gamepad` | flag | off | Disable physical gamepad input; keyboard remains available. |
 | `--filter <MODE>` | `nearest`, `bilinear`, `bicubic`, `xbrz` | `nearest` | Select the window scaling filter. |
 | `--show-gamepad` | flag | off | Overlay the current logical Dingoo button state. |
 | `--repeat-delay <N>` | frames | `24` | Frames before a held button begins generating repeat presses. |
@@ -100,6 +101,29 @@ dingoo-emu --remap a:space --remap select:tab path/to/game.app
 
 Use `--swap-ab` to keep the physical keys while exchanging their in-game A/B
 meaning. It is applied after custom key remapping.
+
+## Gamepad Controls
+
+The standalone emulator polls the first connected physical gamepad in addition
+to the keyboard. Connected pads are logged at startup and on hot-plug events.
+
+| Control | Dingoo Button |
+|---------|---------------|
+| D-pad or left/right stick | D-pad |
+| South (Xbox A / PS Cross) | B |
+| East (Xbox B / PS Circle) | A |
+| West (Xbox X / PS Square) | Y |
+| North (Xbox Y / PS Triangle) | X |
+| Start | START |
+| Select / Back | SELECT |
+| Left bumper | L shoulder |
+| Right bumper | R shoulder |
+
+Face-button labels follow the same RetroPad convention as the default keyboard
+bindings, so an Xbox-style pad feels consistent with RetroArch. Stick axes
+become digital D-pad presses past a 0.5 deadzone. Keyboard and gamepad inputs
+are combined; `--swap-ab` applies to both. Pass `--no-gamepad` to ignore
+physical controllers and use the keyboard only.
 
 ## Display Filters
 

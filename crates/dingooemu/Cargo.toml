@@ -13,6 +13,7 @@ path = "src/main.rs"
 dingooemu-core = { workspace = true, features = ["standalone", "jit"] }
 clap.workspace = true
 minifb.workspace = true
+gilrs.workspace = true
 log.workspace = true
 env_logger.workspace = true
 anyhow.workspace = true
