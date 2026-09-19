@@ -1,3 +1,4 @@
+use super::super::find_content_file;
 use super::super::*;
 
 impl RuntimeBus<'_> {
@@ -17,6 +18,12 @@ impl RuntimeBus<'_> {
                 cpu.r[0] = self.close_file(cpu.r[0]);
             }
             "fread" | "fsys_fread" => {
+                if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+                    eprintln!(
+                        "ARM fsys_fread dest={:#x} size={} count={} handle={:#x}",
+                        cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3]
+                    );
+                }
                 cpu.r[0] = self.read_file(cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3])?;
             }
             "fwrite" | "fsys_fwrite" => {
@@ -42,13 +49,44 @@ impl RuntimeBus<'_> {
             }
             "fsys_findfirst" => {
                 let pattern = self.read_c_string(cpu.r[0], 1024)?;
+                if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+                    eprintln!("ARM fsys_findfirst pattern={pattern:?}");
+                }
                 cpu.r[0] = self.begin_file_search(&pattern, cpu.r[1], cpu.r[2])?;
             }
             "fsys_findnext" => cpu.r[0] = self.next_file_search(cpu.r[0])?,
-            "fsys_findclose" => {
-                self.file_searches.remove(&cpu.r[0]);
-                cpu.r[0] = 0;
+            "fsys_stat" => {
+                let path = self.read_c_string(cpu.r[0], 1024)?;
+                let resolved = resolve_guest_path(self.content_directory, &path).or_else(|| {
+                    let base = path
+                        .replace('\\', "/")
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    find_content_file(self.content_directory, &base)
+                });
+                match resolved.and_then(|p| std::fs::metadata(&p).ok().map(|m| (p, m))) {
+                    Some((path, meta)) => {
+                        if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+                            eprintln!("ARM fsys_stat {path:?} -> {}", path.display());
+                        }
+                        if cpu.r[1] != 0 {
+                            self.write_memory(cpu.r[1], &0u32.to_le_bytes())?;
+                            self.write_memory(cpu.r[1] + 4, &(meta.len() as u32).to_le_bytes())?;
+                        }
+                        cpu.r[0] = 0;
+                    }
+                    None => {
+                        if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+                            eprintln!("ARM fsys_stat {path:?} missing");
+                        }
+                        cpu.r[0] = u32::MAX;
+                    }
+                }
             }
+            "fsys_chdir" => cpu.r[0] = 0,
+            "fsys_flush_cache" | "fsys_RefreshCache" => cpu.r[0] = 0,
             "dl_res_open" => cpu.r[0] = self.open_resource([cpu.r[2], cpu.r[1], cpu.r[0]]),
             "dl_res_get_size" => {
                 cpu.r[0] = self
@@ -72,6 +110,12 @@ impl RuntimeBus<'_> {
     }
 
     pub(super) fn open_file(&mut self, name: &str, mode: &str) -> u32 {
+        if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+            eprintln!(
+                "ARM file open name={name:?} mode={mode:?} content_dir={:?}",
+                self.content_directory
+            );
+        }
         let operation = mode.as_bytes().first().copied().unwrap_or(b'r');
         let writable = matches!(operation, b'w' | b'a') || mode.contains('+');
         if !matches!(operation, b'r' | b'w' | b'a') {
@@ -115,7 +159,9 @@ impl RuntimeBus<'_> {
                 data
             }
             Err(error) => {
-                if let Some(resource) = self.package.find_resource(name) {
+                if let Some(data) = self.open_guest_file_fallback(name) {
+                    data
+                } else if let Some(resource) = self.package.find_resource(name) {
                     log::trace!("ARM file open package resource: {name:?}");
                     self.package.get_resource_data(resource)
                 } else if let Some(data) = self.package.get_embedded_file_data(name) {
@@ -134,6 +180,43 @@ impl RuntimeBus<'_> {
         };
         let persisted_path = if writable { save_path } else { None };
         self.insert_file(data, persisted_path, 0, writable, false)
+    }
+
+    fn open_guest_file_fallback(&self, name: &str) -> Option<Vec<u8>> {
+        let lowered = name.replace('\\', "/").to_ascii_lowercase();
+        let base = lowered
+            .rsplit('/')
+            .next()
+            .filter(|value| !value.is_empty())?
+            .to_string();
+        // Search the content directory for basename matches (drive prefixes,
+        // "./" prefixes, and nested guest folders).
+        let mut stack = vec![self.content_directory.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let file_name = path
+                    .file_name()
+                    .map(|value| value.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
+                if file_name == base {
+                    if let Ok(data) = std::fs::read(&path) {
+                        if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+                            eprintln!("ARM file open fallback {name:?} -> {}", path.display());
+                        }
+                        return Some(data);
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub(super) fn insert_file(
@@ -179,8 +262,19 @@ impl RuntimeBus<'_> {
                 return None;
             }
             let name = self.read_c_string(address, 1024).ok()?;
-            let resource = self.package.find_resource(&name)?;
-            Some((name, self.package.get_resource_data(resource)))
+            if let Some(resource) = self.package.find_resource(&name) {
+                return Some((name, self.package.get_resource_data(resource)));
+            }
+            let base = name
+                .replace('\\', "/")
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let path = resolve_guest_path(self.content_directory, &name)
+                .or_else(|| find_content_file(self.content_directory, &base))?;
+            let data = std::fs::read(path).ok()?;
+            Some((name, data))
         });
         let Some((name, data)) = found else {
             return 0;

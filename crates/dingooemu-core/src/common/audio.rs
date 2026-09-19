@@ -93,6 +93,21 @@ pub struct Audio {
     output_frame_remainder: u32,
     #[cfg(not(feature = "standalone"))]
     resampler: StreamingResampler,
+    #[serde(default)]
+    dvc_handle: u32,
+    #[serde(default = "default_dvc_sample_rate")]
+    dvc_sample_rate: u32,
+    #[serde(default = "default_dvc_volume")]
+    dvc_volume: u32,
+    #[serde(default)]
+    dvc_started: bool,
+}
+
+fn default_dvc_sample_rate() -> u32 {
+    44_100
+}
+fn default_dvc_volume() -> u32 {
+    30
 }
 
 impl Audio {
@@ -122,7 +137,84 @@ impl Audio {
             output_frame_remainder: 0,
             #[cfg(not(feature = "standalone"))]
             resampler: StreamingResampler::default(),
+            dvc_handle: 0,
+            dvc_sample_rate: 44_100,
+            dvc_volume: 30,
+            dvc_started: false,
         }
+    }
+
+    pub const fn dvc_handle(&self) -> u32 {
+        self.dvc_handle
+    }
+    pub const fn dvc_sample_rate(&self) -> u32 {
+        self.dvc_sample_rate
+    }
+    pub const fn dvc_volume(&self) -> u32 {
+        self.dvc_volume
+    }
+    pub const fn dvc_started(&self) -> bool {
+        self.dvc_started
+    }
+
+    pub fn dvc_open(&mut self, device_name: &str) -> u32 {
+        const EXPECTED: &str = "ROOT\\DVC\\IIS\\IIS0";
+        if device_name != EXPECTED {
+            return 0;
+        }
+        self.dvc_handle = 1;
+        self.dvc_sample_rate = 44_100;
+        self.dvc_volume = 30;
+        self.dvc_started = false;
+        self.dvc_handle
+    }
+
+    pub fn dvc_control(&mut self, handle: u32, command: u32, argument: Option<u32>) -> u32 {
+        const SET_SAMPLE_RATE: u32 = 0x0d;
+        const START_PLAYBACK: u32 = 0x0b;
+        if handle != self.dvc_handle || self.dvc_handle == 0 {
+            return u32::MAX;
+        }
+        if command == SET_SAMPLE_RATE {
+            if let Some(rate) = argument.filter(|rate| *rate != 0) {
+                self.dvc_sample_rate = rate;
+            }
+            return 0;
+        }
+        if command == START_PLAYBACK && !self.dvc_started {
+            let config = AudioConfig::new(self.dvc_sample_rate, 16, 2, 255);
+            self.dvc_started = config.is_some_and(|config| self.open(config));
+        }
+        if self.dvc_started || command != START_PLAYBACK {
+            0
+        } else {
+            u32::MAX
+        }
+    }
+
+    pub fn dvc_write(&mut self, handle: u32, data: &[u8]) -> u32 {
+        if handle != self.dvc_handle || !self.dvc_started || data.is_empty() {
+            return u32::MAX;
+        }
+        if self.write(data) {
+            data.len() as u32
+        } else {
+            u32::MAX
+        }
+    }
+
+    pub fn dvc_close(&mut self) {
+        if self.dvc_started {
+            self.close();
+        }
+        self.dvc_handle = 0;
+        self.dvc_started = false;
+    }
+
+    pub fn dvc_set_volume(&mut self, volume: u32) {
+        self.dvc_volume = volume.min(30);
+        let mapped = (self.dvc_volume * 255 + 15) / 30;
+        self.set_volume(mapped);
     }
 
     pub fn open(&mut self, config: AudioConfig) -> bool {

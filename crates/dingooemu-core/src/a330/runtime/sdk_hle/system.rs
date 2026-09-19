@@ -26,7 +26,42 @@ impl RuntimeBus<'_> {
                     .to_vec();
                 self.write_memory(cpu.r[0], &data)?;
             }
-            "printf" | "fprintf" => cpu.r[0] = 0,
+            "printf" => {
+                if let Ok(format) = self.read_c_string(cpu.r[0], 256) {
+                    let mut line = format.clone();
+                    if format.contains("%s") {
+                        for reg in [cpu.r[1], cpu.r[2], cpu.r[3]] {
+                            if let Ok(value) = self.read_c_string(reg, 128) {
+                                if value
+                                    .bytes()
+                                    .all(|b| b.is_ascii_graphic() || b == b' ' || b == b'.')
+                                    && !value.is_empty()
+                                {
+                                    if let Some(pos) = line.find("%s") {
+                                        line.replace_range(pos..pos + 2, &value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+                        eprintln!("ARM printf: {line}");
+                    }
+                    self.append_console_output(line.as_bytes());
+                    self.append_console_output(b"\n");
+                }
+                cpu.r[0] = 0;
+            }
+            "fprintf" => {
+                if let Ok(format) = self.read_c_string(cpu.r[1], 256) {
+                    if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+                        eprintln!("ARM fprintf: {format}");
+                    }
+                    self.append_console_output(format.as_bytes());
+                    self.append_console_output(b"\n");
+                }
+                cpu.r[0] = 0;
+            }
             "stricmp" | "strcasecmp" => {
                 let left = self.read_c_string(cpu.r[0], 4096)?;
                 let right = self.read_c_string(cpu.r[1], 4096)?;
@@ -35,7 +70,48 @@ impl RuntimeBus<'_> {
             "TaskMediaFunStop" | "get_current_language" => cpu.r[0] = 0,
             "GetDLHandle" | "get_dl_handle" => cpu.r[0] = STACK_BASE + 0x100,
             "__to_locale_ansi" | "_to_locale_ansi" => cpu.r[0] = LOCALE_ADDRESS,
-            "dl_get_proc" => cpu.r[0] = self.dynamic_import(cpu.r[1])?,
+            "dl_get_proc" => {
+                if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+                    if let Ok(name) = self.read_c_string(cpu.r[1], 128) {
+                        eprintln!("ARM dl_get_proc {name:?}");
+                    }
+                }
+                cpu.r[0] = self.resolve_dynamic_import_by_name(cpu.r[1])?;
+            }
+            "dl_load" | "dl_free" => cpu.r[0] = 0,
+            "USB_No_Connect" | "udc_attached" | "USB_Connect" | "usb_connect"
+            | "usb_disconnect" => cpu.r[0] = 0,
+            "Tp_Get_Pos"
+            | "serial_putc"
+            | "serial_getc"
+            | "OSCPURestoreSR"
+            | "OSCPUSaveSR"
+            | "isTVON"
+            | "free_irq"
+            | "StartSwTimer"
+            | "LcdGetDisMode"
+            | "av_wo_create"
+            | "av_wo_write"
+            | "av_wo_destroy"
+            | "pcm_ioctl"
+            | "waveopen"
+            | "OSTaskChangePrio"
+            | "OSTaskResume"
+            | "OSTaskSuspend"
+            | "SysSetLastBrightness"
+            | "TVOUTInit"
+            | "TVOUTExit"
+            | "LCDYUVDraw"
+            | "DVCReadDevice"
+            | "fsys_chdir"
+            | "fsys_mkdir"
+            | "fsys_flush_cache"
+            | "fsys_rename"
+            | "fsys_remove"
+            | "fsys_RefreshCache"
+            | "__to_unicode_le"
+            | "heap_get_block_size" => cpu.r[0] = 0,
+            "LCDGetRefreshRate" => cpu.r[0] = 60,
             "cmGetSysModel" => {
                 cpu.r[0] = u32::from(!self.write_guest_string(cpu.r[0], cpu.r[1], "CC1800")?);
             }
@@ -45,6 +121,27 @@ impl RuntimeBus<'_> {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    pub(super) fn resolve_dynamic_import_by_name(&mut self, name_address: u32) -> Result<u32> {
+        let name = self.read_c_string(name_address, 256)?;
+        if let Some(symbol) = self
+            .package
+            .exports
+            .iter()
+            .find(|symbol| symbol.name == name)
+        {
+            return Ok(symbol.address);
+        }
+        if let Some(symbol) = self
+            .package
+            .imports
+            .iter()
+            .find(|symbol| symbol.name == name)
+        {
+            return Ok(symbol.address);
+        }
+        self.dynamic_import(name_address)
     }
 
     pub(super) fn allocate(&mut self, size: u32) -> u32 {
@@ -69,7 +166,7 @@ impl RuntimeBus<'_> {
 
     pub(super) fn dynamic_import(&mut self, name_address: u32) -> Result<u32> {
         let name = self.read_c_string(name_address, 256)?;
-        let index = match self.dynamic_imports.iter().position(|item| item == &name) {
+        let index = match self.dynamic_imports.iter().position(|item| *item == name) {
             Some(index) => index,
             None => {
                 self.dynamic_imports.push(name);
@@ -77,7 +174,10 @@ impl RuntimeBus<'_> {
             }
         };
         let address = DYNAMIC_THUNK_BASE + index as u32 * 8;
-        self.write_memory(address, &(0xef80_0000 | index as u32).to_le_bytes())?;
+        // Dynamic thunks continue the static import index space:
+        // SVC #(import_count + slot), not a bit-flag encoding.
+        let svc_index = self.imports.len() as u32 + index as u32;
+        self.write_memory(address, &(0xef00_0000 | svc_index).to_le_bytes())?;
         self.write_memory(address + 4, &0xe12f_ff1e_u32.to_le_bytes())?;
         Ok(address)
     }

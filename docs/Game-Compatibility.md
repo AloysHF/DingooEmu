@@ -34,6 +34,44 @@ three companion tracker files in the game directory and opens the playlist
 instead of remaining on the title screen. Playback correctness is not part of
 this check.
 
+### Gemei A330 homebrew notes (DOOM-A330.cc)
+
+`tmp/DOOM-A330.cc` is a Homebrew-profile `.cc` package (`origin=0x13800000`,
+`entry=0x138452AC`, `AppMain=0x13844F20`). The A330 runtime previously left
+this title on a solid black frame because:
+
+1. Homebrew software rendering polls `LEGACY_GRAPHICS_STATUS` (`0x09303054`)
+   bit 2; the ready bit is now sticky on reads/writes.
+2. Legacy surface submits (`0x0930201C`) ignored the guest pointer; they now
+   present the written address (or fall back to `0x80000000`).
+3. Dynamic SVC thunks used a non-standard `0xEF800000|index` encoding and
+   aborted on out-of-range SVC immediates; dispatch now continues the static
+   import index space (`import_count + slot`) and records unknown SVCs instead
+   of stopping the guest.
+4. DVC audio device imports (`DVCOpenDevice` and related) were unimplemented.
+5. The `0x11800000` software framebuffer alias was unmapped.
+6. Homebrew unmapped stores/loads are treated as open-bus so speculative
+   hardware probes do not abort the guest.
+
+Headless regression coverage lives in
+`crates/dingooemu-core/src/a330/memory.rs` and
+`crates/dingooemu-core/src/a330/doom_diag_test.rs` (optional; skipped when the
+package is absent).
+
+Current DOOM-A330 status (2026-07-26 diagnosis):
+
+- Package loads as Homebrew ARM `.cc`; boot reaches `AppMain` and the guest
+  prints SDK init messages (`Z_Init`, `V_Init`, `W_Init`, `R_Init`).
+- Guest software rendering targets `0x11800000` / `0x11896000`. The host
+  runtime now keeps that surface in sync each tick.
+- `W_Init` logs `adding doom1.wad`, but the guest never issues `fsys_fopen`
+  for that name. It continues into `R_Init` and does not finish refresh setup.
+  Private SVC immediates `0x0090005A` / `0x009000C5` fire once during early
+  SDK init and are still treated as unknown calls.
+- Place `doom1.wad` beside the `.cc` (and optionally under `a/`) when testing.
+  Opening still depends on whichever resource/vtable path the guest uses after
+  `ccdl_res_init`; basename fallback is implemented for `fsys_*` opens.
+
 ## Verified Games
 
 | English Name | 中文名 | Filename | Screenshot | Status |

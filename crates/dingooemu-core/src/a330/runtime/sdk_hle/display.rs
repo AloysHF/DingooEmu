@@ -33,9 +33,19 @@ impl RuntimeBus<'_> {
                 cpu.r[0] = 0;
             }
             "FlushDCache" | "__dcache_writeback_all" => {
-                if self.memory.read_bytes(cpu.r[0], FRAMEBUFFER_SIZE).is_ok() {
-                    *self.active_framebuffer = cpu.r[0];
-                    *self.frame_address = Some(cpu.r[0]);
+                // Homebrew ports flush software framebuffers (including the
+                // 0x11800000 alias). Present any readable pointer; otherwise
+                // treat the call as a no-op like a cache maintenance op.
+                let address = cpu.r[0];
+                if address != 0
+                    && (self.memory.read_bytes(address, FRAMEBUFFER_SIZE).is_ok()
+                        || self
+                            .memory
+                            .read_bytes(address, FRAMEBUFFER_SIZE * 2)
+                            .is_ok())
+                {
+                    *self.active_framebuffer = address;
+                    *self.frame_address = Some(address);
                 }
                 cpu.r[0] = 0;
             }

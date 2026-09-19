@@ -593,11 +593,9 @@ fn parse_resources(
     has_erpt: bool,
     erpt: &ChunkHeader,
 ) -> Result<Vec<ResourceEntry>> {
-    let mut resources = Vec::new();
-
     // Try ERPT first
     if has_erpt && erpt.size > 0 {
-        resources = parse_erpt_resources(data, erpt)?;
+        let resources = parse_erpt_resources(data, erpt)?;
         if !resources.is_empty() {
             return Ok(resources);
         }
@@ -606,18 +604,103 @@ fn parse_resources(
     // Try packed resources after RAWD payload, scanning aligned package tables.
     let rawd_end = rawd.base.offset + rawd.base.size;
     if rawd_end < data.len() as u32 {
-        resources = parse_packed_resources(data, rawd_end as usize);
+        let resources = parse_packed_resources(data, rawd_end as usize);
         if !resources.is_empty() {
             return Ok(resources);
         }
     }
 
-    // Try packed64 resources
-    if rawd_end < data.len() as u32 {
-        resources = parse_packed64_resources(data, rawd_end as usize);
+    // Homebrew packages sometimes store a legacy resource-table pointer at
+    // CCDL+0x1c. When that pointer is zero, scan from the file start like
+    // older loaders do.
+    let legacy_base = data
+        .get(0x1c..0x20)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) as usize)
+        .unwrap_or(0);
+    let legacy_start = if legacy_base < data.len() {
+        legacy_base
+    } else {
+        0
+    };
+    let resources = parse_legacy_resources(data, legacy_start);
+    if !resources.is_empty() {
+        return Ok(resources);
     }
 
-    Ok(resources)
+    // Try packed64 resources
+    if rawd_end < data.len() as u32 {
+        return Ok(parse_packed64_resources(data, rawd_end as usize));
+    }
+
+    Ok(Vec::new())
+}
+
+const LEGACY_RECORD_SIZE: usize = 0x408;
+const LEGACY_NAME_SIZE: usize = 0x400;
+
+fn parse_legacy_resources(data: &[u8], start: usize) -> Vec<ResourceEntry> {
+    let mut resources = Vec::new();
+    let mut cursor = start;
+    let mut tables = 0usize;
+    while cursor + 4 <= data.len() && tables < 32 {
+        match probe_legacy_table(data, cursor) {
+            Some((count, table_end)) => {
+                for index in 0..count {
+                    let record = cursor + 4 + index * LEGACY_RECORD_SIZE;
+                    let size = read_u32_at(data, record) as usize;
+                    let rel = read_u32_at(data, record + 4) as usize;
+                    let name = read_cstring(data, record + 8, LEGACY_NAME_SIZE.min(256));
+                    if name.is_empty() || size == 0 {
+                        continue;
+                    }
+                    let Some(offset) = table_end.checked_add(rel) else {
+                        continue;
+                    };
+                    if offset + size > data.len() {
+                        continue;
+                    }
+                    resources.push(ResourceEntry {
+                        kind: ResourceKind::Packed,
+                        name,
+                        offset: offset as u32,
+                        size: size as u32,
+                        xor_key: 0,
+                    });
+                }
+                tables += 1;
+                cursor = table_end;
+            }
+            None => cursor += 1,
+        }
+    }
+    resources
+}
+
+fn probe_legacy_table(data: &[u8], base: usize) -> Option<(usize, usize)> {
+    let count = read_u32_at(data, base) as usize;
+    if count == 0 || count > 256 {
+        return None;
+    }
+    let table_end = base
+        .checked_add(4)?
+        .checked_add(count.checked_mul(LEGACY_RECORD_SIZE)?)?;
+    if table_end > data.len() {
+        return None;
+    }
+    for index in 0..count {
+        let record = base + 4 + index * LEGACY_RECORD_SIZE;
+        let size = read_u32_at(data, record) as usize;
+        let rel = read_u32_at(data, record + 4) as usize;
+        let name = read_cstring(data, record + 8, LEGACY_NAME_SIZE.min(256));
+        if size == 0 || name.is_empty() || !name.contains('.') {
+            return None;
+        }
+        let offset = table_end.checked_add(rel)?;
+        if offset + size > data.len() {
+            return None;
+        }
+    }
+    Some((count, table_end))
 }
 
 /// Parse ERPT resources (XOR 0x40 encoded)

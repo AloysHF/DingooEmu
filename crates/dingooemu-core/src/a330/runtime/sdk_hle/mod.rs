@@ -195,27 +195,75 @@ impl RuntimeBus<'_> {
         if immediate == 0x0012_3456 {
             return self.dispatch_semihosting(cpu);
         }
-        let (symbol_name, symbol_address) = if immediate & 0x0080_0000 != 0 {
-            let index = (immediate & 0x007f_ffff) as usize;
-            let name = self
-                .dynamic_imports
-                .get(index)
-                .ok_or_else(|| SimulatorError::CpuError {
-                    pc: cpu.r[15].wrapping_sub(4),
-                    message: format!("dynamic ARM SVC index {index} is invalid"),
-                })?;
-            (name.clone(), DYNAMIC_THUNK_BASE + index as u32 * 8)
-        } else {
+        let svc_address = cpu.r[15].wrapping_sub(4);
+        let import_count = self.imports.len() as u32;
+        let (symbol_name, symbol_address, at_import_stub) = if immediate < import_count {
             let symbol =
                 self.imports
                     .get(immediate as usize)
                     .ok_or_else(|| SimulatorError::CpuError {
-                        pc: cpu.r[15].wrapping_sub(4),
+                        pc: svc_address,
                         message: format!("ARM SVC index {immediate} is outside the import table"),
                     })?;
-            (symbol.name.clone(), symbol.address)
+            (
+                symbol.name.clone(),
+                symbol.address,
+                symbol.address == svc_address,
+            )
+        } else {
+            let dynamic = immediate - import_count;
+            match self.dynamic_imports.get(dynamic as usize) {
+                Some(name) => {
+                    let address = DYNAMIC_THUNK_BASE + dynamic * 8;
+                    (name.clone(), address, address == svc_address)
+                }
+                None => {
+                    // Guest code may issue non-import SVCs; treat them like an
+                    // unknown SDK call instead of aborting the whole guest.
+                    let name = format!("svc_{immediate:#010x}");
+                    if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+                        let s0 = self.read_c_string(cpu.r[0], 64).unwrap_or_default();
+                        let s1 = self.read_c_string(cpu.r[1], 64).unwrap_or_default();
+                        eprintln!(
+                            "ARM unknown SVC {name} r0={:#x} r1={:#x} r2={:#x} r3={:#x} s0={s0:?} s1={s1:?}",
+                            cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3]
+                        );
+                    }
+                    let import_address = 0;
+                    let call = self
+                        .unknown_hle_calls
+                        .entry(name.clone())
+                        .or_insert_with(|| UnknownHleCall {
+                            name: name.clone(),
+                            count: 0,
+                            import_address,
+                            first_pc: svc_address,
+                            first_arguments: [cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3]],
+                        });
+                    call.count += 1;
+                    if self.unknown_hle_policy == UnknownHlePolicy::Stop
+                        && !self.unknown_hle_allowlist.contains(&name)
+                    {
+                        return Err(SimulatorError::UnknownHle {
+                            name,
+                            pc: svc_address,
+                            import_address,
+                            arguments: [cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3]],
+                        });
+                    }
+                    cpu.r[0] = 0;
+                    // Inline non-import SVCs return to the next instruction.
+                    return Ok(());
+                }
+            }
         };
         let name = symbol_name.as_str();
+        if std::env::var_os("DINGOOEMU_HLE_TRACE").is_some() {
+            eprintln!(
+                "ARM HLE {name}(r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x})",
+                cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3]
+            );
+        }
         log::trace!(
             "ARM HLE {name}(r0={:#010x}, r1={:#010x}, r2={:#010x}, r3={:#010x})",
             cpu.r[0],
@@ -232,7 +280,9 @@ impl RuntimeBus<'_> {
         {
             self.record_unknown(cpu, &symbol_name, symbol_address)?;
         }
-        if self.profile == ArmProfile::Homebrew {
+        // Homebrew import stubs are a single SVC word; the guest returns via LR.
+        // Inline SVC instructions fall through to the next instruction instead.
+        if self.profile == ArmProfile::Homebrew && at_import_stub {
             cpu.r[15] = cpu.r[14] & !1;
         }
         Ok(())
@@ -303,8 +353,21 @@ impl Bus for RuntimeBus<'_> {
             }
         }
         if address == LEGACY_GRAPHICS_SURFACE {
-            *self.active_framebuffer = LEGACY_FRAMEBUFFER_ADDRESS;
-            *self.frame_address = Some(LEGACY_FRAMEBUFFER_ADDRESS);
+            // Homebrew titles write the frame pointer they want presented.
+            // Unmapped legacy aliases fall back to the canonical guest FB.
+            let surface = if value == 0 { FRAMEBUFFER_BASE } else { value };
+            let can_present = self
+                .memory
+                .read_bytes(surface, FRAMEBUFFER_SIZE * 2)
+                .is_ok()
+                || self.memory.read_bytes(surface, FRAMEBUFFER_SIZE).is_ok();
+            let surface = if can_present {
+                surface
+            } else {
+                FRAMEBUFFER_BASE
+            };
+            *self.active_framebuffer = surface;
+            *self.frame_address = Some(surface);
             self.event_pending = true;
         }
         Ok(())

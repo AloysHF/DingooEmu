@@ -3,8 +3,9 @@ use super::firmware_archive::FirmwareArchive;
 #[cfg(feature = "jit")]
 use super::jit::{JitCpuContext, JitEngine};
 use super::memory::{
-    Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE, LEGACY_GRAPHICS_STRIDE,
-    LEGACY_GRAPHICS_SURFACE, STACK_BASE, STACK_SIZE,
+    Memory, DYNAMIC_THUNK_BASE, EXIT_ADDRESS, FRAMEBUFFER_BASE, HEAP_SIZE,
+    LEGACY_FRAMEBUFFER_ADDRESS, LEGACY_GRAPHICS_STRIDE, LEGACY_GRAPHICS_SURFACE, STACK_BASE,
+    STACK_SIZE,
 };
 use crate::common::audio::{Audio, AudioConfig};
 use crate::common::cheats::{CheatManager, CheatParseError, CheatRule};
@@ -34,7 +35,6 @@ const INSTRUCTION_CACHE_PAGE_SHIFT: u32 = 12;
 const INSTRUCTION_CACHE_PAGE_SIZE: usize = 1 << INSTRUCTION_CACHE_PAGE_SHIFT;
 const APP_PATH_ADDRESS: u32 = STACK_BASE + 0x200;
 const LOCALE_ADDRESS: u32 = STACK_BASE + 0x600;
-const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
 const FRAMEBUFFER_BITS_EXPLICIT: u32 = 1 << 31;
 const FILE_SEARCH_NAME_OFFSET: u32 = 0x12;
 const FILE_SEARCH_NAME_CAPACITY: usize = 256;
@@ -575,6 +575,70 @@ impl Runtime {
     pub(crate) fn package(&self) -> &PackageImage {
         &self.package
     }
+
+    /// Diagnostics dump used by headless regression harnesses.
+    #[allow(dead_code)]
+    pub(crate) fn debug_snapshot(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "running={} boot_complete={} app_main={:?} pc={:#010x} lr={:#010x} sp={:#010x} r0={:#010x} instr={}\n",
+            self.running,
+            self.boot_complete,
+            self.app_main,
+            self.cpu.r[15],
+            self.cpu.r[14],
+            self.cpu.r[13],
+            self.cpu.r[0],
+            self.cpu.instruction_count
+        ));
+        out.push_str(&format!(
+            "active_fb={:#010x} fb_bits={:#x} frames={} tasks={} files={} sems={}\n",
+            self.active_framebuffer,
+            self.framebuffer_bits,
+            self.video.frame_count(),
+            self.tasks.len(),
+            self.files.len(),
+            self.semaphores.len()
+        ));
+        for (index, task) in self.tasks.iter().enumerate().take(8) {
+            out.push_str(&format!(
+                "  task[{index}] prio={} wake={} pc={:#010x} audio={}\n",
+                task.priority, task.wake_tick, task.cpu.r[15], task.audio_producer
+            ));
+        }
+        let console = String::from_utf8_lossy(&self.console_output);
+        if !console.is_empty() {
+            out.push_str("console:\n");
+            out.push_str(&console);
+            out.push('\n');
+        } else {
+            out.push_str("console: <empty>\n");
+        }
+        let mut fb_nonzero = 0usize;
+        for pixel in self.video.framebuffer().as_chunks::<2>().0 {
+            if *pixel != [0, 0] {
+                fb_nonzero += 1;
+            }
+        }
+        out.push_str(&format!(
+            "host_fb_nonzero={fb_nonzero} unknown_hle={}\n",
+            self.unknown_hle_calls.len()
+        ));
+        for call in self.unknown_hle_calls.values() {
+            out.push_str(&format!(
+                "  unknown {} count={} args={:08x?}\n",
+                call.name, call.count, call.first_arguments
+            ));
+        }
+        for (handle, file) in self.files.iter().take(16) {
+            out.push_str(&format!(
+                "  file {handle:#x} size={} pos={}\n",
+                file.data.len(),
+                file.position
+            ));
+        }
+        out
+    }
     pub(crate) fn unknown_hle_calls(&self) -> impl ExactSizeIterator<Item = &UnknownHleCall> {
         self.unknown_hle_calls.values()
     }
@@ -1027,23 +1091,91 @@ impl Runtime {
         }
         if let Some(address) = presented_frame_address {
             self.present_frame(address)?;
+        } else if self.memory.profile() == ArmProfile::Homebrew {
+            // Homebrew ports often blit into a software surface (0x118xxxxx)
+            // without issuing a flush every host tick. Keep the host window
+            // in sync with the guest pixels.
+            self.sync_homebrew_software_frame()?;
         }
         self.audio.advance_frame();
+        Ok(())
+    }
+
+    fn sync_homebrew_software_frame(&mut self) -> Result<()> {
+        let candidates = [
+            self.active_framebuffer,
+            LEGACY_FRAMEBUFFER_ADDRESS,
+            FRAMEBUFFER_BASE,
+        ];
+        for address in candidates {
+            if address == 0 {
+                continue;
+            }
+            let has_pixels = self
+                .memory
+                .read_bytes(address, 256)
+                .map(|bytes| bytes.iter().any(|byte| *byte != 0))
+                .unwrap_or(false);
+            if has_pixels {
+                return self.present_frame(address);
+            }
+        }
         Ok(())
     }
 
     fn present_frame(&mut self, address: u32) -> Result<()> {
         let explicit = self.framebuffer_bits & FRAMEBUFFER_BITS_EXPLICIT != 0;
         let bits = self.framebuffer_bits & !FRAMEBUFFER_BITS_EXPLICIT;
-        if bits == 32 && (explicit || address != LEGACY_FRAMEBUFFER_ADDRESS) {
-            let source = self.memory.read_bytes(address, FRAMEBUFFER_SIZE * 2)?;
+        let legacy_window = LEGACY_FRAMEBUFFER_ADDRESS..LEGACY_FRAMEBUFFER_ADDRESS + 0x0010_0000;
+        let use_32bit = if explicit {
+            bits == 32
+        } else if self.memory.profile() == ArmProfile::Homebrew {
+            // Default homebrew base at 0x11800000 stays RGB565; interior
+            // software surfaces (double-buffer pointers) use rgba8888.
+            bits == 32
+                && (!legacy_window.contains(&address) || address != LEGACY_FRAMEBUFFER_ADDRESS)
+        } else {
+            bits == 32 && address != LEGACY_FRAMEBUFFER_ADDRESS
+        };
+        if use_32bit {
+            let source = match self.memory.read_bytes(address, FRAMEBUFFER_SIZE * 2) {
+                Ok(source) => source.to_vec(),
+                Err(_) => self.memory.read_bytes(address, FRAMEBUFFER_SIZE)?.to_vec(),
+            };
             let (source_pixels, _) = source.as_chunks::<4>();
             let (destination_pixels, _) = self.video.framebuffer_mut().as_chunks_mut::<2>();
             for (destination, pixel) in destination_pixels.iter_mut().zip(source_pixels) {
-                let blue = u16::from(pixel[0]);
-                let green = u16::from(pixel[1]);
-                let red = u16::from(pixel[2]);
-                let rgb565 = ((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3);
+                // Guest ports store rgba8888/bgra8888. Try blue-first, then
+                // red-first if the first interpretation is pure black.
+                let bgra = {
+                    let blue = u16::from(pixel[0]);
+                    let green = u16::from(pixel[1]);
+                    let red = u16::from(pixel[2]);
+                    ((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3)
+                };
+                let rgba = {
+                    let red = u16::from(pixel[0]);
+                    let green = u16::from(pixel[1]);
+                    let blue = u16::from(pixel[2]);
+                    ((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3)
+                };
+                let argb = {
+                    let red = u16::from(pixel[1]);
+                    let green = u16::from(pixel[2]);
+                    let blue = u16::from(pixel[3]);
+                    ((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3)
+                };
+                let word = u32::from_le_bytes(*pixel);
+                // rgba8888 / bgra8888: ignore the alpha byte. Do not promote
+                // an alpha-only fill into a visible color.
+                let rgb565 = if bgra != 0 {
+                    bgra
+                } else if rgba != 0 {
+                    rgba
+                } else {
+                    0
+                };
+                let _ = (argb, word);
                 destination.copy_from_slice(&rgb565.to_le_bytes());
             }
         } else {
@@ -1428,6 +1560,33 @@ fn resolve_guest_path(root: &std::path::Path, name: &str) -> Option<PathBuf> {
         relative.push(component);
     }
     (!relative.as_os_str().is_empty()).then(|| root.join(relative))
+}
+
+pub(crate) fn find_content_file(root: &std::path::Path, base_lower: &str) -> Option<PathBuf> {
+    if base_lower.is_empty() {
+        return None;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path
+                .file_name()
+                .map(|v| v.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if name == base_lower {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn normalize_guest_search_pattern(pattern: &str) -> Option<(PathBuf, String)> {
@@ -2171,9 +2330,10 @@ mod tests {
         runtime.start();
         runtime.tick().unwrap();
         assert_eq!(runtime.cpu.r[0], DYNAMIC_THUNK_BASE);
+        // Dynamic thunks continue the static import index space (import_count + slot).
         assert_eq!(
             runtime.memory.read32(DYNAMIC_THUNK_BASE).unwrap(),
-            0xef80_0000
+            0xef00_0001
         );
         assert_eq!(
             runtime.memory.read32(DYNAMIC_THUNK_BASE + 4).unwrap(),

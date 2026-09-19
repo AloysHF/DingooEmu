@@ -11,6 +11,9 @@ pub const HOMEBREW_HEAP_BASE: u32 = 0x0900_0000;
 pub const HEAP_SIZE: usize = 0x0200_0000;
 pub const FRAMEBUFFER_BASE: u32 = 0x8000_0000;
 pub const FRAMEBUFFER_SIZE: usize = 0x0080_0000;
+/// Homebrew software renderer double-buffer alias used by A330 ports.
+pub const LEGACY_FRAMEBUFFER_ADDRESS: u32 = 0x1180_0000;
+pub const LEGACY_FRAMEBUFFER_SIZE: usize = 0x0010_0000;
 pub const LEGACY_LOW_MEMORY_SIZE: usize = 0x0001_0000;
 pub const DYNAMIC_THUNK_BASE: u32 = STACK_BASE + 0x1000;
 pub const EXIT_ADDRESS: u32 = STACK_BASE + STACK_SIZE as u32 - 4;
@@ -36,6 +39,7 @@ pub struct Memory {
     legacy_mmio: Vec<u8>,
     legacy_audio_mmio: Vec<u8>,
     legacy_system_mmio: Vec<u8>,
+    legacy_framebuffer: Vec<u8>,
 }
 
 impl Memory {
@@ -53,6 +57,7 @@ impl Memory {
             legacy_mmio: vec![0; LEGACY_MMIO_SIZE],
             legacy_audio_mmio: vec![0; LEGACY_AUDIO_MMIO_SIZE],
             legacy_system_mmio: vec![0; LEGACY_SYSTEM_MMIO_SIZE],
+            legacy_framebuffer: vec![0; LEGACY_FRAMEBUFFER_SIZE],
         };
         let program_end = package
             .load_base()
@@ -149,6 +154,7 @@ impl Memory {
             && self.legacy_mmio.len() == LEGACY_MMIO_SIZE
             && self.legacy_audio_mmio.len() == LEGACY_AUDIO_MMIO_SIZE
             && self.legacy_system_mmio.len() == LEGACY_SYSTEM_MMIO_SIZE
+            && self.legacy_framebuffer.len() == LEGACY_FRAMEBUFFER_SIZE
     }
 
     pub(crate) fn copy_state_from(&mut self, source: &Self) {
@@ -162,20 +168,27 @@ impl Memory {
             .copy_from_slice(&source.legacy_audio_mmio);
         self.legacy_system_mmio
             .copy_from_slice(&source.legacy_system_mmio);
+        self.legacy_framebuffer
+            .copy_from_slice(&source.legacy_framebuffer);
     }
 
     pub fn read8(&self, address: u32) -> Result<u8> {
-        Ok(self.read_bytes(address, 1)?[0])
+        if let Ok(bytes) = self.read_bytes(address, 1) {
+            return Ok(bytes[0]);
+        }
+        if self.profile == ArmProfile::Homebrew {
+            return Ok(0);
+        }
+        Err(memory_error(address, 1))
     }
     pub fn read16(&self, address: u32) -> Result<u16> {
-        Ok(u16::from_le_bytes(
-            self.read_bytes(address, 2)?.try_into().unwrap(),
-        ))
-    }
-    pub fn read32(&self, address: u32) -> Result<u32> {
-        Ok(u32::from_le_bytes(
-            self.read_bytes(address, 4)?.try_into().unwrap(),
-        ))
+        if let Ok(bytes) = self.read_bytes(address, 2) {
+            return Ok(u16::from_le_bytes(bytes.try_into().unwrap()));
+        }
+        if self.profile == ArmProfile::Homebrew {
+            return Ok(0);
+        }
+        Err(memory_error(address, 2))
     }
     pub fn write8(&mut self, address: u32, value: u8) -> Result<()> {
         self.write_bytes(address, &[value])
@@ -203,6 +216,14 @@ impl Memory {
         if let Some(range) = region_range(address, size, FRAMEBUFFER_BASE, self.framebuffer.len()) {
             return Ok(&self.framebuffer[range]);
         }
+        if let Some(range) = region_range(
+            address,
+            size,
+            LEGACY_FRAMEBUFFER_ADDRESS,
+            self.legacy_framebuffer.len(),
+        ) {
+            return Ok(&self.legacy_framebuffer[range]);
+        }
         if let Some(range) = region_range(address, size, LEGACY_MMIO_BASE, self.legacy_mmio.len()) {
             return Ok(&self.legacy_mmio[range]);
         }
@@ -223,6 +244,23 @@ impl Memory {
             return Ok(&self.legacy_system_mmio[range]);
         }
         Err(memory_error(address, size))
+    }
+
+    /// Sticky-ready read for homebrew legacy graphics status polls.
+    pub fn read32(&self, address: u32) -> Result<u32> {
+        if self.profile == ArmProfile::Homebrew && address == LEGACY_GRAPHICS_STATUS {
+            return Ok(LEGACY_GRAPHICS_READY);
+        }
+        if self.profile == ArmProfile::Homebrew {
+            if let Ok(bytes) = self.read_bytes(address, 4) {
+                return Ok(u32::from_le_bytes(bytes.try_into().unwrap()));
+            }
+            // Open-bus for speculative hardware probes.
+            return Ok(0);
+        }
+        Ok(u32::from_le_bytes(
+            self.read_bytes(address, 4)?.try_into().unwrap(),
+        ))
     }
 
     pub fn write_bytes(&mut self, address: u32, data: &[u8]) -> Result<()> {
@@ -257,6 +295,15 @@ impl Memory {
         if let Some(range) = region_range(
             address,
             data.len(),
+            LEGACY_FRAMEBUFFER_ADDRESS,
+            self.legacy_framebuffer.len(),
+        ) {
+            self.legacy_framebuffer[range].copy_from_slice(data);
+            return Ok(());
+        }
+        if let Some(range) = region_range(
+            address,
+            data.len(),
             LEGACY_MMIO_BASE,
             self.legacy_mmio.len(),
         ) {
@@ -278,7 +325,24 @@ impl Memory {
             LEGACY_SYSTEM_MMIO_BASE,
             self.legacy_system_mmio.len(),
         ) {
+            let start = range.start;
+            let end = range.end;
             self.legacy_system_mmio[range].copy_from_slice(data);
+            if self.profile == ArmProfile::Homebrew
+                && start == (LEGACY_GRAPHICS_STATUS - LEGACY_SYSTEM_MMIO_BASE) as usize
+                && end <= start + 4
+            {
+                // Preserve a always-ready sticky bit so busy-clear writes do
+                // not leave homebrew guests spinning on a status poll.
+                let ready = LEGACY_GRAPHICS_READY.to_le_bytes();
+                for (index, byte) in ready.iter().take(end - start).enumerate() {
+                    self.legacy_system_mmio[start + index] |= *byte;
+                }
+            }
+            return Ok(());
+        }
+        if self.profile == ArmProfile::Homebrew {
+            // Speculative stores to unmapped hardware must not abort the guest.
             return Ok(());
         }
         Err(memory_error(address, data.len()))
@@ -387,6 +451,18 @@ mod tests {
 
         assert_eq!(
             memory.read32(LEGACY_GRAPHICS_STATUS).unwrap() & LEGACY_GRAPHICS_READY,
+            LEGACY_GRAPHICS_READY
+        );
+    }
+
+    #[test]
+    fn homebrew_legacy_graphics_status_stays_ready_after_guest_clear() {
+        let mut memory = Memory::from_package(&package(ArmProfile::Homebrew)).unwrap();
+        memory
+            .write32(LEGACY_GRAPHICS_STATUS, 0)
+            .expect("guest status write");
+        assert_eq!(
+            memory.read32(LEGACY_GRAPHICS_STATUS).unwrap(),
             LEGACY_GRAPHICS_READY
         );
     }
