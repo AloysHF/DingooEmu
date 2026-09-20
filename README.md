@@ -45,7 +45,7 @@ only then selects the A320 or A330 runtime.
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
 - **Screenshot mode** — Headless frame capture for automated testing and preview generation
 - **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`
-- **RetroArch integration** — libretro core with video, asynchronous audio delivery, RetroPad input, reset, persistent files, save states, cheats, and memory access
+- **RetroArch integration** — libretro core with video, asynchronous audio delivery, 60 Hz game pacing on high-refresh-rate displays, RetroPad input, reset, persistent files, save states, cheats, and memory access
 - **Cross-platform** — Windows, Linux, macOS
 
 ## Usage
