@@ -213,6 +213,16 @@ pub extern "C" fn retro_run() {
         query_joypad_buttons(|id| callbacks::input_state(0, RETRO_DEVICE_JOYPAD, 0, id) != 0);
     emulator.set_buttons(buttons);
 
+    if !crate::frame_pacing::should_advance() {
+        callbacks::video_refresh(
+            emulator.framebuffer().as_ptr().cast(),
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
+            SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
+        );
+        return;
+    }
+
     let diagnostic_timer = crate::diagnostics::frame_timer();
     if let Err(error) = emulator.tick() {
         log::error!("Frame execution failed; requesting frontend shutdown: {error}");
@@ -315,6 +325,7 @@ unsafe extern "C" fn frontend_audio_buffer_status(
 }
 
 fn register_async_audio() {
+    crate::frame_pacing::reset();
     crate::audio_output::reset(true);
     let mut audio_callback = RetroAudioCallback {
         callback: Some(crate::audio_output::callback),
@@ -335,10 +346,16 @@ fn register_async_audio() {
             callback: Some(frontend_frame_time),
             reference: (1_000_000.0 / FRAMES_PER_SECOND) as i64,
         };
-        callbacks::environment(
+        let timing_supported = callbacks::environment(
             RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK,
             (&mut frame_time_callback as *mut RetroFrameTimeCallback).cast(),
         );
+        if !timing_supported {
+            unregister_async_audio();
+            crate::diagnostics::set_async_audio_callback_status(false);
+            log::debug!("Frontend lacks frame timing; using synchronous audio");
+            return;
+        }
         log::info!("Frontend asynchronous audio callback enabled");
     } else {
         log::debug!("Frontend does not support asynchronous audio callbacks");
@@ -355,16 +372,30 @@ fn unregister_async_audio() {
             RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK,
             (&mut audio_callback as *mut RetroAudioCallback).cast(),
         );
+        let mut frame_time_callback = RetroFrameTimeCallback {
+            callback: None,
+            reference: 0,
+        };
+        callbacks::environment(
+            RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK,
+            (&mut frame_time_callback as *mut RetroFrameTimeCallback).cast(),
+        );
         crate::diagnostics::record_async_audio_state(false);
     }
     crate::audio_output::reset(false);
+    crate::frame_pacing::reset();
 }
 
 unsafe extern "C" fn frontend_async_audio_set_state(enabled: bool) {
     crate::audio_output::set_enabled(enabled);
+    crate::frame_pacing::reset();
 }
 
-unsafe extern "C" fn frontend_frame_time(_usec: i64) {}
+unsafe extern "C" fn frontend_frame_time(usec: i64) {
+    if ASYNC_AUDIO_REGISTERED.load(Ordering::Acquire) {
+        crate::frame_pacing::set_elapsed(usec);
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn retro_reset() {
@@ -374,6 +405,7 @@ pub extern "C" fn retro_reset() {
     if let Err(error) = emulator.reset() {
         log::error!("Reset failed: {error}");
     } else {
+        crate::frame_pacing::reset();
         apply_core_options(emulator);
     }
 }
@@ -412,6 +444,7 @@ pub extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> bool {
     let input = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) };
     match emulator.unserialize_state(input) {
         Ok(()) => {
+            crate::frame_pacing::reset();
             apply_core_options(emulator);
             true
         }
@@ -780,6 +813,7 @@ mod tests {
     static AUDIO_BATCH_CALLED: AtomicBool = AtomicBool::new(false);
     static AUDIO_BUFFER_STATUS_REGISTERED: AtomicBool = AtomicBool::new(false);
     static ASYNC_AUDIO_CALLBACK: Mutex<RetroAudioCallbackFn> = Mutex::new(None);
+    static FRAME_TIME_CALLBACK: Mutex<RetroFrameTimeCallbackFn> = Mutex::new(None);
     static AUDIO_LATENCY_REQUESTED: AtomicBool = AtomicBool::new(false);
     static MEMORY_MAPS_SET: AtomicBool = AtomicBool::new(false);
     static SYSTEM_RAM_MAP_START: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -811,7 +845,11 @@ mod tests {
                 }
                 true
             }
-            RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK => true,
+            RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK => {
+                *FRAME_TIME_CALLBACK.lock().unwrap() =
+                    (*data.cast::<RetroFrameTimeCallback>()).callback;
+                true
+            }
             RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK => {
                 let status = &*data.cast::<RetroAudioBufferStatusCallback>();
                 AUDIO_BUFFER_STATUS_REGISTERED.store(status.callback.is_some(), Ordering::SeqCst);
@@ -919,6 +957,72 @@ mod tests {
         data[0x78..0x7c].copy_from_slice(&origin.to_le_bytes());
         data[0x80..0x84].copy_from_slice(&0xeaff_fffeu32.to_le_bytes());
         data
+    }
+
+    #[test]
+    fn asynchronous_frontend_refresh_rate_does_not_change_guest_speed() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("dingooemu-pacing-test-{}.app", std::process::id()));
+        let mut content = minimal_app_bytes();
+        content[128..132].copy_from_slice(&0x0800_0000u32.to_le_bytes());
+        std::fs::write(&path, content).unwrap();
+        let path_string = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let info = RetroGameInfo {
+            path: path_string.as_ptr(),
+            data: ptr::null(),
+            size: 0,
+            meta: ptr::null(),
+        };
+        retro_set_environment(Some(test_environment));
+        retro_set_video_refresh(Some(test_video_refresh));
+        retro_set_input_poll(Some(test_input_poll));
+        retro_set_input_state(None);
+        retro_init();
+
+        let mut frame_counts = Vec::new();
+        for hz in [60, 90, 120, 144] {
+            assert!(retro_load_game(&info));
+            let callback = FRAME_TIME_CALLBACK.lock().unwrap().unwrap();
+            for frame in 0..hz {
+                let elapsed_us = (frame + 1) * 1_000_000 / hz - frame * 1_000_000 / hz;
+                unsafe { callback(elapsed_us) };
+                retro_run();
+            }
+            frame_counts.push(unsafe { EMULATOR.as_ref().unwrap().frame_count() });
+            unsafe { callback(8_333) };
+            retro_run();
+            retro_reset();
+            unsafe { callback(8_333) };
+            retro_run();
+            assert_eq!(unsafe { EMULATOR.as_ref().unwrap().frame_count() }, 0);
+            unsafe { callback(8_334) };
+            retro_run();
+            assert_eq!(unsafe { EMULATOR.as_ref().unwrap().frame_count() }, 1);
+            retro_unload_game();
+            assert!(FRAME_TIME_CALLBACK.lock().unwrap().is_none());
+        }
+        retro_deinit();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(frame_counts, [60, 60, 60, 60]);
+    }
+
+    #[test]
+    fn asynchronous_audio_requires_frontend_frame_timing() {
+        unsafe extern "C" fn no_frame_timing(command: u32, data: *mut c_void) -> bool {
+            command != RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK && test_environment(command, data)
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        retro_set_environment(Some(no_frame_timing));
+        register_async_audio();
+        assert!(!ASYNC_AUDIO_REGISTERED.load(Ordering::Acquire));
+        assert!(ASYNC_AUDIO_CALLBACK.lock().unwrap().is_none());
+        assert!(crate::audio_output::enqueue(&[0, 0]).is_none());
+        unsafe { frontend_frame_time(8_333) };
+        assert!(crate::frame_pacing::should_advance());
+        unregister_async_audio();
     }
 
     #[test]

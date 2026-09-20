@@ -9,6 +9,7 @@ mod audio_output;
 mod callbacks;
 mod constants;
 mod diagnostics;
+mod frame_pacing;
 mod logger;
 mod types;
 

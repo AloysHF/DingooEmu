@@ -81,6 +81,8 @@ compatible with that target, and then selects the runtime.
 - PCM audio output resampled to 22.05 kHz stereo
 - Asynchronous audio delivery when supported by the frontend, with automatic
   synchronous fallback
+- 60 Hz guest frame pacing using frontend timing during asynchronous audio,
+  including on 90/120/144 Hz displays
 - RetroPad input handling
 - `.app`, `.cc`, `.c2s`, and `.c3s` content loading
 - Cold reset through RetroArch's **Reset** command
@@ -92,6 +94,15 @@ compatible with that target, and then selects the runtime.
 
 The current basic core does not yet provide subsystem loading. The metadata
 marks it unavailable so RetroArch does not present unsupported capabilities.
+
+With asynchronous audio, the core uses the frontend's frame-time callback to
+avoid advancing the game on every display refresh. Extra video callbacks repeat
+the current framebuffer without advancing guest timers or producing extra audio.
+The frontend's FPS display can therefore exceed 60 while the game runs at normal
+speed. Fast-forward and frame stepping use the frontend's reference interval.
+Slow frames advance at most one guest frame, without a burst of catch-up work.
+Frontends must support both audio and frame-time callbacks to enable asynchronous
+audio; otherwise the core uses synchronous audio delivery.
 
 ## Game Save Files
 
