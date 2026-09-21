@@ -248,7 +248,8 @@ Screenshots are written to `docs/images`, and per-game JSON diagnostics are
 written to `tmp/hle-reports`. Every report contains an `unknown_hle` array,
 including an empty array when no gaps were observed. The default capture point
 is 60 frames, with per-game overrides for slow-starting or
-performance-sensitive titles. Explicit parameters apply the requested values
+performance-sensitive titles. Known portrait titles are captured using their
+configured screen orientation. Explicit parameters apply the requested values
 to every game:
 
 ```powershell

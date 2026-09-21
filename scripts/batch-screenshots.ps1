@@ -125,6 +125,17 @@ function Get-CaptureFrames {
     }
 }
 
+function Get-ScreenOrientation {
+    param([string]$RelativePath)
+
+    switch ($RelativePath) {
+        "Block Breaker.app" { return "portrait" }
+        "PoPo Bash.app" { return "portrait" }
+        "Tetris.app" { return "portrait" }
+        default { return "landscape" }
+    }
+}
+
 function Invoke-ScreenshotCapture {
     param(
         [string]$Executable,
@@ -132,6 +143,7 @@ function Invoke-ScreenshotCapture {
         [string]$ScreenshotPath,
         [string]$ReportPath,
         [int]$CaptureFrames,
+        [string]$Orientation,
         [int]$Timeout,
         [string]$HlePolicy,
         [string[]]$AllowedUnknownHle
@@ -148,6 +160,8 @@ function Invoke-ScreenshotCapture {
     $startInfo.ArgumentList.Add($ScreenshotPath)
     $startInfo.ArgumentList.Add("--screenshot-frames")
     $startInfo.ArgumentList.Add($CaptureFrames.ToString())
+    $startInfo.ArgumentList.Add("--orientation")
+    $startInfo.ArgumentList.Add($Orientation)
     $startInfo.ArgumentList.Add("--unknown-hle-policy")
     $startInfo.ArgumentList.Add($HlePolicy)
     $startInfo.ArgumentList.Add("--hle-report")
@@ -235,6 +249,7 @@ foreach ($game in $games) {
     $relativeName = $relativeBaseName -replace '[/\\]+', '__'
     $safeName = ConvertTo-ScreenshotName $relativeName
     $captureFrames = Get-CaptureFrames $relativePath $Frames (-not $framesSpecified)
+    $orientation = Get-ScreenOrientation $relativePath
 
     $uniqueName = $safeName
     $suffix = 2
@@ -254,7 +269,7 @@ foreach ($game in $games) {
         Remove-Item -LiteralPath $reportPath -Force
     }
 
-    Write-Host -NoNewline "  $baseName ($captureFrames frames) ... "
+    Write-Host -NoNewline "  $baseName ($captureFrames frames, $orientation) ... "
 
     try {
         $result = Invoke-ScreenshotCapture `
@@ -263,6 +278,7 @@ foreach ($game in $games) {
             -ScreenshotPath $outPath `
             -ReportPath $reportPath `
             -CaptureFrames $captureFrames `
+            -Orientation $orientation `
             -Timeout $TimeoutSeconds `
             -HlePolicy $UnknownHlePolicy `
             -AllowedUnknownHle $AllowUnknownHle
