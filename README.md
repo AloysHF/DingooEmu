@@ -41,11 +41,11 @@ only then selects the A320 or A330 runtime.
 - **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and emit per-game JSON reports for review
 - **Visible A330 exit diagnostics** — Replace an otherwise solid final frame with a readable guest-exit panel and the last semihosting message
 - **Multi-format loading** — Validated `.app`, `.cc`, `.c2s`, and `.c3s` CCDL packages with automatic runtime selection
-- **Frame rendering** — Native 320×240 RGB565 output with source-aware RGB565 and XRGB8888 guest framebuffer handling
+- **Frame rendering** — Native RGB565 output with 320×240 landscape and counterclockwise-rotated 240×320 portrait modes, plus source-aware RGB565 and XRGB8888 guest framebuffer handling
 - **PCM audio output** — Dingoo waveout playback with format conversion, volume, and resampling
 - **Screenshot mode** — Headless frame capture for automated testing and preview generation
 - **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`
-- **RetroArch integration** — libretro core with video, asynchronous audio delivery, 60 Hz game pacing on high-refresh-rate displays, RetroPad input, reset, persistent files, save states, cheats, and memory access
+- **RetroArch integration** — libretro core with live screen-orientation and volume options, asynchronous audio delivery, 60 Hz game pacing on high-refresh-rate displays, RetroPad input, reset, persistent files, save states, cheats, and memory access
 - **Cross-platform** — Windows, Linux, macOS
 
 ## Usage

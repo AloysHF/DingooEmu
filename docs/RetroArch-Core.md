@@ -90,7 +90,7 @@ compatible with that target, and then selects the runtime.
 - Save states with content identity and corruption checks
 - Frontend cheat slots for 8/16/32-bit memory and guest registers
 - Frontend memory access for the active runtime's system RAM and video RAM
-- Live core options, including host master volume
+- Live core options, including screen orientation and host master volume
 
 The current basic core does not yet provide subsystem loading. The metadata
 marks it unavailable so RetroArch does not present unsupported capabilities.
@@ -158,10 +158,12 @@ Reset and save-state loads while content remains loaded.
 | Swap A/B Buttons | `disabled`, `enabled` | `disabled` | Exchanges the emulated A and B button meanings. |
 | Performance Diagnostic Log | `disabled`, `enabled` | `disabled` | Writes a compact `dingooemu-diagnostic.txt` performance report to the frontend save directory without enabling verbose frontend logs. |
 | Unknown Guest Instruction Policy | `skip`, `stop` | `skip` | Logs and skips unsupported MIPS or ARM instructions, or stops with an execution error. Memory failures always remain errors. |
+| Screen Orientation | `landscape`, `portrait` | `landscape` | Keeps the native 320×240 framebuffer or rotates it counterclockwise to 240×320 for portrait software. |
 | CPU Execution Engine (64-bit Android) | `jit`, `interpreter` | `jit` | Selects native translation or cached interpretation for APP/MIPS content on arm64-v8a and x86_64 Android. A330 content also translates supported hot ARM blocks and safely falls back for the rest. |
 
 Core option changes are applied while content is running and restored after a
-RetroArch reset.
+RetroArch reset. Changing **Screen Orientation** also updates the frontend's
+reported geometry immediately.
 
 For APP content, the JIT waits until a block has executed 256 times and
 rate-limits native compilation to one block per frame. Short blocks and

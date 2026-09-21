@@ -62,6 +62,7 @@ dingoo-emu [OPTIONS] <PATH>
 | `--swap-ab` | flag | off | Exchange the emulated A and B button masks. |
 | `--no-gamepad` | flag | off | Disable physical gamepad input; keyboard remains available. |
 | `--filter <MODE>` | `nearest`, `bilinear`, `bicubic`, `xbrz` | `nearest` | Select the window scaling filter. |
+| `--orientation <MODE>` | `landscape`, `portrait` | `landscape` | Select native 320×240 output or counterclockwise-rotated 240×320 output. |
 | `--show-gamepad` | flag | off | Overlay the current logical Dingoo button state. |
 | `--repeat-delay <N>` | frames | `24` | Frames before a held button begins generating repeat presses. |
 | `--repeat-period <N>` | frames, at least `1` | `6` | Frames between repeat presses after the delay. |
@@ -137,6 +138,12 @@ physical controllers and use the keyboard only.
 `bicubic` uses sharper cubic interpolation, and `xbrz` applies edge-aware
 pixel-art smoothing. All modes preserve the native 4:3 aspect ratio and add
 black bars when the window or desktop has a different aspect ratio.
+
+The default `--orientation landscape` mode displays the native 320×240
+framebuffer unchanged. Use `--orientation portrait` for software whose display
+is authored sideways; it rotates the framebuffer counterclockwise to 240×320.
+The selected orientation applies to the window, gamepad overlay, and PNG
+screenshots.
 
 Use `--show-gamepad` when testing mappings or recording demonstrations. The
 overlay is drawn at the native resolution before the selected display filter.
@@ -223,6 +230,9 @@ dingoo-emu path/to/game.app --screenshot preview.png
 
 # Take screenshot after a custom number of frames
 dingoo-emu path/to/game.c3s --screenshot preview.png --screenshot-frames 60
+
+# Rotate a portrait game counterclockwise and save a 240x320 screenshot
+dingoo-emu path/to/game.app --orientation portrait --screenshot portrait.png
 ```
 
 ## Batch Screenshot Mode
@@ -238,7 +248,8 @@ Screenshots are written to `docs/images`, and per-game JSON diagnostics are
 written to `tmp/hle-reports`. Every report contains an `unknown_hle` array,
 including an empty array when no gaps were observed. The default capture point
 is 60 frames, with per-game overrides for slow-starting or
-performance-sensitive titles. Explicit parameters apply the requested values
+performance-sensitive titles. Known portrait titles are captured using their
+configured screen orientation. Explicit parameters apply the requested values
 to every game:
 
 ```powershell

@@ -3,6 +3,38 @@ pub const SCREEN_WIDTH: u32 = 320;
 pub const SCREEN_HEIGHT: u32 = 240;
 pub const FRAMEBUFFER_SIZE: usize = (SCREEN_WIDTH * SCREEN_HEIGHT * 2) as usize; // RGB565
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScreenOrientation {
+    #[default]
+    Landscape,
+    Portrait,
+}
+
+impl ScreenOrientation {
+    pub const fn dimensions(self) -> (u32, u32) {
+        match self {
+            Self::Landscape => (SCREEN_WIDTH, SCREEN_HEIGHT),
+            Self::Portrait => (SCREEN_HEIGHT, SCREEN_WIDTH),
+        }
+    }
+}
+
+pub fn rotate_rgb565_counterclockwise(source: &[u8], destination: &mut [u8]) {
+    assert!(source.len() >= FRAMEBUFFER_SIZE);
+    assert!(destination.len() >= FRAMEBUFFER_SIZE);
+
+    let width = SCREEN_WIDTH as usize;
+    let height = SCREEN_HEIGHT as usize;
+    for y in 0..height {
+        for x in 0..width {
+            let source_offset = (y * width + x) * 2;
+            let destination_offset = ((width - 1 - x) * height + y) * 2;
+            destination[destination_offset..destination_offset + 2]
+                .copy_from_slice(&source[source_offset..source_offset + 2]);
+        }
+    }
+}
+
 /// Video subsystem
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Video {
@@ -55,6 +87,10 @@ impl Video {
 
     /// Convert RGB565 framebuffer to XRGB8888 (for rendering)
     pub fn to_xrgb8888(&self) -> Vec<u32> {
+        self.to_xrgb8888_oriented(ScreenOrientation::Landscape)
+    }
+
+    pub fn to_xrgb8888_oriented(&self, orientation: ScreenOrientation) -> Vec<u32> {
         let mut pixels = Vec::with_capacity((SCREEN_WIDTH * SCREEN_HEIGHT) as usize);
 
         for y in 0..SCREEN_HEIGHT {
@@ -77,7 +113,11 @@ impl Video {
             }
         }
 
-        pixels
+        if orientation == ScreenOrientation::Portrait {
+            rotate_xrgb8888_counterclockwise(&pixels)
+        } else {
+            pixels
+        }
     }
 
     /// Calculate a deterministic CRC32 over the raw RGB565 framebuffer.
@@ -87,8 +127,17 @@ impl Video {
 
     /// Save the current framebuffer as a PNG screenshot.
     pub fn save_screenshot(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.save_screenshot_oriented(path, ScreenOrientation::Landscape)
+    }
+
+    pub fn save_screenshot_oriented(
+        &self,
+        path: &std::path::Path,
+        orientation: ScreenOrientation,
+    ) -> anyhow::Result<()> {
         use image::RgbaImage;
-        let mut img = RgbaImage::new(SCREEN_WIDTH, SCREEN_HEIGHT);
+        let (output_width, output_height) = orientation.dimensions();
+        let mut img = RgbaImage::new(output_width, output_height);
         for y in 0..SCREEN_HEIGHT {
             for x in 0..SCREEN_WIDTH {
                 let offset = ((y * SCREEN_WIDTH + x) * 2) as usize;
@@ -100,7 +149,11 @@ impl Video {
                 let r = ((r5 << 3) | (r5 >> 2)) as u8;
                 let g = ((g6 << 2) | (g6 >> 4)) as u8;
                 let b = ((b5 << 3) | (b5 >> 2)) as u8;
-                img.put_pixel(x, y, image::Rgba([r, g, b, 0xFF]));
+                let (output_x, output_y) = match orientation {
+                    ScreenOrientation::Landscape => (x, y),
+                    ScreenOrientation::Portrait => (y, SCREEN_WIDTH - 1 - x),
+                };
+                img.put_pixel(output_x, output_y, image::Rgba([r, g, b, 0xFF]));
             }
         }
         img.save(path)?;
@@ -116,6 +169,18 @@ impl Video {
     pub fn frame_count(&self) -> u64 {
         self.frame_count
     }
+}
+
+fn rotate_xrgb8888_counterclockwise(source: &[u32]) -> Vec<u32> {
+    let width = SCREEN_WIDTH as usize;
+    let height = SCREEN_HEIGHT as usize;
+    let mut destination = vec![0; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            destination[(width - 1 - x) * height + y] = source[y * width + x];
+        }
+    }
+    destination
 }
 
 impl Default for Video {
@@ -143,6 +208,40 @@ mod tests {
 
         let xrgb = video.to_xrgb8888();
         assert_eq!(xrgb[0], 0xFFFF_FFFF); // White
+    }
+
+    #[test]
+    fn portrait_orientation_rotates_pixels_counterclockwise() {
+        let mut video = Video::new();
+        let top_left = 0x001f_u16;
+        let top_right = 0xf800_u16;
+        let bottom_left = 0x07e0_u16;
+        let bottom_right = 0xffff_u16;
+        for (x, y, color) in [
+            (0, 0, top_left),
+            (SCREEN_WIDTH - 1, 0, top_right),
+            (0, SCREEN_HEIGHT - 1, bottom_left),
+            (SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, bottom_right),
+        ] {
+            let offset = ((y * SCREEN_WIDTH + x) * 2) as usize;
+            video.framebuffer_mut()[offset..offset + 2].copy_from_slice(&color.to_le_bytes());
+        }
+
+        let mut rotated = vec![0; FRAMEBUFFER_SIZE];
+        rotate_rgb565_counterclockwise(video.framebuffer(), &mut rotated);
+        let pixel = |x: u32, y: u32| {
+            let offset = ((y * SCREEN_HEIGHT + x) * 2) as usize;
+            u16::from_le_bytes([rotated[offset], rotated[offset + 1]])
+        };
+        assert_eq!(ScreenOrientation::Portrait.dimensions(), (240, 320));
+        assert_eq!(pixel(0, 0), top_right);
+        assert_eq!(pixel(SCREEN_HEIGHT - 1, 0), bottom_right);
+        assert_eq!(pixel(0, SCREEN_WIDTH - 1), top_left);
+        assert_eq!(pixel(SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1), bottom_left);
+
+        let xrgb = video.to_xrgb8888_oriented(ScreenOrientation::Portrait);
+        assert_eq!(xrgb.len(), (SCREEN_HEIGHT * SCREEN_WIDTH) as usize);
+        assert_eq!(xrgb[0], 0xffff_0000);
     }
 
     #[test]
