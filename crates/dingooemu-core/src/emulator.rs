@@ -4,6 +4,7 @@ use crate::common::audio::AudioConfig;
 use crate::common::cheats::{CheatParseError, CheatRule};
 use crate::common::execution::UnknownInstructionPolicy;
 use crate::common::hle::{UnknownHleCall, UnknownHlePolicy};
+use crate::common::video::ScreenOrientation;
 use crate::content::{ArmProfile, ContentFormat, GuestArchitecture, TargetDevice};
 use crate::error::Result;
 use crate::package::PackageImage;
@@ -278,16 +279,28 @@ impl Emulator {
     }
 
     pub fn frame_xrgb8888(&self) -> Vec<u32> {
+        self.frame_xrgb8888_oriented(ScreenOrientation::Landscape)
+    }
+
+    pub fn frame_xrgb8888_oriented(&self, orientation: ScreenOrientation) -> Vec<u32> {
         match &self.runtime {
-            Runtime::A320(runtime) => runtime.frame_xrgb8888(),
-            Runtime::A330(runtime) => runtime.video.to_xrgb8888(),
+            Runtime::A320(runtime) => runtime.frame_xrgb8888(orientation),
+            Runtime::A330(runtime) => runtime.video.to_xrgb8888_oriented(orientation),
         }
     }
 
     pub fn save_screenshot(&self, path: &Path) -> anyhow::Result<()> {
+        self.save_screenshot_oriented(path, ScreenOrientation::Landscape)
+    }
+
+    pub fn save_screenshot_oriented(
+        &self,
+        path: &Path,
+        orientation: ScreenOrientation,
+    ) -> anyhow::Result<()> {
         match &self.runtime {
-            Runtime::A320(runtime) => runtime.save_screenshot(path),
-            Runtime::A330(runtime) => runtime.video.save_screenshot(path),
+            Runtime::A320(runtime) => runtime.save_screenshot(path, orientation),
+            Runtime::A330(runtime) => runtime.video.save_screenshot_oriented(path, orientation),
         }
     }
 

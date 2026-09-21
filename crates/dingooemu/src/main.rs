@@ -6,10 +6,7 @@ mod scaler;
 use clap::{Parser, ValueEnum};
 use dingooemu_core::common::cheats::CheatRule;
 use dingooemu_core::UnknownInstructionPolicy;
-use dingooemu_core::{
-    common::video::{SCREEN_HEIGHT, SCREEN_WIDTH},
-    Emulator, UnknownHlePolicy,
-};
+use dingooemu_core::{common::video::ScreenOrientation, Emulator, UnknownHlePolicy};
 use minifb::{Key, Window, WindowOptions};
 use std::path::{Path, PathBuf};
 
@@ -54,6 +51,22 @@ impl From<UnknownHleMode> for UnknownHlePolicy {
         match mode {
             UnknownHleMode::Report => Self::Report,
             UnknownHleMode::Stop => Self::Stop,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum DisplayOrientation {
+    #[default]
+    Landscape,
+    Portrait,
+}
+
+impl From<DisplayOrientation> for ScreenOrientation {
+    fn from(orientation: DisplayOrientation) -> Self {
+        match orientation {
+            DisplayOrientation::Landscape => Self::Landscape,
+            DisplayOrientation::Portrait => Self::Portrait,
         }
     }
 }
@@ -162,6 +175,10 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ScaleFilter::Nearest)]
     filter: ScaleFilter,
 
+    /// Display the game in landscape or counterclockwise-rotated portrait mode
+    #[arg(long, value_enum, default_value_t = DisplayOrientation::Landscape)]
+    orientation: DisplayOrientation,
+
     /// Show the current Dingoo button state over the game frame
     #[arg(long)]
     show_gamepad: bool,
@@ -257,7 +274,7 @@ fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
                 log::info!("Frame {}", frame);
             }
         }
-        emu.save_screenshot(screenshot_path)?;
+        emu.save_screenshot_oriented(screenshot_path, args.orientation.into())?;
         log::info!("Screenshot saved to: {}", screenshot_path.display());
         return Ok(());
     }
@@ -274,12 +291,14 @@ fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
         log::info!("Headless run complete: {} frames", args.frames);
     } else {
         // Windowed mode
+        let orientation: ScreenOrientation = args.orientation.into();
+        let (frame_width, frame_height) = orientation.dimensions();
         let (width, height) = if args.fullscreen {
             screen::size()
         } else {
             (
-                (SCREEN_WIDTH * args.scale) as usize,
-                (SCREEN_HEIGHT * args.scale) as usize,
+                (frame_width * args.scale) as usize,
+                (frame_height * args.scale) as usize,
             )
         };
 
@@ -316,20 +335,20 @@ fn run_emulation(args: &Args, emu: &mut Emulator) -> anyhow::Result<()> {
             emu.tick()?;
 
             // Get framebuffer and convert to XRGB8888
-            let mut buffer = emu.frame_xrgb8888();
+            let mut buffer = emu.frame_xrgb8888_oriented(orientation);
             if args.show_gamepad {
                 gamepad_overlay::draw(
                     &mut buffer,
-                    SCREEN_WIDTH as usize,
-                    SCREEN_HEIGHT as usize,
+                    frame_width as usize,
+                    frame_height as usize,
                     buttons,
                 );
             }
             let (window_width, window_height) = window.get_size();
             let output = display_scaler.render(
                 &buffer,
-                SCREEN_WIDTH as usize,
-                SCREEN_HEIGHT as usize,
+                frame_width as usize,
+                frame_height as usize,
                 window_width,
                 window_height,
             );
@@ -522,6 +541,22 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn orientation_defaults_to_landscape_and_accepts_portrait() {
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "game.app"])
+                .unwrap()
+                .orientation,
+            DisplayOrientation::Landscape
+        );
+        assert_eq!(
+            Args::try_parse_from(["dingoo-emu", "--orientation", "portrait", "game.app",])
+                .unwrap()
+                .orientation,
+            DisplayOrientation::Portrait
+        );
     }
 
     #[test]

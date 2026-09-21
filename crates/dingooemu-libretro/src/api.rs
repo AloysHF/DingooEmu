@@ -2,6 +2,7 @@ use std::ffi::{c_void, CStr};
 use std::os::raw::{c_char, c_uint};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use dingooemu_core::common::audio::OUTPUT_SAMPLE_RATE;
@@ -9,7 +10,10 @@ use dingooemu_core::common::input::{
     BUTTON_A, BUTTON_B, BUTTON_DOWN, BUTTON_L, BUTTON_LEFT, BUTTON_R, BUTTON_RIGHT, BUTTON_SELECT,
     BUTTON_START, BUTTON_UP, BUTTON_X, BUTTON_Y,
 };
-use dingooemu_core::common::video::{SCREEN_HEIGHT, SCREEN_WIDTH};
+use dingooemu_core::common::video::{
+    rotate_rgb565_counterclockwise, ScreenOrientation, FRAMEBUFFER_SIZE, SCREEN_HEIGHT,
+    SCREEN_WIDTH,
+};
 use dingooemu_core::Emulator;
 use dingooemu_core::UnknownInstructionPolicy;
 
@@ -22,6 +26,9 @@ const PERFORMANCE_LEVEL: u32 = 4;
 const FRAMES_PER_SECOND: f64 = 60.0;
 static DIAGNOSTIC_AUDIO_BUFFER_REGISTERED: AtomicBool = AtomicBool::new(false);
 static ASYNC_AUDIO_REGISTERED: AtomicBool = AtomicBool::new(false);
+static PORTRAIT_MODE: AtomicBool = AtomicBool::new(false);
+static VIDEO_GEOMETRY_DIRTY: AtomicBool = AtomicBool::new(false);
+static PORTRAIT_FRAMEBUFFER: Mutex<[u8; FRAMEBUFFER_SIZE]> = Mutex::new([0; FRAMEBUFFER_SIZE]);
 
 #[no_mangle]
 pub extern "C" fn retro_set_environment(callback: RetroEnvironmentCallback) {
@@ -56,6 +63,8 @@ pub extern "C" fn retro_set_input_state(callback: RetroInputStateCallback) {
 
 #[no_mangle]
 pub extern "C" fn retro_init() {
+    PORTRAIT_MODE.store(false, Ordering::Release);
+    VIDEO_GEOMETRY_DIRTY.store(false, Ordering::Release);
     callbacks::initialize_log_interface();
     crate::logger::initialize();
     log::info!("Libretro core initialized");
@@ -67,6 +76,8 @@ pub extern "C" fn retro_deinit() {
     unregister_async_audio();
     crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
     unsafe { EMULATOR = None };
+    PORTRAIT_MODE.store(false, Ordering::Release);
+    VIDEO_GEOMETRY_DIRTY.store(false, Ordering::Release);
     log::info!("Libretro core deinitialized");
 }
 
@@ -94,13 +105,8 @@ pub extern "C" fn retro_get_system_av_info(info: *mut RetroSystemAvInfo) {
         return;
     };
 
-    info.geometry = RetroGameGeometry {
-        base_width: SCREEN_WIDTH,
-        base_height: SCREEN_HEIGHT,
-        max_width: SCREEN_WIDTH,
-        max_height: SCREEN_HEIGHT,
-        aspect_ratio: SCREEN_WIDTH as f32 / SCREEN_HEIGHT as f32,
-    };
+    info.geometry = video_geometry(screen_orientation());
+    VIDEO_GEOMETRY_DIRTY.store(false, Ordering::Release);
     info.timing = RetroSystemTiming {
         fps: FRAMES_PER_SECOND,
         sample_rate: f64::from(OUTPUT_SAMPLE_RATE),
@@ -204,6 +210,7 @@ pub extern "C" fn retro_run() {
             apply_core_options(emulator);
         }
     }
+    update_video_geometry();
     let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
         return;
     };
@@ -214,12 +221,7 @@ pub extern "C" fn retro_run() {
     emulator.set_buttons(buttons);
 
     if !crate::frame_pacing::should_advance() {
-        callbacks::video_refresh(
-            emulator.framebuffer().as_ptr().cast(),
-            SCREEN_WIDTH,
-            SCREEN_HEIGHT,
-            SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
-        );
+        submit_video_frame(emulator);
         return;
     }
 
@@ -233,12 +235,7 @@ pub extern "C" fn retro_run() {
     let exited = !emulator.is_running();
 
     let Some(diagnostic_timer) = diagnostic_timer else {
-        callbacks::video_refresh(
-            emulator.framebuffer().as_ptr().cast(),
-            SCREEN_WIDTH,
-            SCREEN_HEIGHT,
-            SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
-        );
+        submit_video_frame(emulator);
 
         let samples = emulator.take_audio_samples();
         if crate::audio_output::enqueue(&samples).is_none()
@@ -254,12 +251,7 @@ pub extern "C" fn retro_run() {
     let tick_elapsed = diagnostic_timer.elapsed();
 
     let video_timer = Instant::now();
-    callbacks::video_refresh(
-        emulator.framebuffer().as_ptr().cast(),
-        SCREEN_WIDTH,
-        SCREEN_HEIGHT,
-        SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
-    );
+    submit_video_frame(emulator);
     let video_elapsed = video_timer.elapsed();
 
     let audio_timer = Instant::now();
@@ -287,6 +279,69 @@ pub extern "C" fn retro_run() {
         audio_frames_accepted,
     );
     request_shutdown_if_exited(exited);
+}
+
+fn screen_orientation() -> ScreenOrientation {
+    if PORTRAIT_MODE.load(Ordering::Acquire) {
+        ScreenOrientation::Portrait
+    } else {
+        ScreenOrientation::Landscape
+    }
+}
+
+fn video_geometry(orientation: ScreenOrientation) -> RetroGameGeometry {
+    let (base_width, base_height) = orientation.dimensions();
+    let max_dimension = SCREEN_WIDTH.max(SCREEN_HEIGHT);
+    RetroGameGeometry {
+        base_width,
+        base_height,
+        max_width: max_dimension,
+        max_height: max_dimension,
+        aspect_ratio: base_width as f32 / base_height as f32,
+    }
+}
+
+fn set_screen_orientation(orientation: ScreenOrientation) {
+    let portrait = orientation == ScreenOrientation::Portrait;
+    if PORTRAIT_MODE.swap(portrait, Ordering::AcqRel) != portrait {
+        VIDEO_GEOMETRY_DIRTY.store(true, Ordering::Release);
+    }
+}
+
+fn update_video_geometry() {
+    if !VIDEO_GEOMETRY_DIRTY.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let mut geometry = video_geometry(screen_orientation());
+    if !callbacks::environment(
+        RETRO_ENVIRONMENT_SET_GEOMETRY,
+        (&mut geometry as *mut RetroGameGeometry).cast(),
+    ) {
+        log::warn!("Frontend did not accept updated video geometry");
+    }
+}
+
+fn submit_video_frame(emulator: &Emulator) {
+    match screen_orientation() {
+        ScreenOrientation::Landscape => callbacks::video_refresh(
+            emulator.framebuffer().as_ptr().cast(),
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
+            SCREEN_WIDTH as usize * std::mem::size_of::<u16>(),
+        ),
+        ScreenOrientation::Portrait => {
+            let mut framebuffer = PORTRAIT_FRAMEBUFFER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            rotate_rgb565_counterclockwise(emulator.framebuffer(), &mut *framebuffer);
+            callbacks::video_refresh(
+                framebuffer.as_ptr().cast(),
+                SCREEN_HEIGHT,
+                SCREEN_WIDTH,
+                SCREEN_HEIGHT as usize * std::mem::size_of::<u16>(),
+            );
+        }
+    }
 }
 
 fn request_shutdown_if_exited(exited: bool) {
@@ -575,6 +630,7 @@ struct CoreOptions {
     swap_ab: bool,
     diagnostics_enabled: bool,
     unknown_instruction_policy: UnknownInstructionPolicy,
+    orientation: ScreenOrientation,
     jit_enabled: bool,
 }
 
@@ -587,6 +643,7 @@ impl Default for CoreOptions {
             swap_ab: false,
             diagnostics_enabled: false,
             unknown_instruction_policy: UnknownInstructionPolicy::Skip,
+            orientation: ScreenOrientation::Landscape,
             jit_enabled: true,
         }
     }
@@ -617,6 +674,10 @@ fn core_option_variables() -> Vec<RetroVariable> {
         RetroVariable {
             key: c"dingooemu_unknown_instruction".as_ptr(),
             value: c"Unknown Guest Instruction Policy; skip|stop".as_ptr(),
+        },
+        RetroVariable {
+            key: c"dingooemu_screen_orientation".as_ptr(),
+            value: c"Screen Orientation; landscape|portrait".as_ptr(),
         },
     ];
     #[cfg(all(
@@ -699,6 +760,13 @@ fn read_core_options(mut get: impl FnMut(&CStr) -> Option<String>) -> CoreOption
             UnknownInstructionPolicy::Skip
         };
     }
+    if let Some(orientation) = get(c"dingooemu_screen_orientation") {
+        options.orientation = if orientation == "portrait" {
+            ScreenOrientation::Portrait
+        } else {
+            ScreenOrientation::Landscape
+        };
+    }
     if let Some(engine) = get(c"dingooemu_cpu_engine") {
         options.jit_enabled = engine != "interpreter";
     }
@@ -713,18 +781,20 @@ fn apply_core_options(emulator: &mut Emulator) {
     // Keep performance diagnostics independent of verbose frontend logging.
     crate::logger::set_debug_logging(false);
     emulator.set_unknown_instruction_policy(options.unknown_instruction_policy);
+    set_screen_orientation(options.orientation);
     emulator.set_jit_enabled(options.jit_enabled);
     emulator.set_jit_diagnostics_enabled(options.diagnostics_enabled);
     crate::diagnostics::set_enabled(options.diagnostics_enabled, emulator);
     update_diagnostic_audio_buffer_status(crate::diagnostics::is_enabled());
     log::info!(
-        "Core options applied: volume={} repeat_delay={} repeat_period={} swap_ab={} diagnostics={} unknown_instruction={:?} cpu_engine={}",
+        "Core options applied: volume={} repeat_delay={} repeat_period={} swap_ab={} diagnostics={} unknown_instruction={:?} orientation={:?} cpu_engine={}",
         options.volume,
         options.repeat_delay,
         options.repeat_period,
         options.swap_ab,
         options.diagnostics_enabled,
         options.unknown_instruction_policy,
+        options.orientation,
         if options.jit_enabled { "jit" } else { "interpreter" }
     );
 }
@@ -1149,6 +1219,33 @@ mod tests {
     }
 
     #[test]
+    fn screen_orientation_option_updates_portrait_geometry() {
+        let variables = core_option_variables();
+        assert_eq!(
+            unsafe { CStr::from_ptr(variables[6].key) },
+            c"dingooemu_screen_orientation"
+        );
+        assert_eq!(
+            read_core_options(|_| None).orientation,
+            ScreenOrientation::Landscape
+        );
+        assert_eq!(
+            read_core_options(|key| {
+                (key == c"dingooemu_screen_orientation").then(|| "portrait".to_string())
+            })
+            .orientation,
+            ScreenOrientation::Portrait
+        );
+
+        let landscape = video_geometry(ScreenOrientation::Landscape);
+        assert_eq!((landscape.base_width, landscape.base_height), (320, 240));
+        assert_eq!((landscape.max_width, landscape.max_height), (320, 320));
+        let portrait = video_geometry(ScreenOrientation::Portrait);
+        assert_eq!((portrait.base_width, portrait.base_height), (240, 320));
+        assert_eq!(portrait.aspect_ratio, 0.75);
+    }
+
+    #[test]
     #[cfg(all(
         target_os = "android",
         target_pointer_width = "64",
@@ -1157,7 +1254,7 @@ mod tests {
     fn cpu_engine_option_defaults_to_jit_and_allows_interpreter() {
         let variables = core_option_variables();
         assert_eq!(
-            unsafe { CStr::from_ptr(variables[6].key) },
+            unsafe { CStr::from_ptr(variables[7].key) },
             c"dingooemu_cpu_engine"
         );
         assert!(read_core_options(|_| None).jit_enabled);

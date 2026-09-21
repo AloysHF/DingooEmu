@@ -1921,14 +1921,18 @@ impl Runtime {
         self.video.framebuffer_crc32()
     }
 
-    /// Convert the current frame to XRGB8888 pixels.
-    pub fn frame_xrgb8888(&self) -> Vec<u32> {
-        self.video.to_xrgb8888()
+    /// Convert the current frame to oriented XRGB8888 pixels.
+    pub fn frame_xrgb8888(&self, orientation: crate::common::video::ScreenOrientation) -> Vec<u32> {
+        self.video.to_xrgb8888_oriented(orientation)
     }
 
-    /// Save the current frame as a PNG image.
-    pub fn save_screenshot(&self, path: &Path) -> anyhow::Result<()> {
-        self.video.save_screenshot(path)
+    /// Save the current frame as an oriented PNG image.
+    pub fn save_screenshot(
+        &self,
+        path: &Path,
+        orientation: crate::common::video::ScreenOrientation,
+    ) -> anyhow::Result<()> {
+        self.video.save_screenshot_oriented(path, orientation)
     }
 
     /// Return frontend-visible system RAM.
