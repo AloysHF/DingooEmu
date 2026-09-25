@@ -33,10 +33,10 @@ minifb = "=0.28.0"
 gilrs = "=0.11.2"
 rodio = { version = "=0.22.2", features = ["mp3"] }
 env_logger = "=0.11.11"
-cranelift = "=0.135.1"
+cranelift = "=0.136.0"
 cranelift-jit = "=0.135.1"
-cranelift-module = "=0.135.1"
-cranelift-native = "=0.135.1"
+cranelift-module = "=0.136.0"
+cranelift-native = "=0.136.0"
 
 [profile.release]
 opt-level = 3
