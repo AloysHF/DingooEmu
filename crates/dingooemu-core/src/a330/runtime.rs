@@ -1611,6 +1611,189 @@ mod tests {
         }
     }
 
+    fn instruction_package(profile: ArmProfile, words: &[u32]) -> PackageImage {
+        let mut package = svc_package("unused");
+        let origin = match profile {
+            ArmProfile::Retail => ArmProfile::RETAIL_ORIGIN,
+            ArmProfile::Homebrew => ArmProfile::HOMEBREW_ORIGIN,
+        };
+        package.target = TargetDevice::GemeiA330(profile);
+        package.rawd.origin = origin;
+        package.rawd.entry = origin;
+        package.rawd.base.size = words.len() as u32 * 4;
+        package.rawd.program_size = package.rawd.base.size;
+        package.imports.clear();
+        package.data.truncate(0x80);
+        for word in words {
+            package.data.extend_from_slice(&word.to_le_bytes());
+        }
+        package
+    }
+
+    #[test]
+    fn packed_word_loads_follow_the_guest_abi_in_arm_and_thumb() {
+        for profile in [ArmProfile::Retail, ArmProfile::Homebrew] {
+            for thumb in [false, true] {
+                let words = if thumb {
+                    [0x4770_5881, 0] // LDR r1, [r0, r2]; BX lr
+                } else {
+                    [0xe590_1000, 0xe12f_ff1e]
+                };
+                let mut package = instruction_package(profile, &words);
+                if thumb {
+                    package.rawd.entry |= 1;
+                }
+                let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+                runtime
+                    .memory
+                    .write_bytes(STACK_BASE + 0x100, &[0x7d, 0x5e, 1, 0, 0])
+                    .unwrap();
+                runtime.cpu.r[0] = STACK_BASE + 0x101;
+                runtime.start();
+                runtime.tick().unwrap();
+                let expected = match profile {
+                    ArmProfile::Homebrew => 350,
+                    ArmProfile::Retail => 0x7d00_015e,
+                };
+                assert_eq!(runtime.cpu.r[1], expected, "{profile:?}, thumb={thumb}");
+            }
+        }
+    }
+
+    #[test]
+    fn oabi_console_write_returns_a_byte_count_and_continues_inline() {
+        let package = instruction_package(
+            ArmProfile::Homebrew,
+            &[0xef90_0004, 0xe280_4001, 0xe12f_ff1e],
+        );
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime.memory.write_bytes(STACK_BASE, b"DOOM\n").unwrap();
+        runtime.cpu.r[0] = 1;
+        runtime.cpu.r[1] = STACK_BASE;
+        runtime.cpu.r[2] = 5;
+        runtime.set_unknown_hle_policy(UnknownHlePolicy::Stop);
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.console_output, b"DOOM\n");
+        assert_eq!(runtime.cpu.r[4], 6);
+        assert!(runtime.unknown_hle_calls.is_empty());
+    }
+
+    #[test]
+    fn unavailable_oabi_services_return_enosys_without_redirecting_to_lr() {
+        let package = instruction_package(
+            ArmProfile::Homebrew,
+            &[0xef90_00c5, 0xe1a0_4000, 0xe12f_ff1e],
+        );
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime.set_unknown_hle_policy(UnknownHlePolicy::Stop);
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.cpu.r[4] as i32, -38);
+    }
+
+    #[test]
+    fn homebrew_cache_flush_does_not_present_an_offscreen_buffer() {
+        let mut package = svc_package("FlushDCache");
+        package.target = TargetDevice::GemeiA330(ArmProfile::Homebrew);
+        package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
+        package.rawd.entry = package.rawd.origin;
+        package.imports[0].address = package.rawd.origin;
+        let mut runtime = Runtime::from_package(package, PathBuf::new()).unwrap();
+        runtime.video.framebuffer_mut().fill(0x55);
+        runtime.video.framebuffer_mut()[..2].fill(0x77);
+        let expected = runtime.video.framebuffer().to_vec();
+        runtime.cpu.r[0] = LEGACY_FRAMEBUFFER_ADDRESS + FRAMEBUFFER_SIZE as u32;
+        runtime.start();
+        runtime.tick().unwrap();
+        assert_eq!(runtime.video.framebuffer(), expected);
+        assert_eq!(runtime.active_framebuffer, FRAMEBUFFER_BASE);
+    }
+
+    fn call_audio_sdk(runtime: &mut Runtime, name: &str, args: [u32; 4]) -> u32 {
+        runtime.package.imports[0].name = name.into();
+        runtime.cpu = Cpu::new(
+            runtime.package.entry_point(),
+            EXIT_ADDRESS - 16,
+            EXIT_ADDRESS,
+        );
+        runtime.cpu.r[..4].copy_from_slice(&args);
+        runtime.start();
+        runtime.tick().unwrap();
+        runtime.cpu.r[0]
+    }
+
+    #[test]
+    fn legacy_iis_device_opens_configures_writes_and_closes() {
+        let mut runtime =
+            Runtime::from_package(svc_package("DVCOpenDevice"), PathBuf::new()).unwrap();
+        runtime
+            .memory
+            .write_bytes(STACK_BASE, b"ROOT\\DVC\\IIS\\IIS0\0")
+            .unwrap();
+        let handle = call_audio_sdk(&mut runtime, "DVCOpenDevice", [STACK_BASE, 7, 2, 0]);
+        assert_ne!(handle, 0);
+        runtime.memory.write32(STACK_BASE + 0x100, 22_050).unwrap();
+        assert_eq!(
+            call_audio_sdk(
+                &mut runtime,
+                "DVCControlDevice",
+                [handle, 0, 0x0d, STACK_BASE + 0x100]
+            ),
+            0
+        );
+        runtime.memory.write32(STACK_BASE + 0x100, 1).unwrap();
+        assert_eq!(
+            call_audio_sdk(
+                &mut runtime,
+                "DVCControlDevice",
+                [handle, 0, 0x0b, STACK_BASE + 0x100]
+            ),
+            0
+        );
+        let config = runtime.audio.config().unwrap();
+        assert_eq!(config.sample_rate, 22_050);
+        assert_eq!(config.channels, 2);
+        runtime
+            .memory
+            .write_bytes(STACK_BASE + 0x200, &[0, 0x40, 0, 0x40])
+            .unwrap();
+        assert_eq!(
+            call_audio_sdk(
+                &mut runtime,
+                "DVCWriteDevice",
+                [STACK_BASE + 0x200, 4, handle, 0]
+            ),
+            4
+        );
+        #[cfg(not(feature = "standalone"))]
+        assert!(runtime
+            .audio
+            .take_frame_samples()
+            .iter()
+            .any(|&sample| sample != 0));
+        assert_eq!(
+            call_audio_sdk(&mut runtime, "SYSSetVolume", [0, 0, 0, 0]),
+            0
+        );
+        assert_eq!(
+            call_audio_sdk(&mut runtime, "SYSGetVolume", [0, 0, 0, 0]),
+            0
+        );
+        assert_eq!(
+            call_audio_sdk(&mut runtime, "DVCCloseDevice", [handle, 0, 0, 0]),
+            0
+        );
+        assert_eq!(
+            call_audio_sdk(
+                &mut runtime,
+                "DVCWriteDevice",
+                [STACK_BASE + 0x200, 4, handle, 0]
+            ),
+            u32::MAX
+        );
+    }
+
     fn semihosting_package() -> PackageImage {
         let mut package = svc_package("unused");
         package.data[0x80..0x84].copy_from_slice(&0xef12_3456u32.to_le_bytes());
@@ -2671,7 +2854,7 @@ mod tests {
 
     #[test]
     fn homebrew_legacy_framebuffer_defaults_to_rgb565() {
-        let mut package = svc_package("FlushDCache");
+        let mut package = svc_package("LCDFlushFB");
         package.target = TargetDevice::GemeiA330(ArmProfile::Homebrew);
         package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
         package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
@@ -2681,7 +2864,7 @@ mod tests {
             .memory
             .write16(LEGACY_FRAMEBUFFER_ADDRESS, 0x07e0)
             .unwrap();
-        runtime.cpu.r[0] = LEGACY_FRAMEBUFFER_ADDRESS;
+        runtime.active_framebuffer = LEGACY_FRAMEBUFFER_ADDRESS;
         runtime.start();
         runtime.tick().unwrap();
 
@@ -2706,7 +2889,7 @@ mod tests {
 
     #[test]
     fn homebrew_frames_default_to_xrgb8888() {
-        let mut package = svc_package("FlushDCache");
+        let mut package = svc_package("LCDFlushFB");
         package.target = TargetDevice::GemeiA330(ArmProfile::Homebrew);
         package.rawd.entry = ArmProfile::HOMEBREW_ORIGIN;
         package.rawd.origin = ArmProfile::HOMEBREW_ORIGIN;
@@ -2716,7 +2899,7 @@ mod tests {
             .memory
             .write32(APP_PATH_ADDRESS, 0x00ff_0000)
             .unwrap();
-        runtime.cpu.r[0] = APP_PATH_ADDRESS;
+        runtime.active_framebuffer = APP_PATH_ADDRESS;
         runtime.start();
         runtime.tick().unwrap();
 

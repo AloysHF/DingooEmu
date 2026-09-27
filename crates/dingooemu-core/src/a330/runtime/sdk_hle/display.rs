@@ -33,7 +33,9 @@ impl RuntimeBus<'_> {
                 cpu.r[0] = 0;
             }
             "FlushDCache" | "__dcache_writeback_all" => {
-                if self.memory.read_bytes(cpu.r[0], FRAMEBUFFER_SIZE).is_ok() {
+                if self.profile != ArmProfile::Homebrew
+                    && self.memory.read_bytes(cpu.r[0], FRAMEBUFFER_SIZE).is_ok()
+                {
                     *self.active_framebuffer = cpu.r[0];
                     *self.frame_address = Some(cpu.r[0]);
                 }

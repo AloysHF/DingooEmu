@@ -195,6 +195,30 @@ impl RuntimeBus<'_> {
         if immediate == 0x0012_3456 {
             return self.dispatch_semihosting(cpu);
         }
+        // Statically linked ARM libc may use Linux OABI console syscalls.
+        // These calls return to the next instruction, not an SDK import's LR.
+        if immediate & 0x00f0_0000 == 0x0090_0000 {
+            match immediate & 0x000f_ffff {
+                4 if matches!(cpu.r[0], 1 | 2) => {
+                    let output = self
+                        .memory
+                        .read_bytes(cpu.r[1], cpu.r[2] as usize)?
+                        .to_vec();
+                    self.append_console_output(&output);
+                    log::debug!("ARM console: {}", String::from_utf8_lossy(&output));
+                    cpu.r[0] = cpu.r[2];
+                }
+                4 => cpu.r[0] = (-9_i32) as u32,
+                _ => {
+                    log::trace!(
+                        "ARM OABI syscall {} is unavailable",
+                        immediate & 0x000f_ffff
+                    );
+                    cpu.r[0] = (-38_i32) as u32;
+                }
+            }
+            return Ok(());
+        }
         let (symbol_name, symbol_address) = if immediate & 0x0080_0000 != 0 {
             let index = (immediate & 0x007f_ffff) as usize;
             let name = self
@@ -232,7 +256,7 @@ impl RuntimeBus<'_> {
         {
             self.record_unknown(cpu, &symbol_name, symbol_address)?;
         }
-        if self.profile == ArmProfile::Homebrew {
+        if self.profile == ArmProfile::Homebrew && cpu.r[15] != symbol_address {
             cpu.r[15] = cpu.r[14] & !1;
         }
         Ok(())
@@ -277,6 +301,17 @@ impl Bus for RuntimeBus<'_> {
     }
     fn read32(&mut self, address: u32) -> Result<u32> {
         self.memory.read32(address)
+    }
+    fn load_word(&mut self, address: u32) -> Result<u32> {
+        if self.profile == ArmProfile::Homebrew {
+            // Homebrew libraries read packed data as byte-addressed words.
+            self.memory.read32(address)
+        } else {
+            Ok(self
+                .memory
+                .read32(address & !3)?
+                .rotate_right((address & 3) * 8))
+        }
     }
     fn write8(&mut self, address: u32, value: u8) -> Result<()> {
         self.memory.write8(address, value)?;

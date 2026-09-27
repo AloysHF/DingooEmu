@@ -61,6 +61,10 @@ pub trait Bus {
     fn write32(&mut self, address: u32, value: u32) -> Result<()>;
     fn svc(&mut self, cpu: &mut Cpu, immediate: u32) -> Result<()>;
 
+    fn load_word(&mut self, address: u32) -> Result<u32> {
+        Ok(self.read32(address & !3)?.rotate_right((address & 3) * 8))
+    }
+
     fn fetch16(&mut self, address: u32) -> Result<u16> {
         self.read16(address)
     }
@@ -452,7 +456,7 @@ impl Cpu {
             let value = if byte {
                 u32::from(bus.read8(address)?)
             } else {
-                bus.read32(address & !3)?.rotate_right((address & 3) * 8)
+                bus.load_word(address)?
             };
             if rd == 15 {
                 self.branch_exchange(value)?;
@@ -723,7 +727,7 @@ impl Cpu {
                 1 => bus.write16(address, self.r[rd] as u16)?,
                 2 => bus.write8(address, self.r[rd] as u8)?,
                 3 => self.r[rd] = bus.read8(address)? as i8 as i32 as u32,
-                4 => self.r[rd] = bus.read32(address & !3)?.rotate_right((address & 3) * 8),
+                4 => self.r[rd] = bus.load_word(address)?,
                 5 => self.r[rd] = u32::from(bus.read16(address)?),
                 6 => self.r[rd] = u32::from(bus.read8(address)?),
                 7 => self.r[rd] = bus.read16(address)? as i16 as i32 as u32,

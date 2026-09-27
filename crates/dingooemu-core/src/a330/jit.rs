@@ -630,13 +630,13 @@ fn lower_single_transfer(
 
     builder.switch_to_block(execute_block);
     builder.seal_block(execute_block);
-    let access_address = if load && !byte {
+    let access_address = if load && !byte && state.heap_base != HOMEBREW_HEAP_BASE {
         builder.ins().band_imm_u(address, i64::from(!3_u32))
     } else {
         address
     };
     let width = if byte { 1 } else { 4 };
-    let (host_address, mapped) = heap_address(builder, state, access_address, width, !load);
+    let (host_address, mapped) = heap_address(builder, state, access_address, width);
     builder
         .ins()
         .brif(mapped, mapped_block, &[], bailout_block, &[]);
@@ -653,7 +653,7 @@ fn lower_single_transfer(
         } else {
             loaded
         };
-        if !byte {
+        if !byte && state.heap_base != HOMEBREW_HEAP_BASE {
             let rotate = builder.ins().ishl_imm_u(address, 3);
             value = builder.ins().rotr(value, rotate);
         }
@@ -738,7 +738,7 @@ fn lower_half_transfer(
 
     builder.switch_to_block(execute_block);
     builder.seal_block(execute_block);
-    let (host_address, mapped) = heap_address(builder, state, address, width, !load);
+    let (host_address, mapped) = heap_address(builder, state, address, width);
     builder
         .ins()
         .brif(mapped, mapped_block, &[], bailout_block, &[]);
@@ -791,7 +791,6 @@ fn heap_address(
     state: &LoweringState,
     address: Value,
     width: u32,
-    write: bool,
 ) -> (Value, Value) {
     let offset = builder
         .ins()
@@ -801,7 +800,7 @@ fn heap_address(
         offset,
         (HEAP_SIZE as u32 - width) as i64,
     );
-    if write && state.heap_base == HOMEBREW_HEAP_BASE {
+    if state.heap_base == HOMEBREW_HEAP_BASE {
         let access_end = builder.ins().iadd_imm_s(address, i64::from(width));
         let before_mmio = builder.ins().icmp_imm_u(
             IntCC::UnsignedLessThanOrEqual,
@@ -1138,6 +1137,55 @@ mod tests {
         assert_eq!(registers[3], 0xffff_ff80);
         assert_eq!(registers[4], 0xffff_ff80);
         assert_eq!(registers[15], start + 16);
+    }
+
+    #[test]
+    fn homebrew_compiled_load_reads_packed_bytes() {
+        let start = 0x1380_1000;
+        let instructions = [DecodedArmInstruction::decode(0xe590_1000)];
+        let mut compiler = Compiler::new().unwrap();
+        let block = compiler
+            .compile(start, &instructions, HOMEBREW_HEAP_BASE)
+            .unwrap()
+            .unwrap();
+        let mut heap = vec![0_u8; 0x1000];
+        heap[0x100..0x105].copy_from_slice(&[0x7d, 0x5e, 1, 0, 0]);
+        let mut registers = [0_u32; REGISTER_COUNT];
+        let mut cpsr = 0_u32;
+        registers[0] = HOMEBREW_HEAP_BASE + 0x101;
+        // SAFETY: The supplied heap contains the complete unaligned access.
+        let completed =
+            unsafe { (block.function)(registers.as_mut_ptr(), &mut cpsr, heap.as_mut_ptr()) };
+        assert_eq!(completed, 1);
+        assert_eq!(registers[1], 350);
+        assert_eq!(registers[15], start + 4);
+    }
+
+    #[test]
+    fn homebrew_compiled_device_reads_and_writes_fall_back_to_the_bus() {
+        for instruction in [0xe590_1000, 0xe580_1000, 0xe1d0_10b0, 0xe1c0_10b0] {
+            let start = 0x1380_1000;
+            let mut compiler = Compiler::new().unwrap();
+            let block = compiler
+                .compile(
+                    start,
+                    &[DecodedArmInstruction::decode(instruction)],
+                    HOMEBREW_HEAP_BASE,
+                )
+                .unwrap()
+                .unwrap();
+            let mut registers = [0_u32; REGISTER_COUNT];
+            let mut cpsr = 0_u32;
+            registers[0] = super::super::memory::LEGACY_GRAPHICS_STATUS;
+            registers[1] = 9;
+            let mut heap = vec![0_u8; HEAP_SIZE];
+            // SAFETY: The supplied heap covers the shadow addresses in buggy implementations.
+            let completed =
+                unsafe { (block.function)(registers.as_mut_ptr(), &mut cpsr, heap.as_mut_ptr()) };
+            assert_eq!(completed, 0);
+            assert_eq!(registers[1], 9);
+            assert_eq!(registers[15], start);
+        }
     }
 
     #[test]
