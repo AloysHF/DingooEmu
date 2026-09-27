@@ -3,6 +3,11 @@
 Compatibility is still experimental. The results below cover startup and
 initial rendering only and do not imply complete gameplay support.
 
+The A330 `DOOM-A330.cc` and `DOOM2-A330.cc` ports have a separate
+[gameplay compatibility report](A330-DOOM-Compatibility.md), covering first-level
+input, sound effects, guest save/load, and normal quit. The table below remains
+a startup-only A320 matrix.
+
 This published matrix currently covers Dingoo A320 `.app` content. DingooEmu
 also accepts Gemei A330 `.cc`, `.c2s`, and `.c3s` content, but those formats do
 not yet have an equivalent public per-game compatibility matrix. Format support

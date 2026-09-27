@@ -32,6 +32,12 @@ CPU or runtime. DingooEmu validates the CCDL package, derives the device and ABI
 profile from RAWD metadata, checks that the category can carry that target, and
 only then selects the A320 or A330 runtime.
 
+The tested A330 `DOOM-A330.cc` and `DOOM2-A330.cc` ports support first-level
+play, movement, firing, automap, sound effects, guest save/load, and normal quit.
+Music is disabled by these ports; full-game completion remains unverified.
+See [A330 DOOM compatibility](docs/A330-DOOM-Compatibility.md) for build
+identifiers, limitations, and reproducible checks.
+
 ## Features
 
 - **Two guest architectures** — Cached MIPS32 and ARM32/Thumb interpretation with ARMv5TE fixed-point multiply support for A330 software

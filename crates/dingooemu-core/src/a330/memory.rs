@@ -197,6 +197,15 @@ impl Memory {
         if let Some(range) = region_range(address, size, STACK_BASE, self.stack.len()) {
             return Ok(&self.stack[range]);
         }
+        // Device registers take precedence over the overlapping homebrew heap.
+        if let Some(range) = region_range(
+            address,
+            size,
+            LEGACY_SYSTEM_MMIO_BASE,
+            self.legacy_system_mmio.len(),
+        ) {
+            return Ok(&self.legacy_system_mmio[range]);
+        }
         if let Some(range) = region_range(address, size, self.heap_base(), self.heap.len()) {
             return Ok(&self.heap[range]);
         }
@@ -214,14 +223,6 @@ impl Memory {
         ) {
             return Ok(&self.legacy_audio_mmio[range]);
         }
-        if let Some(range) = region_range(
-            address,
-            size,
-            LEGACY_SYSTEM_MMIO_BASE,
-            self.legacy_system_mmio.len(),
-        ) {
-            return Ok(&self.legacy_system_mmio[range]);
-        }
         Err(memory_error(address, size))
     }
 
@@ -238,6 +239,16 @@ impl Memory {
         }
         if let Some(range) = region_range(address, data.len(), STACK_BASE, self.stack.len()) {
             self.stack[range].copy_from_slice(data);
+            return Ok(());
+        }
+        // Device registers take precedence over the overlapping homebrew heap.
+        if let Some(range) = region_range(
+            address,
+            data.len(),
+            LEGACY_SYSTEM_MMIO_BASE,
+            self.legacy_system_mmio.len(),
+        ) {
+            self.legacy_system_mmio[range].copy_from_slice(data);
             return Ok(());
         }
         let heap_base = self.heap_base();
@@ -270,15 +281,6 @@ impl Memory {
             self.legacy_audio_mmio.len(),
         ) {
             self.legacy_audio_mmio[range].copy_from_slice(data);
-            return Ok(());
-        }
-        if let Some(range) = region_range(
-            address,
-            data.len(),
-            LEGACY_SYSTEM_MMIO_BASE,
-            self.legacy_system_mmio.len(),
-        ) {
-            self.legacy_system_mmio[range].copy_from_slice(data);
             return Ok(());
         }
         Err(memory_error(address, data.len()))
@@ -389,6 +391,30 @@ mod tests {
             memory.read32(LEGACY_GRAPHICS_STATUS).unwrap() & LEGACY_GRAPHICS_READY,
             LEGACY_GRAPHICS_READY
         );
+    }
+
+    #[test]
+    fn homebrew_heap_initialization_preserves_device_registers() {
+        let mut memory = Memory::from_package(&package(ArmProfile::Homebrew)).unwrap();
+        memory
+            .write_bytes(HOMEBREW_HEAP_BASE, &vec![0; 16 * 1024 * 1024])
+            .unwrap();
+        assert_eq!(
+            memory.read32(LEGACY_GRAPHICS_STATUS).unwrap(),
+            LEGACY_GRAPHICS_READY
+        );
+
+        memory
+            .write32(LEGACY_GRAPHICS_SURFACE, 0x1180_0000)
+            .unwrap();
+        memory.write16(LEGACY_GRAPHICS_STRIDE, 1280).unwrap();
+        memory
+            .write8(LEGACY_GRAPHICS_STATUS, LEGACY_GRAPHICS_READY as u8)
+            .unwrap();
+        assert_eq!(memory.read32(LEGACY_GRAPHICS_SURFACE).unwrap(), 0x1180_0000);
+        assert_eq!(memory.read16(LEGACY_GRAPHICS_STRIDE).unwrap(), 1280);
+        let status_offset = (LEGACY_GRAPHICS_STATUS - HOMEBREW_HEAP_BASE) as usize;
+        assert_eq!(&memory.heap[status_offset..status_offset + 4], &[0; 4]);
     }
 
     #[test]

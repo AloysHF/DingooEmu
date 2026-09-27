@@ -304,6 +304,10 @@ impl Audio {
         true
     }
 
+    pub(crate) fn device_volume(&self) -> u8 {
+        self.volume
+    }
+
     pub fn set_master_volume(&mut self, volume: u8) {
         self.master_volume = volume.min(100);
         #[cfg(feature = "standalone")]
