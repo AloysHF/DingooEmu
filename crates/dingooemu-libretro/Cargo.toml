@@ -17,8 +17,11 @@ crate-type = ["cdylib"]
 [dependencies]
 log.workspace = true
 
-[target.'cfg(all(target_os = "android", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))'.dependencies]
+# The JIT needs a 64-bit host with executable memory and a Cranelift-native
+# backend. iOS forbids runtime code generation, so those builds keep the
+# cached-block interpreter only.
+[target.'cfg(all(target_pointer_width = "64", not(target_os = "ios"), any(target_arch = "aarch64", target_arch = "x86_64")))'.dependencies]
 dingooemu-core = { workspace = true, features = ["jit"] }
 
-[target.'cfg(not(all(target_os = "android", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))'.dependencies]
+[target.'cfg(not(all(target_pointer_width = "64", not(target_os = "ios"), any(target_arch = "aarch64", target_arch = "x86_64"))))'.dependencies]
 dingooemu-core.workspace = true

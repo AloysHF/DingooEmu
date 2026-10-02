@@ -1,7 +1,7 @@
 # JIT Third-Party Licenses
 
 DingooEmu's own source code remains licensed under the BSD 3-Clause License
-in `LICENSE`. JIT-enabled Android binaries additionally incorporate the
+in `LICENSE`. JIT-enabled binaries additionally incorporate the
 following compatible third-party components:
 
 - Cranelift and Wasmtime internal support crates: Apache-2.0 WITH LLVM-exception
