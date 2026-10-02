@@ -681,8 +681,8 @@ fn core_option_variables() -> Vec<RetroVariable> {
         },
     ];
     #[cfg(all(
-        target_os = "android",
         target_pointer_width = "64",
+        not(target_os = "ios"),
         any(target_arch = "aarch64", target_arch = "x86_64")
     ))]
     variables.push(RetroVariable {
@@ -1247,8 +1247,8 @@ mod tests {
 
     #[test]
     #[cfg(all(
-        target_os = "android",
         target_pointer_width = "64",
+        not(target_os = "ios"),
         any(target_arch = "aarch64", target_arch = "x86_64")
     ))]
     fn cpu_engine_option_defaults_to_jit_and_allows_interpreter() {
@@ -1263,6 +1263,23 @@ mod tests {
                 (key == c"dingooemu_cpu_engine").then(|| "interpreter".to_string())
             })
             .jit_enabled
+        );
+    }
+
+    #[test]
+    #[cfg(all(
+        target_pointer_width = "64",
+        not(target_os = "ios"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    fn libretro_core_is_built_with_the_jit_on_this_target() {
+        // Regression: the libretro core once enabled the JIT only for 64-bit
+        // Android, so every desktop build ran the cached-block interpreter
+        // and could not hold 60 FPS in ordinary frontends.
+        let diagnostics = dingooemu_core::Emulator::default().jit_diagnostics();
+        assert!(
+            diagnostics.feature_available,
+            "dingooemu-core must be built with the jit feature on 64-bit non-iOS targets"
         );
     }
 

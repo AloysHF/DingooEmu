@@ -8,7 +8,7 @@ pub(super) fn handle(emu: &mut Runtime, func_name: &str) -> Result<HandlerResult
             let size = emu.cpu.regs.read(4);
             let pointer = emu.memory.malloc(size);
             emu.cpu.regs.write(2, pointer);
-            log::info!(
+            log::trace!(
                 "  malloc({size}) = {pointer:#010x} (heap_ptr={:#010x})",
                 emu.memory.heap_ptr()
             );
@@ -147,4 +147,60 @@ pub(super) fn handle(emu: &mut Runtime, func_name: &str) -> Result<HandlerResult
         _ => return Ok(HandlerResult::NotHandled),
     }
     Ok(HandlerResult::Complete)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Captures only records emitted from this module so parallel tests
+    /// logging through the same global logger cannot pollute the result.
+    struct CaptureLogger {
+        info_messages: Mutex<Vec<String>>,
+    }
+
+    impl log::Log for CaptureLogger {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.target().ends_with("sdk_hle::system")
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            // The `log!` macros call `log()` without consulting `enabled()`,
+            // so the target filter has to run here as well.
+            if record.level() == log::Level::Info && record.target().ends_with("sdk_hle::system") {
+                self.info_messages
+                    .lock()
+                    .unwrap()
+                    .push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static LOGGER: CaptureLogger = CaptureLogger {
+        info_messages: Mutex::new(Vec::new()),
+    };
+
+    #[test]
+    fn malloc_does_not_log_at_info_level() {
+        // Regression: malloc used to log at INFO, which forwarded several
+        // formatted lines per frame to the frontend logger and added
+        // measurable per-frame overhead in libretro frontends.
+        if log::set_logger(&LOGGER).is_ok() {
+            log::set_max_level(log::LevelFilter::Trace);
+        }
+        LOGGER.info_messages.lock().unwrap().clear();
+
+        let mut emu = Runtime::default();
+        emu.cpu.regs.write(4, 16);
+        handle(&mut emu, "malloc").expect("malloc handler should succeed");
+
+        let messages = LOGGER.info_messages.lock().unwrap().clone();
+        assert!(
+            messages.is_empty(),
+            "malloc must not log at INFO level, saw {messages:?}"
+        );
+    }
 }

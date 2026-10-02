@@ -41,7 +41,7 @@ identifiers, limitations, and reproducible checks.
 ## Features
 
 - **Two guest architectures** — Cached MIPS32 and ARM32/Thumb interpretation with ARMv5TE fixed-point multiply support for A330 software
-- **Optional native JIT** — Native translation of proven hot integer blocks for A320 and A330 software on supported 64-bit builds, with safe interpreter fallback
+- **Optional native JIT** — Native translation of proven hot integer blocks for A320 and A330 software on 64-bit x86_64 and arm64 hosts (Windows, macOS, Linux, Android), with safe interpreter fallback on iOS and 32-bit builds
 - **Real-time scheduling** — Guest timing stays at 60 Hz without requiring one host-side dispatch per hardware clock cycle
 - **HLE (High-Level Emulation)** — Architecture-specific SDK bridges for graphics, input, audio, timing, random-access files and directory enumeration, resources, tasks, and synchronization
 - **Auditable compatibility diagnostics** — Aggregate unknown SDK calls and emit per-game JSON reports for review
@@ -205,5 +205,5 @@ Contributions are welcome! Whether you're interested in fixing bugs, adding feat
 ## License
 
 This project is licensed under the [BSD 3-Clause License](LICENSE).
-JIT-enabled Android binaries also contain compatible third-party components;
+JIT-enabled binaries also contain compatible third-party components;
 their complete terms are included in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
