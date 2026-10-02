@@ -944,7 +944,22 @@ mod tests {
                 true
             }
             RETRO_ENVIRONMENT_SET_VARIABLES => true,
-            RETRO_ENVIRONMENT_GET_VARIABLE | RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE => false,
+            RETRO_ENVIRONMENT_GET_VARIABLE => {
+                // Frontend-lifecycle tests exercise the libretro glue, not the
+                // translator: running them on the interpreter keeps them fast
+                // enough for coverage instrumentation. JIT correctness stays
+                // covered by the dingooemu-core suite.
+                let variable = &mut *data.cast::<RetroVariable>();
+                if !variable.key.is_null() {
+                    let key = std::ffi::CStr::from_ptr(variable.key);
+                    if key == c"dingooemu_cpu_engine" {
+                        variable.value = c"interpreter".as_ptr();
+                        return true;
+                    }
+                }
+                false
+            }
+            RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE => false,
             RETRO_ENVIRONMENT_GET_LOG_INTERFACE => false,
             RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY => {
                 let directory = SAVE_DIRECTORY.lock().unwrap();
@@ -1051,7 +1066,9 @@ mod tests {
         retro_init();
 
         let mut frame_counts = Vec::new();
-        for hz in [60, 90, 120, 144] {
+        // Two end-to-end samples are enough here (1:1 and a high refresh
+        // rate); frame_pacing's unit tests cover the intermediate rates.
+        for hz in [60, 144] {
             assert!(retro_load_game(&info));
             let callback = FRAME_TIME_CALLBACK.lock().unwrap().unwrap();
             for frame in 0..hz {
@@ -1075,7 +1092,7 @@ mod tests {
         retro_deinit();
         std::fs::remove_file(path).unwrap();
 
-        assert_eq!(frame_counts, [60, 60, 60, 60]);
+        assert_eq!(frame_counts, [60, 60]);
     }
 
     #[test]

@@ -34,7 +34,10 @@ jobs:
       - name: Run tests with coverage
         run: |
           cargo install cargo-tarpaulin
-          cargo tarpaulin --out xml --output-dir coverage
+          # Coverage instrumentation slows the emulator tests considerably;
+          # the default 60s per test binary is not enough for the lifecycle
+          # suites that run full guest frames.
+          cargo tarpaulin --timeout 300 --out xml --output-dir coverage
 
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v8
