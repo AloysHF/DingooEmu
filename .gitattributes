@@ -1,0 +1,28 @@
+# Normalize every text file to LF in both the index and the working tree, so
+# a Windows checkout or archive cannot re-introduce CRLF diffs across the repo.
+* text=auto eol=lf
+
+# Windows command scripts must keep CRLF to run under cmd.exe.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets: git must never touch their bytes.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.gz binary
+*.7z binary
+*.so binary
+*.dll binary
+*.dylib binary
+*.exe binary
+*.app binary
