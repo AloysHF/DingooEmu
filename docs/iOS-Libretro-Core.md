@@ -5,7 +5,7 @@ and Gemei A330 `.cc`, `.c2s`, and `.c3s` software to run on iPhone and iPad.
 
 > **Note**: iOS does not currently support downloading cores via RetroArch's Online Updater. You need to manually inject the core into the RetroArch IPA. This limitation may be resolved in future RetroArch releases.
 
-> **Note**: iOS forbids runtime code generation, so the iOS core always uses the cached-block interpreter. The CPU Execution Engine core option is not offered on this platform.
+> **Note**: iOS forbids runtime code generation, so the iOS core always uses the cached-block interpreter. The CPU Execution Engine core option is not offered on this platform. tvOS and watchOS builds follow the same rule.
 
 ## Install in RetroArch on iOS
 

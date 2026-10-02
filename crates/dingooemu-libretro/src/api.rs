@@ -682,8 +682,13 @@ fn core_option_variables() -> Vec<RetroVariable> {
     ];
     #[cfg(all(
         target_pointer_width = "64",
-        not(target_os = "ios"),
-        any(target_arch = "aarch64", target_arch = "x86_64")
+        any(target_arch = "aarch64", target_arch = "x86_64"),
+        any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "android"
+        )
     ))]
     variables.push(RetroVariable {
         key: c"dingooemu_cpu_engine".as_ptr(),
@@ -1265,8 +1270,13 @@ mod tests {
     #[test]
     #[cfg(all(
         target_pointer_width = "64",
-        not(target_os = "ios"),
-        any(target_arch = "aarch64", target_arch = "x86_64")
+        any(target_arch = "aarch64", target_arch = "x86_64"),
+        any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "android"
+        )
     ))]
     fn cpu_engine_option_defaults_to_jit_and_allows_interpreter() {
         let variables = core_option_variables();
@@ -1286,8 +1296,13 @@ mod tests {
     #[test]
     #[cfg(all(
         target_pointer_width = "64",
-        not(target_os = "ios"),
-        any(target_arch = "aarch64", target_arch = "x86_64")
+        any(target_arch = "aarch64", target_arch = "x86_64"),
+        any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "android"
+        )
     ))]
     fn libretro_core_is_built_with_the_jit_on_this_target() {
         // Regression: the libretro core once enabled the JIT only for 64-bit
