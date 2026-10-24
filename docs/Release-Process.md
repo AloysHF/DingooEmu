@@ -63,9 +63,12 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
    and simulator (arm64), packaged as `dingoo-emu-ios-libretro.tar.gz`
 5. **Builds the webOS libretro core** for ARMv7, packaged as
    `dingoo-emu-webos-libretro.tar.gz`
-6. **Creates a draft GitHub Release** with:
+6. **Builds the EmulatorJS core** for the browser as WebAssembly, packaged as
+   `dingoo-emu-emulatorjs.zip` with the WebGL2 and legacy `.data` bundles
+7. **Creates a draft GitHub Release** with:
    - Auto-generated release notes (PRs and commits since the previous tag)
-   - A download table for standalone, libretro, Android, iOS, and webOS artifacts
+   - A download table for standalone, libretro, Android, iOS, webOS, and
+     EmulatorJS artifacts
    - All build artifacts attached
 
 ### 5. Review and publish the release
@@ -83,6 +86,7 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
    - `dingoo-emu-android-libretro.tar.gz`
    - `dingoo-emu-ios-libretro.tar.gz`
    - `dingoo-emu-webos-libretro.tar.gz`
+   - `dingoo-emu-emulatorjs.zip`
 5. Click **Publish release**
 
 ### 6. Sync `.info` file to upstream libretro-super

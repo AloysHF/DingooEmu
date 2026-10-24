@@ -29,7 +29,11 @@ impl log::Log for LibretroLogger {
             log::Level::Info => RETRO_LOG_INFO,
             log::Level::Debug | log::Level::Trace => RETRO_LOG_DEBUG,
         };
-        let text = format!("[DingooEmu] {}\n", record.args()).replace('%', "%%");
+        let text = format!("[DingooEmu] {}\n", record.args());
+        // Escaping only matters for the frontend's printf-style callback; the
+        // Emscripten stderr path prints the message verbatim.
+        #[cfg(not(target_os = "emscripten"))]
+        let text = text.replace('%', "%%");
         if let Ok(message) = CString::new(text) {
             callbacks::log(level, message.as_ptr());
         }

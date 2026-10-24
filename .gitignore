@@ -1,5 +1,7 @@
 tmp/
 target/
+out/
+site/data/
 .codegraph/
 .claude/
 .vscode/

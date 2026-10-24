@@ -66,11 +66,13 @@
       // nav
       'nav-features': '核心特性',
       'nav-games': '游戏库',
+      'nav-play': '在线试玩',
       'nav-arch': '技术架构',
       'nav-quickstart': '快速开始',
       // hero
       'hero-subtitle': '重温经典掌机游戏',
       'hero-desc': '用 Rust 编写的丁果 A320 与歌美 A330 模拟器，支持 MIPS32 和 ARM32/Thumb 原生软件',
+      'hero-play': '在线试玩',
       'hero-download': '下载',
       'hero-github': '查看源码',
       'hero-scroll': '向下滚动探索',
@@ -144,6 +146,7 @@
       // footer
       'footer-desc': '用 Rust 编写的丁果 A320 与歌美 A330 模拟器',
       'footer-project': '项目',
+      'footer-play': '在线试玩',
       'footer-contributing': '贡献指南',
       'footer-community': '社区',
       'footer-docs': '文档',
@@ -159,11 +162,13 @@
       // nav
       'nav-features': 'Features',
       'nav-games': 'Games',
+      'nav-play': 'Play Online',
       'nav-arch': 'Architecture',
       'nav-quickstart': 'Quick Start',
       // hero
       'hero-subtitle': 'Relive Classic Handheld Gaming',
       'hero-desc': 'A Rust emulator for Dingoo A320 and Gemei A330 native software with MIPS32 and ARM32/Thumb runtimes',
+      'hero-play': 'Play Online',
       'hero-download': 'Download',
       'hero-github': 'View Source',
       'hero-scroll': 'Scroll to explore',
@@ -237,6 +242,7 @@
       // footer
       'footer-desc': 'A Rust emulator for Dingoo A320 and Gemei A330 software',
       'footer-project': 'Project',
+      'footer-play': 'Play Online',
       'footer-contributing': 'Contributing',
       'footer-community': 'Community',
       'footer-docs': 'Docs',
