@@ -42,3 +42,10 @@ cranelift-native = "=0.136.0"
 opt-level = 3
 lto = true
 strip = true
+
+# Binaryen's Asyncify pass rejects the wasm exception-handling section that the
+# prebuilt std ships with, so the Emscripten build compiles std from source
+# with `-Zbuild-std` and needs panics to abort.
+[profile.wasm-release]
+inherits = "release"
+panic = "abort"

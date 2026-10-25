@@ -12,7 +12,9 @@ license.workspace = true
 # named `dingooemu` (matching CORENAME in .gitlab-ci.yml). For local RetroArch
 # installs, rename the produced cdylib to dingooemu_libretro.<ext> manually.
 name = "dingooemu"
-crate-type = ["cdylib"]
+# `staticlib` is only used by the EmulatorJS build, which links the core into
+# the wasm frontend; native builds keep producing the cdylib.
+crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 log.workspace = true

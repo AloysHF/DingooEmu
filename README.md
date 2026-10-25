@@ -52,6 +52,7 @@ identifiers, limitations, and reproducible checks.
 - **Screenshot mode** — Headless frame capture for automated testing and preview generation
 - **Batch screenshot** — Process multiple `.app` files with `scripts/batch-screenshots.ps1`
 - **RetroArch integration** — libretro core with live screen-orientation and volume options, asynchronous audio delivery, 60 Hz game pacing on high-refresh-rate displays, RetroPad input, reset, persistent files, save states, cheats, and memory access
+- **Browser play** — EmulatorJS core compiled to WebAssembly, with a ready-to-use [online player](https://AloysHF.github.io/DingooEmu/play.html) that runs self-contained `.app`, `.cc`, `.c2s`, and `.c3s` files without uploading them
 - **Cross-platform** — Windows, Linux, macOS
 
 ## Usage
@@ -80,6 +81,15 @@ Downloader, or install the release files manually, then load an `.app`, `.cc`,
 
 See the [RetroArch Core](docs/RetroArch-Core.md) guide for installation,
 supported platforms and features, RetroPad mapping, core options, and cheats.
+
+### Browser (EmulatorJS)
+
+Open <https://AloysHF.github.io/DingooEmu/play.html> and select a game file; it
+runs locally in the browser through the DingooEmu WebAssembly core. Nothing is
+uploaded.
+
+See the [EmulatorJS Core](docs/EmulatorJS-Core.md) guide for embedding the core
+in your own EmulatorJS deployment, bundle contents, and browser controls.
 
 ## Building
 
@@ -110,6 +120,22 @@ into RetroArch's `cores/` directory.
 For Android cross-compilation, see
 [Android Libretro Core](docs/Android-Libretro-Core.md). For iOS, see
 [iOS Libretro Core](docs/iOS-Libretro-Core.md).
+
+### EmulatorJS Core (for the browser)
+
+The browser core links the libretro core into EmulatorJS's RetroArch fork. It
+needs the `wasm32-unknown-emscripten` target, an activated emsdk, `p7zip`, and
+the pinned nightly toolchain, because std must be rebuilt with `panic=abort`:
+
+```bash
+cargo +nightly build -p dingooemu-libretro \
+  --target wasm32-unknown-emscripten --profile wasm-release \
+  -Zbuild-std=std,panic_abort
+scripts/build-emulatorjs-core.sh
+```
+
+The bundle is written to `out/dingoo-emu-emulatorjs.zip`. See
+[EmulatorJS Core](docs/EmulatorJS-Core.md) for details.
 
 ## Testing
 
@@ -154,7 +180,7 @@ crates/
 ├── dingooemu/                   # Standalone binary (-> dingoo-emu)
 │   └── src/
 │       └── main.rs              # Window loop and CLI front-end
-└── dingooemu-libretro/          # libretro cdylib (-> dingooemu_libretro.{dll,so,dylib})
+└── dingooemu-libretro/          # libretro core (cdylib + EmulatorJS staticlib)
     ├── dingooemu_libretro.info  # RetroArch core metadata
     └── src/
         ├── lib.rs               # cdylib crate root

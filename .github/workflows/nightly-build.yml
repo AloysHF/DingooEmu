@@ -347,9 +347,59 @@ jobs:
           path: dingoo-emu-webos-libretro.tar.gz
           retention-days: 7
 
+  build-emulatorjs:
+    name: Build EmulatorJS core
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # -Zbuild-std needs nightly. Rebuilding std with panic=abort keeps wasm
+      # exception handling out of the module: Binaryen's Asyncify pass aborts
+      # on EH instructions.
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-10
+          targets: wasm32-unknown-emscripten
+          components: rust-src
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.74
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          key: nightly-emulatorjs
+
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full zip
+
+      - name: Build wasm staticlib
+        run: >
+          cargo build -p dingooemu-libretro
+          --target wasm32-unknown-emscripten --profile wasm-release
+          -Zbuild-std=std,panic_abort
+
+      - name: Build EmulatorJS core bundles
+        run: |
+          # Keep the RetroArch build tree out of target/: rust-cache archives
+          # target/ and restores it without .git, which breaks the checkout.
+          rm -rf target/emulatorjs-build
+          scripts/build-emulatorjs-core.sh --work-dir "$RUNNER_TEMP/emulatorjs-build"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dingoo-emu-emulatorjs
+          path: out/dingoo-emu-emulatorjs.zip
+          retention-days: 7
+
   release:
     name: Publish Nightly Release
-    needs: [build, build-android, build-ios, build-webos]
+    needs: [build, build-android, build-ios, build-webos, build-emulatorjs]
     runs-on: ubuntu-latest
     steps:
       - name: Compute version metadata
@@ -399,6 +449,9 @@ jobs:
           - Android libretro core (\`dingoo-emu-android-libretro.tar.gz\`) with arm64-v8a, armeabi-v7a, x86 and x86_64 ABIs
           - iOS libretro core (\`dingoo-emu-ios-libretro.tar.gz\`) for real devices (arm64) and simulators
           - webOS libretro core (\`dingoo-emu-webos-libretro.tar.gz\`) for ARMv7 TVs
+          - EmulatorJS core (\`dingoo-emu-emulatorjs.zip\`): \`cores/dingooemu-wasm.data\`,
+            \`cores/dingooemu-legacy-wasm.data\` and \`cores/reports/dingooemu.json\`, ready
+            to drop into EmulatorJS's \`data/\` directory
 
           ⚠️ Unsigned build: Windows SmartScreen / macOS Gatekeeper may block on first launch.
           EOF
