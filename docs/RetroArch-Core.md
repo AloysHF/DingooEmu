@@ -112,6 +112,9 @@ paths are normalized inside that directory; parent-directory traversal is
 rejected. Modified files are flushed when the guest closes them and when the
 core resets or unloads content. Guest reads support seeking from the beginning,
 current position, or end of a file, including data appended to A330 packages.
+The core never writes saves next to the content, whose path may be a temporary
+copy in app-cache frontends; content is refused when the frontend does not
+provide a save directory.
 
 If A330 software exits while its last frame is still a single solid color, the
 core submits a guest-exit panel instead. The panel includes the last available
@@ -128,6 +131,12 @@ Each state contains a format version, content checksum, payload length, and
 payload checksum. States for different content and damaged or incompatible
 states are rejected without changing the running emulator. The fixed state
 capacity is selected per runtime because the A330 memory map is larger.
+
+The serialized buffer is wrapped in a libretro save-state envelope: the 4-byte
+magic `DING` followed by the little-endian format version (currently `1`).
+Loading a state with a different magic or version is rejected with a log
+warning, so states from older or newer core builds never restore into the wrong
+fields.
 
 ## Cheats
 

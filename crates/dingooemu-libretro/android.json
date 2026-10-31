@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "core": "dingooemu",
+  "so_name": "libdingooemu.so",
+  "system": "dingoo",
+  "display_name": {
+    "en": "Dingoo A320 / Gemei A330",
+    "zh": "丁果 A320 / 歌美 A330"
+  },
+  "short_name": "Dingoo",
+  "manufacturer": "Dingoo Digital",
+  "supported_extensions": ["app", "cc", "c2s", "c3s"],
+  "save_state_format": 1,
+  "firmware": [],
+  "input": {
+    "preset": "dpad-abcd-select"
+  },
+  "video": {
+    "orientation": "landscape",
+    "pixel_format": "rgb565"
+  },
+  "notes": {
+    "en": "Runs Dingoo A320 .app software and Gemei A330 .cc, .c2s and .c3s software. No BIOS or firmware file is required; battery saves go to the frontend save directory.",
+    "zh": "运行丁果 A320 的 .app 程序，以及歌美 A330 的 .cc、.c2s 和 .c3s 程序。无需 BIOS 或固件文件；电池存档写入前端的存档目录。"
+  }
+}
