@@ -153,16 +153,20 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
     register_input_descriptors();
     set_performance_level();
 
+    // The content path may point at a throwaway copy of the user's document (an
+    // Android app cache directory), so guest save files may only be written to
+    // the frontend's persistent save directory. Refuse the load when the
+    // frontend cannot name one instead of falling back to the content
+    // directory, which would silently discard the user's saves.
+    let Some(save_directory) = frontend_directory(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY) else {
+        log::error!("Frontend did not provide a save directory; refusing to load content");
+        return false;
+    };
+
     match Emulator::from_path(path) {
         Ok(mut emulator) => {
-            let save_directory = frontend_directory(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY);
-            if let Some(save_directory) = save_directory.as_ref() {
-                emulator.set_save_directory(save_directory);
-            }
-            let diagnostic_directory = save_directory
-                .as_deref()
-                .or_else(|| std::path::Path::new(path).parent());
-            crate::diagnostics::configure(diagnostic_directory, path, OUTPUT_SAMPLE_RATE);
+            emulator.set_save_directory(&save_directory);
+            crate::diagnostics::configure(Some(&save_directory), path, OUTPUT_SAMPLE_RATE);
             apply_core_options(&mut emulator);
             emulator.start();
             unsafe { EMULATOR = Some(emulator) };
@@ -1064,6 +1068,8 @@ mod tests {
             size: 0,
             meta: ptr::null(),
         };
+        *SAVE_DIRECTORY.lock().unwrap() =
+            Some(CString::new(std::env::temp_dir().to_string_lossy().as_bytes()).unwrap());
         retro_set_environment(Some(test_environment));
         retro_set_video_refresh(Some(test_video_refresh));
         retro_set_input_poll(Some(test_input_poll));
@@ -1096,8 +1102,48 @@ mod tests {
         }
         retro_deinit();
         std::fs::remove_file(path).unwrap();
+        *SAVE_DIRECTORY.lock().unwrap() = None;
 
         assert_eq!(frame_counts, [60, 60]);
+    }
+
+    #[test]
+    fn refuses_to_load_without_a_frontend_save_directory() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let test_directory = std::env::temp_dir().join(format!(
+            "dingooemu-libretro-no-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&test_directory).unwrap();
+        let path = test_directory.join("content.app");
+        std::fs::write(&path, minimal_app_bytes()).unwrap();
+        let path_string = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        *SAVE_DIRECTORY.lock().unwrap() = None;
+        let info = RetroGameInfo {
+            path: path_string.as_ptr(),
+            data: ptr::null(),
+            size: 0,
+            meta: ptr::null(),
+        };
+
+        retro_set_environment(Some(test_environment));
+        retro_init();
+        // Without a persistent save directory the core must refuse the load
+        // rather than write saves next to the (possibly temporary) content.
+        assert!(!retro_load_game(&info));
+        unsafe { assert!(EMULATOR.is_none()) };
+        let entries: Vec<String> = std::fs::read_dir(&test_directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, ["content.app"]);
+        retro_deinit();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(test_directory).unwrap();
     }
 
     #[test]
