@@ -517,10 +517,38 @@ pub extern "C" fn retro_reset() {
     });
 }
 
+/// Save-state envelope: 4-byte magic followed by a little-endian format
+/// version. Bump the version whenever the core's state layout changes so stale
+/// states are rejected instead of silently restoring into the wrong fields.
+const SAVE_STATE_MAGIC: [u8; 4] = *b"DING";
+const SAVE_STATE_FORMAT: u32 = 1;
+const SAVE_STATE_HEADER_LEN: usize = SAVE_STATE_MAGIC.len() + std::mem::size_of::<u32>();
+
+fn write_save_state_header(buffer: &mut [u8]) {
+    buffer[..SAVE_STATE_MAGIC.len()].copy_from_slice(&SAVE_STATE_MAGIC);
+    buffer[SAVE_STATE_MAGIC.len()..SAVE_STATE_HEADER_LEN]
+        .copy_from_slice(&SAVE_STATE_FORMAT.to_le_bytes());
+}
+
+/// Returns `Some(payload)` when the envelope matches this build's format.
+fn read_save_state_payload(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < SAVE_STATE_HEADER_LEN || data[..SAVE_STATE_MAGIC.len()] != SAVE_STATE_MAGIC {
+        return None;
+    }
+    let version = u32::from_le_bytes(
+        data[SAVE_STATE_MAGIC.len()..SAVE_STATE_HEADER_LEN]
+            .try_into()
+            .ok()?,
+    );
+    (version == SAVE_STATE_FORMAT).then(|| &data[SAVE_STATE_HEADER_LEN..])
+}
+
 #[no_mangle]
 pub extern "C" fn retro_serialize_size() -> usize {
     guard(0, || {
-        unsafe { EMULATOR.as_ref() }.map_or(0, Emulator::serialized_state_size)
+        unsafe { EMULATOR.as_ref() }.map_or(0, |emulator| {
+            emulator.serialized_state_size() + SAVE_STATE_HEADER_LEN
+        })
     })
 }
 
@@ -530,11 +558,13 @@ pub extern "C" fn retro_serialize(data: *mut c_void, size: usize) -> bool {
         let Some(emulator) = (unsafe { EMULATOR.as_ref() }) else {
             return false;
         };
-        if data.is_null() || size < emulator.serialized_state_size() {
+        let required = emulator.serialized_state_size() + SAVE_STATE_HEADER_LEN;
+        if data.is_null() || size < required {
             return false;
         }
         let output = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), size) };
-        match emulator.serialize_state(output) {
+        write_save_state_header(output);
+        match emulator.serialize_state(&mut output[SAVE_STATE_HEADER_LEN..]) {
             Ok(()) => true,
             Err(error) => {
                 log::error!("Failed to serialize state: {error}");
@@ -550,11 +580,15 @@ pub extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> bool {
         let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
             return false;
         };
-        if data.is_null() || size < emulator.serialized_state_size() {
+        if data.is_null() || size < SAVE_STATE_HEADER_LEN {
             return false;
         }
         let input = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) };
-        match emulator.unserialize_state(input) {
+        let Some(payload) = read_save_state_payload(input) else {
+            log::warn!("Rejecting save state with an unknown magic or format version");
+            return false;
+        };
+        match emulator.unserialize_state(payload) {
             Ok(()) => {
                 crate::frame_pacing::reset();
                 apply_core_options(emulator);
@@ -1089,6 +1123,32 @@ mod tests {
             id,
             RETRO_DEVICE_ID_JOYPAD_A | RETRO_DEVICE_ID_JOYPAD_START
         ))
+    }
+
+    #[test]
+    fn save_state_envelope_rejects_other_versions() {
+        let mut buffer = [0_u8; SAVE_STATE_HEADER_LEN + 3];
+        buffer[SAVE_STATE_HEADER_LEN..].copy_from_slice(&[1, 2, 3]);
+        write_save_state_header(&mut buffer);
+        assert_eq!(
+            read_save_state_payload(&buffer),
+            Some(&[1_u8, 2, 3][..]),
+            "a freshly written envelope must be accepted"
+        );
+
+        buffer[SAVE_STATE_MAGIC.len()] = 0xFF;
+        assert_eq!(
+            read_save_state_payload(&buffer),
+            None,
+            "a state from another format version must be rejected"
+        );
+
+        let truncated = [0_u8; SAVE_STATE_HEADER_LEN - 1];
+        assert_eq!(
+            read_save_state_payload(&truncated),
+            None,
+            "a buffer shorter than the envelope must be rejected"
+        );
     }
 
     #[test]
@@ -1724,7 +1784,10 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(retro_serialize_size(), 128 * 1024 * 1024);
+        assert_eq!(
+            retro_serialize_size(),
+            128 * 1024 * 1024 + SAVE_STATE_HEADER_LEN
+        );
         let mut state = vec![0u8; retro_serialize_size()];
         assert!(retro_serialize(state.as_mut_ptr().cast(), state.len()));
         unsafe {
