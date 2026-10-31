@@ -33,10 +33,16 @@ minifb = "=0.29.0"
 gilrs = "=0.11.2"
 rodio = { version = "=0.23.0", features = ["mp3"] }
 env_logger = "=0.11.11"
-cranelift = "=0.136.0"
-cranelift-jit = "=0.136.0"
-cranelift-module = "=0.136.0"
-cranelift-native = "=0.136.0"
+# All cranelift crates are exact-pinned and must be upgraded in lockstep:
+# cranelift-jit pins its wasmtime-internal-* dependencies to exact versions
+# per release line, so a partial upgrade leaves two cranelift-codegen
+# versions in the graph and breaks the JIT build with mismatched trait
+# errors. The `cranelift` group in .github/dependabot.yml keeps Dependabot
+# bumps aligned; keep all four lines in sync for manual bumps too.
+cranelift = "=0.137.0"
+cranelift-jit = "=0.137.0"
+cranelift-module = "=0.137.0"
+cranelift-native = "=0.137.0"
 
 [profile.release]
 opt-level = 3
