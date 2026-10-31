@@ -80,6 +80,8 @@ and [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk):
 cargo install cargo-ndk
 rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 export ANDROID_NDK_HOME=/path/to/android-ndk
+# Android 15 devices reject libraries that are not 16 KB page aligned.
+export RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
 
 # Build all four ABIs (artifacts land in target/<triple>/release/)
 cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 --platform 21 \
@@ -89,3 +91,15 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 --platform 21 \
 Each ABI produces `libdingooemu.so`; rename it to
 `dingooemu_libretro_android.so` when installing into RetroArch on Android.
 The CI release workflow performs this packaging automatically.
+
+## All-in-one frontends
+
+`crates/dingooemu-libretro/android.json` describes the core for frontends that
+bundle several emulators in one application, such as
+[RetroDroid](https://github.com/AloysHF/RetroDroid). It reports the system id
+`dingoo`, the library name `libdingooemu.so`, the `.app`/`.cc`/`.c2s`/`.c3s`
+content extensions, save-state format version `1` and the `dpad-abcd-select`
+input layout. The core requires no BIOS or firmware file: every game boots from
+its own content package, and battery saves are written to the frontend's save
+directory.
+
