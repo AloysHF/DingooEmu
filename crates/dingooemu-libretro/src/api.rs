@@ -128,17 +128,18 @@ pub extern "C" fn retro_get_region() -> c_uint {
 #[no_mangle]
 pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
     let Some(info) = (unsafe { info.as_ref() }) else {
-        return false;
+        return fail("DingooEmu: the frontend passed no game information.");
     };
     if info.path.is_null() {
-        return false;
+        return fail("DingooEmu: the frontend passed no content path.");
     }
 
     let path = match unsafe { CStr::from_ptr(info.path) }.to_str() {
         Ok(path) => path,
         Err(error) => {
-            log::error!("Content path is not valid UTF-8: {error}");
-            return false;
+            return fail(&format!(
+                "DingooEmu: the content path is not valid UTF-8 ({error})."
+            ));
         }
     };
     update_diagnostic_audio_buffer_status(false);
@@ -147,8 +148,7 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
     unsafe { EMULATOR = None };
 
     if !set_pixel_format() {
-        log::error!("Frontend rejected the required RGB565 pixel format");
-        return false;
+        return fail("DingooEmu: this frontend does not support RGB565 video.");
     }
     register_input_descriptors();
     set_performance_level();
@@ -159,8 +159,9 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
     // frontend cannot name one instead of falling back to the content
     // directory, which would silently discard the user's saves.
     let Some(save_directory) = frontend_directory(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY) else {
-        log::error!("Frontend did not provide a save directory; refusing to load content");
-        return false;
+        return fail(
+            "DingooEmu: the frontend did not provide a save directory, so game saves cannot be stored.",
+        );
     };
 
     match Emulator::from_path(path) {
@@ -179,10 +180,21 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
         }
         Err(error) => {
             crate::diagnostics::finish(None);
-            log::error!("Failed to load content: {error}");
-            false
+            fail(&format!(
+                "DingooEmu: failed to load this content.\n{error}\n\nSupported content: .app for the Dingoo A320; .cc, .c2s and .c3s for the Gemei A330."
+            ))
         }
     }
+}
+
+/// Report a load failure to both the log and the frontend's on-screen message.
+///
+/// A silent `false` from `retro_load_game` shows up as a black screen in
+/// mobile frontends, so every user-reachable failure names its cause.
+fn fail(message: &str) -> bool {
+    log::error!("{message}");
+    callbacks::show_message(message, 240);
+    false
 }
 
 #[no_mangle]
@@ -191,7 +203,7 @@ pub extern "C" fn retro_load_game_special(
     _info: *const RetroGameInfo,
     _num_info: usize,
 ) -> bool {
-    false
+    fail("DingooEmu: loading multiple content files at once is not supported.")
 }
 
 #[no_mangle]
@@ -898,6 +910,7 @@ mod tests {
     static SYSTEM_RAM_MAP_START: AtomicUsize = AtomicUsize::new(usize::MAX);
     static VIDEO_RAM_MAP_START: AtomicUsize = AtomicUsize::new(usize::MAX);
     static SAVE_DIRECTORY: Mutex<Option<CString>> = Mutex::new(None);
+    static MESSAGE_SHOWN: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "C" fn test_environment(command: u32, data: *mut c_void) -> bool {
         match command {
@@ -970,6 +983,14 @@ mod tests {
             }
             RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE => false,
             RETRO_ENVIRONMENT_GET_LOG_INTERFACE => false,
+            RETRO_ENVIRONMENT_SET_MESSAGE => {
+                let message = &*data.cast::<RetroMessage>();
+                MESSAGE_SHOWN.store(
+                    !message.msg.is_null() && message.frames > 0,
+                    Ordering::SeqCst,
+                );
+                true
+            }
             RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY => {
                 let directory = SAVE_DIRECTORY.lock().unwrap();
                 let Some(directory) = directory.as_ref() else {
@@ -1142,6 +1163,45 @@ mod tests {
             .collect();
         assert_eq!(entries, ["content.app"]);
         retro_deinit();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(test_directory).unwrap();
+    }
+
+    #[test]
+    fn reports_unsupported_content_to_the_frontend() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let test_directory = std::env::temp_dir().join(format!(
+            "dingooemu-libretro-bad-content-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&test_directory).unwrap();
+        let path = test_directory.join("broken.app");
+        std::fs::write(&path, b"this is not a Dingoo package").unwrap();
+        let path_string = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let save_directory = CString::new(test_directory.to_string_lossy().as_bytes()).unwrap();
+        *SAVE_DIRECTORY.lock().unwrap() = Some(save_directory);
+        MESSAGE_SHOWN.store(false, Ordering::SeqCst);
+        let info = RetroGameInfo {
+            path: path_string.as_ptr(),
+            data: ptr::null(),
+            size: 0,
+            meta: ptr::null(),
+        };
+
+        retro_set_environment(Some(test_environment));
+        retro_init();
+        assert!(!retro_load_game(&info));
+        assert!(
+            MESSAGE_SHOWN.load(Ordering::SeqCst),
+            "a failed load must show an on-screen message"
+        );
+        unsafe { assert!(EMULATOR.is_none()) };
+        retro_deinit();
+        *SAVE_DIRECTORY.lock().unwrap() = None;
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(test_directory).unwrap();
     }
