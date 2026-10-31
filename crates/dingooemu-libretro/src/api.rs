@@ -30,6 +30,26 @@ static PORTRAIT_MODE: AtomicBool = AtomicBool::new(false);
 static VIDEO_GEOMETRY_DIRTY: AtomicBool = AtomicBool::new(false);
 static PORTRAIT_FRAMEBUFFER: Mutex<[u8; FRAMEBUFFER_SIZE]> = Mutex::new([0; FRAMEBUFFER_SIZE]);
 
+/// Run `body`, turning a panic into `fallback`.
+///
+/// A panic must never unwind across the C ABI: the frontend is a host process
+/// (RetroArch, a mobile app) that would be torn down with the core. Swallowing
+/// the panic keeps the session recoverable and leaves a log entry behind.
+fn guard<T>(fallback: T, body: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_owned());
+            log::error!("DingooEmu libretro entry point panicked: {detail}");
+            fallback
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn retro_set_environment(callback: RetroEnvironmentCallback) {
     callbacks::set_environment(callback);
@@ -63,22 +83,26 @@ pub extern "C" fn retro_set_input_state(callback: RetroInputStateCallback) {
 
 #[no_mangle]
 pub extern "C" fn retro_init() {
-    PORTRAIT_MODE.store(false, Ordering::Release);
-    VIDEO_GEOMETRY_DIRTY.store(false, Ordering::Release);
-    callbacks::initialize_log_interface();
-    crate::logger::initialize();
-    log::info!("Libretro core initialized");
+    guard((), || {
+        PORTRAIT_MODE.store(false, Ordering::Release);
+        VIDEO_GEOMETRY_DIRTY.store(false, Ordering::Release);
+        callbacks::initialize_log_interface();
+        crate::logger::initialize();
+        log::info!("Libretro core initialized");
+    });
 }
 
 #[no_mangle]
 pub extern "C" fn retro_deinit() {
-    update_diagnostic_audio_buffer_status(false);
-    unregister_async_audio();
-    crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
-    unsafe { EMULATOR = None };
-    PORTRAIT_MODE.store(false, Ordering::Release);
-    VIDEO_GEOMETRY_DIRTY.store(false, Ordering::Release);
-    log::info!("Libretro core deinitialized");
+    guard((), || {
+        update_diagnostic_audio_buffer_status(false);
+        unregister_async_audio();
+        crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
+        unsafe { EMULATOR = None };
+        PORTRAIT_MODE.store(false, Ordering::Release);
+        VIDEO_GEOMETRY_DIRTY.store(false, Ordering::Release);
+        log::info!("Libretro core deinitialized");
+    });
 }
 
 #[no_mangle]
@@ -101,16 +125,18 @@ pub extern "C" fn retro_get_system_info(info: *mut RetroSystemInfo) {
 
 #[no_mangle]
 pub extern "C" fn retro_get_system_av_info(info: *mut RetroSystemAvInfo) {
-    let Some(info) = (unsafe { info.as_mut() }) else {
-        return;
-    };
+    guard((), || {
+        let Some(info) = (unsafe { info.as_mut() }) else {
+            return;
+        };
 
-    info.geometry = video_geometry(screen_orientation());
-    VIDEO_GEOMETRY_DIRTY.store(false, Ordering::Release);
-    info.timing = RetroSystemTiming {
-        fps: FRAMES_PER_SECOND,
-        sample_rate: f64::from(OUTPUT_SAMPLE_RATE),
-    };
+        info.geometry = video_geometry(screen_orientation());
+        VIDEO_GEOMETRY_DIRTY.store(false, Ordering::Release);
+        info.timing = RetroSystemTiming {
+            fps: FRAMES_PER_SECOND,
+            sample_rate: f64::from(OUTPUT_SAMPLE_RATE),
+        };
+    });
 }
 
 #[no_mangle]
@@ -127,64 +153,66 @@ pub extern "C" fn retro_get_region() -> c_uint {
 
 #[no_mangle]
 pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
-    let Some(info) = (unsafe { info.as_ref() }) else {
-        return fail("DingooEmu: the frontend passed no game information.");
-    };
-    if info.path.is_null() {
-        return fail("DingooEmu: the frontend passed no content path.");
-    }
-
-    let path = match unsafe { CStr::from_ptr(info.path) }.to_str() {
-        Ok(path) => path,
-        Err(error) => {
-            return fail(&format!(
-                "DingooEmu: the content path is not valid UTF-8 ({error})."
-            ));
+    guard(false, || {
+        let Some(info) = (unsafe { info.as_ref() }) else {
+            return fail("DingooEmu: the frontend passed no game information.");
+        };
+        if info.path.is_null() {
+            return fail("DingooEmu: the frontend passed no content path.");
         }
-    };
-    update_diagnostic_audio_buffer_status(false);
-    unregister_async_audio();
-    crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
-    unsafe { EMULATOR = None };
 
-    if !set_pixel_format() {
-        return fail("DingooEmu: this frontend does not support RGB565 video.");
-    }
-    register_input_descriptors();
-    set_performance_level();
-
-    // The content path may point at a throwaway copy of the user's document (an
-    // Android app cache directory), so guest save files may only be written to
-    // the frontend's persistent save directory. Refuse the load when the
-    // frontend cannot name one instead of falling back to the content
-    // directory, which would silently discard the user's saves.
-    let Some(save_directory) = frontend_directory(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY) else {
-        return fail(
-            "DingooEmu: the frontend did not provide a save directory, so game saves cannot be stored.",
-        );
-    };
-
-    match Emulator::from_path(path) {
-        Ok(mut emulator) => {
-            emulator.set_save_directory(&save_directory);
-            crate::diagnostics::configure(Some(&save_directory), path, OUTPUT_SAMPLE_RATE);
-            apply_core_options(&mut emulator);
-            emulator.start();
-            unsafe { EMULATOR = Some(emulator) };
-            register_async_audio();
-            if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
-                register_memory_maps(emulator);
+        let path = match unsafe { CStr::from_ptr(info.path) }.to_str() {
+            Ok(path) => path,
+            Err(error) => {
+                return fail(&format!(
+                    "DingooEmu: the content path is not valid UTF-8 ({error})."
+                ));
             }
-            log::info!("Loaded content: {path}");
-            true
+        };
+        update_diagnostic_audio_buffer_status(false);
+        unregister_async_audio();
+        crate::diagnostics::finish(unsafe { EMULATOR.as_ref() });
+        unsafe { EMULATOR = None };
+
+        if !set_pixel_format() {
+            return fail("DingooEmu: this frontend does not support RGB565 video.");
         }
-        Err(error) => {
-            crate::diagnostics::finish(None);
-            fail(&format!(
-                "DingooEmu: failed to load this content.\n{error}\n\nSupported content: .app for the Dingoo A320; .cc, .c2s and .c3s for the Gemei A330."
-            ))
+        register_input_descriptors();
+        set_performance_level();
+
+        // The content path may point at a throwaway copy of the user's document
+        // (an Android app cache directory), so guest save files may only be
+        // written to the frontend's persistent save directory. Refuse the load
+        // when the frontend cannot name one instead of falling back to the
+        // content directory, which would silently discard the user's saves.
+        let Some(save_directory) = frontend_directory(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY) else {
+            return fail(
+                "DingooEmu: the frontend did not provide a save directory, so game saves cannot be stored.",
+            );
+        };
+
+        match Emulator::from_path(path) {
+            Ok(mut emulator) => {
+                emulator.set_save_directory(&save_directory);
+                crate::diagnostics::configure(Some(&save_directory), path, OUTPUT_SAMPLE_RATE);
+                apply_core_options(&mut emulator);
+                emulator.start();
+                unsafe { EMULATOR = Some(emulator) };
+                register_async_audio();
+                if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
+                    register_memory_maps(emulator);
+                }
+                log::info!("Loaded content: {path}");
+                true
+            }
+            Err(error) => {
+                crate::diagnostics::finish(None);
+                fail(&format!(
+                    "DingooEmu: failed to load this content.\n{error}\n\nSupported content: .app for the Dingoo A320; .cc, .c2s and .c3s for the Gemei A330."
+                ))
+            }
         }
-    }
+    })
 }
 
 /// Report a load failure to both the log and the frontend's on-screen message.
@@ -203,98 +231,104 @@ pub extern "C" fn retro_load_game_special(
     _info: *const RetroGameInfo,
     _num_info: usize,
 ) -> bool {
-    fail("DingooEmu: loading multiple content files at once is not supported.")
+    guard(false, || {
+        fail("DingooEmu: loading multiple content files at once is not supported.")
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn retro_unload_game() {
-    update_diagnostic_audio_buffer_status(false);
-    unregister_async_audio();
-    if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
-        emulator.flush_save_files();
-        crate::diagnostics::finish(Some(emulator));
-    } else {
-        crate::diagnostics::finish(None);
-    }
-    unsafe { EMULATOR = None };
+    guard((), || {
+        update_diagnostic_audio_buffer_status(false);
+        unregister_async_audio();
+        if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
+            emulator.flush_save_files();
+            crate::diagnostics::finish(Some(emulator));
+        } else {
+            crate::diagnostics::finish(None);
+        }
+        unsafe { EMULATOR = None };
+    });
 }
 
 #[no_mangle]
 pub extern "C" fn retro_run() {
-    if core_options_changed() {
-        if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
-            apply_core_options(emulator);
-        }
-    }
-    update_video_geometry();
-    let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
-        return;
-    };
-
-    callbacks::input_poll();
-    let buttons =
-        query_joypad_buttons(|id| callbacks::input_state(0, RETRO_DEVICE_JOYPAD, 0, id) != 0);
-    emulator.set_buttons(buttons);
-
-    if !crate::frame_pacing::should_advance() {
-        submit_video_frame(emulator);
-        return;
-    }
-
-    let diagnostic_timer = crate::diagnostics::frame_timer();
-    if let Err(error) = emulator.tick() {
-        log::error!("Frame execution failed; requesting frontend shutdown: {error}");
-        callbacks::environment(RETRO_ENVIRONMENT_SHUTDOWN, ptr::null_mut());
-        return;
-    }
-
-    let exited = !emulator.is_running();
-
-    let Some(diagnostic_timer) = diagnostic_timer else {
-        submit_video_frame(emulator);
-
-        let samples = emulator.take_audio_samples();
-        if crate::audio_output::enqueue(&samples).is_none()
-            && callbacks::audio_sample_batch(samples.as_ptr(), samples.len() / 2).is_none()
-        {
-            for sample in samples.as_chunks::<2>().0.iter() {
-                callbacks::audio_sample(sample[0], sample[1]);
+    guard((), || {
+        if core_options_changed() {
+            if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
+                apply_core_options(emulator);
             }
         }
-        request_shutdown_if_exited(exited);
-        return;
-    };
-    let tick_elapsed = diagnostic_timer.elapsed();
+        update_video_geometry();
+        let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
+            return;
+        };
 
-    let video_timer = Instant::now();
-    submit_video_frame(emulator);
-    let video_elapsed = video_timer.elapsed();
+        callbacks::input_poll();
+        let buttons =
+            query_joypad_buttons(|id| callbacks::input_state(0, RETRO_DEVICE_JOYPAD, 0, id) != 0);
+        emulator.set_buttons(buttons);
 
-    let audio_timer = Instant::now();
-    let samples = emulator.take_audio_samples();
-    let audio_frames_requested = samples.len() / 2;
-    let audio_frames_accepted = crate::audio_output::enqueue(&samples).unwrap_or_else(|| {
-        callbacks::audio_sample_batch(samples.as_ptr(), audio_frames_requested).map_or_else(
-            || {
+        if !crate::frame_pacing::should_advance() {
+            submit_video_frame(emulator);
+            return;
+        }
+
+        let diagnostic_timer = crate::diagnostics::frame_timer();
+        if let Err(error) = emulator.tick() {
+            log::error!("Frame execution failed; requesting frontend shutdown: {error}");
+            callbacks::environment(RETRO_ENVIRONMENT_SHUTDOWN, ptr::null_mut());
+            return;
+        }
+
+        let exited = !emulator.is_running();
+
+        let Some(diagnostic_timer) = diagnostic_timer else {
+            submit_video_frame(emulator);
+
+            let samples = emulator.take_audio_samples();
+            if crate::audio_output::enqueue(&samples).is_none()
+                && callbacks::audio_sample_batch(samples.as_ptr(), samples.len() / 2).is_none()
+            {
                 for sample in samples.as_chunks::<2>().0.iter() {
                     callbacks::audio_sample(sample[0], sample[1]);
                 }
-                audio_frames_requested
-            },
-            |accepted| accepted.min(audio_frames_requested),
-        )
+            }
+            request_shutdown_if_exited(exited);
+            return;
+        };
+        let tick_elapsed = diagnostic_timer.elapsed();
+
+        let video_timer = Instant::now();
+        submit_video_frame(emulator);
+        let video_elapsed = video_timer.elapsed();
+
+        let audio_timer = Instant::now();
+        let samples = emulator.take_audio_samples();
+        let audio_frames_requested = samples.len() / 2;
+        let audio_frames_accepted = crate::audio_output::enqueue(&samples).unwrap_or_else(|| {
+            callbacks::audio_sample_batch(samples.as_ptr(), audio_frames_requested).map_or_else(
+                || {
+                    for sample in samples.as_chunks::<2>().0.iter() {
+                        callbacks::audio_sample(sample[0], sample[1]);
+                    }
+                    audio_frames_requested
+                },
+                |accepted| accepted.min(audio_frames_requested),
+            )
+        });
+        let audio_elapsed = audio_timer.elapsed();
+        crate::diagnostics::record_frame(
+            emulator,
+            tick_elapsed,
+            diagnostic_timer.elapsed(),
+            video_elapsed,
+            audio_elapsed,
+            audio_frames_requested,
+            audio_frames_accepted,
+        );
+        request_shutdown_if_exited(exited);
     });
-    let audio_elapsed = audio_timer.elapsed();
-    crate::diagnostics::record_frame(
-        emulator,
-        tick_elapsed,
-        diagnostic_timer.elapsed(),
-        video_elapsed,
-        audio_elapsed,
-        audio_frames_requested,
-        audio_frames_accepted,
-    );
-    request_shutdown_if_exited(exited);
 }
 
 fn screen_orientation() -> ScreenOrientation {
@@ -470,106 +504,122 @@ unsafe extern "C" fn frontend_frame_time(usec: i64) {
 
 #[no_mangle]
 pub extern "C" fn retro_reset() {
-    let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
-        return;
-    };
-    if let Err(error) = emulator.reset() {
-        log::error!("Reset failed: {error}");
-    } else {
-        crate::frame_pacing::reset();
-        apply_core_options(emulator);
-    }
+    guard((), || {
+        let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
+            return;
+        };
+        if let Err(error) = emulator.reset() {
+            log::error!("Reset failed: {error}");
+        } else {
+            crate::frame_pacing::reset();
+            apply_core_options(emulator);
+        }
+    });
 }
 
 #[no_mangle]
 pub extern "C" fn retro_serialize_size() -> usize {
-    unsafe { EMULATOR.as_ref() }.map_or(0, Emulator::serialized_state_size)
+    guard(0, || {
+        unsafe { EMULATOR.as_ref() }.map_or(0, Emulator::serialized_state_size)
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn retro_serialize(data: *mut c_void, size: usize) -> bool {
-    let Some(emulator) = (unsafe { EMULATOR.as_ref() }) else {
-        return false;
-    };
-    if data.is_null() || size < emulator.serialized_state_size() {
-        return false;
-    }
-    let output = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), size) };
-    match emulator.serialize_state(output) {
-        Ok(()) => true,
-        Err(error) => {
-            log::error!("Failed to serialize state: {error}");
-            false
+    guard(false, || {
+        let Some(emulator) = (unsafe { EMULATOR.as_ref() }) else {
+            return false;
+        };
+        if data.is_null() || size < emulator.serialized_state_size() {
+            return false;
         }
-    }
+        let output = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), size) };
+        match emulator.serialize_state(output) {
+            Ok(()) => true,
+            Err(error) => {
+                log::error!("Failed to serialize state: {error}");
+                false
+            }
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> bool {
-    let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
-        return false;
-    };
-    if data.is_null() || size < emulator.serialized_state_size() {
-        return false;
-    }
-    let input = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) };
-    match emulator.unserialize_state(input) {
-        Ok(()) => {
-            crate::frame_pacing::reset();
-            apply_core_options(emulator);
-            true
+    guard(false, || {
+        let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
+            return false;
+        };
+        if data.is_null() || size < emulator.serialized_state_size() {
+            return false;
         }
-        Err(error) => {
-            log::error!("Failed to unserialize state: {error}");
-            false
+        let input = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) };
+        match emulator.unserialize_state(input) {
+            Ok(()) => {
+                crate::frame_pacing::reset();
+                apply_core_options(emulator);
+                true
+            }
+            Err(error) => {
+                log::error!("Failed to unserialize state: {error}");
+                false
+            }
         }
-    }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn retro_cheat_reset() {
-    if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
-        emulator.clear_cheats();
-    }
+    guard((), || {
+        if let Some(emulator) = unsafe { EMULATOR.as_mut() } {
+            emulator.clear_cheats();
+        }
+    });
 }
 
 #[no_mangle]
 pub extern "C" fn retro_cheat_set(index: c_uint, enabled: bool, code: *const c_char) {
-    let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
-        return;
-    };
-    if code.is_null() {
-        log::warn!("Ignored null cheat code for slot {index}");
-        return;
-    }
-    let code = unsafe { CStr::from_ptr(code) }.to_string_lossy();
-    if let Err(error) = emulator.set_cheat(index, enabled, &code) {
-        log::warn!("Rejected cheat slot {index}: {error}");
-    }
+    guard((), || {
+        let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
+            return;
+        };
+        if code.is_null() {
+            log::warn!("Ignored null cheat code for slot {index}");
+            return;
+        }
+        let code = unsafe { CStr::from_ptr(code) }.to_string_lossy();
+        if let Err(error) = emulator.set_cheat(index, enabled, &code) {
+            log::warn!("Rejected cheat slot {index}: {error}");
+        }
+    });
 }
 
 #[no_mangle]
 pub extern "C" fn retro_get_memory_data(id: c_uint) -> *mut c_void {
-    let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
-        return ptr::null_mut();
-    };
-    match id & RETRO_MEMORY_MASK {
-        RETRO_MEMORY_SYSTEM_RAM => emulator.system_ram_mut().as_mut_ptr().cast(),
-        RETRO_MEMORY_VIDEO_RAM => emulator.video_ram_mut().as_mut_ptr().cast(),
-        _ => ptr::null_mut(),
-    }
+    guard(ptr::null_mut(), || {
+        let Some(emulator) = (unsafe { EMULATOR.as_mut() }) else {
+            return ptr::null_mut();
+        };
+        match id & RETRO_MEMORY_MASK {
+            RETRO_MEMORY_SYSTEM_RAM => emulator.system_ram_mut().as_mut_ptr().cast(),
+            RETRO_MEMORY_VIDEO_RAM => emulator.video_ram_mut().as_mut_ptr().cast(),
+            _ => ptr::null_mut(),
+        }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn retro_get_memory_size(id: c_uint) -> usize {
-    let Some(emulator) = (unsafe { EMULATOR.as_ref() }) else {
-        return 0;
-    };
-    match id & RETRO_MEMORY_MASK {
-        RETRO_MEMORY_SYSTEM_RAM => emulator.system_ram().len(),
-        RETRO_MEMORY_VIDEO_RAM => emulator.video_ram().len(),
-        _ => 0,
-    }
+    guard(0, || {
+        let Some(emulator) = (unsafe { EMULATOR.as_ref() }) else {
+            return 0;
+        };
+        match id & RETRO_MEMORY_MASK {
+            RETRO_MEMORY_SYSTEM_RAM => emulator.system_ram().len(),
+            RETRO_MEMORY_VIDEO_RAM => emulator.video_ram().len(),
+            _ => 0,
+        }
+    })
 }
 
 fn set_pixel_format() -> bool {
@@ -1039,6 +1089,12 @@ mod tests {
             id,
             RETRO_DEVICE_ID_JOYPAD_A | RETRO_DEVICE_ID_JOYPAD_START
         ))
+    }
+
+    #[test]
+    fn guard_converts_panics_into_fallback_values() {
+        assert_eq!(guard(7, || panic!("boom")), 7);
+        assert!(guard(false, || true));
     }
 
     #[test]
