@@ -117,7 +117,7 @@ pub extern "C" fn retro_get_system_info(info: *mut RetroSystemInfo) {
     };
 
     info.library_name = c"DingooEmu".as_ptr();
-    info.library_version = c"0.3.0".as_ptr();
+    info.library_version = concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char;
     info.valid_extensions = c"app|cc|c2s|c3s".as_ptr();
     info.need_fullpath = true;
     info.block_extract = false;
@@ -1163,8 +1163,10 @@ mod tests {
         retro_get_system_info(info.as_mut_ptr());
         let info = unsafe { info.assume_init() };
         let extensions = unsafe { CStr::from_ptr(info.valid_extensions) };
+        let version = unsafe { CStr::from_ptr(info.library_version) };
 
         assert_eq!(extensions.to_str().unwrap(), "app|cc|c2s|c3s");
+        assert_eq!(version.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
         assert!(info.need_fullpath);
     }
 
