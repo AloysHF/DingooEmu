@@ -155,10 +155,10 @@ pub extern "C" fn retro_get_region() -> c_uint {
 pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
     guard(false, || {
         let Some(info) = (unsafe { info.as_ref() }) else {
-            return fail("DingooEmu: the frontend passed no game information.");
+            return fail(MISSING_CONTENT_PATH);
         };
         if info.path.is_null() {
-            return fail("DingooEmu: the frontend passed no content path.");
+            return fail(MISSING_CONTENT_PATH);
         }
 
         let path = match unsafe { CStr::from_ptr(info.path) }.to_str() {
@@ -214,6 +214,9 @@ pub extern "C" fn retro_load_game(info: *const RetroGameInfo) -> bool {
         }
     })
 }
+
+const MISSING_CONTENT_PATH: &str =
+    "The frontend passed no content path; this core loads content from a file path only.";
 
 /// Report a load failure to both the log and the frontend's on-screen message.
 ///
