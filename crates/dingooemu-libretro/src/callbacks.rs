@@ -75,6 +75,24 @@ pub fn initialize_log_interface() {
 #[cfg(target_os = "emscripten")]
 pub fn initialize_log_interface() {}
 
+/// Ask the frontend to show a short on-screen message.
+///
+/// Frontends without an on-screen message facility (headless test harnesses)
+/// simply return false; callers mirror the text to the log as well.
+pub fn show_message(msg: &str, frames: u32) {
+    let Ok(message) = std::ffi::CString::new(msg) else {
+        return;
+    };
+    let message = crate::types::RetroMessage {
+        msg: message.as_ptr(),
+        frames,
+    };
+    environment(
+        crate::constants::RETRO_ENVIRONMENT_SET_MESSAGE,
+        &message as *const _ as *mut c_void,
+    );
+}
+
 pub fn environment(command: u32, data: *mut c_void) -> bool {
     let callback = CALLBACKS.read().unwrap().environment;
     unsafe { callback.is_some_and(|callback| callback(command, data)) }
