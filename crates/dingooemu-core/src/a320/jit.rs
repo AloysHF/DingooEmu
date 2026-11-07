@@ -29,12 +29,9 @@ const HI_INDEX: usize = 32;
 const LO_INDEX: usize = 33;
 const KSEG_MASK: u32 = 0x1fff_ffff;
 
-/// Whether the host calling convention supports Cranelift tail calls. Only
-/// such hosts link blocks directly; other hosts keep the host-loop dispatch.
-#[cfg(all(windows, target_arch = "x86_64"))]
-const CHAIN_TAIL_CALLS: bool = false;
-#[cfg(not(all(windows, target_arch = "x86_64")))]
-const CHAIN_TAIL_CALLS: bool = true;
+/// Chain dispatch instruction allowance ceiling. Bounds the nested-call depth
+/// of one linked chain; the host loop re-enters when the allowance runs out.
+pub(super) const CHAIN_ALLOWANCE_CAP: usize = 1_024;
 
 type JitBlockFn = unsafe extern "C" fn(
     registers: *mut Registers,
@@ -336,7 +333,7 @@ impl JitEngine {
             chain_budget,
         ) {
             Some(raw_return) if raw_return != 0 => {
-                let completed = completed_from_dispatch(budget_before, chain_budget, raw_return);
+                let completed = completed_from_dispatch(budget_before, chain_budget);
                 if let Some(entry) = self.entries.get_mut(&start) {
                     entry.zero_instruction_exits = 0;
                 }
@@ -424,12 +421,6 @@ impl JitEngine {
             self.fast_entries.as_ptr(),
             (FAST_JIT_CACHE_SLOTS - 1) as u64,
         )
-    }
-
-    /// Whether generated exits chain directly into the next compiled block.
-    #[cfg(test)]
-    pub(super) fn chain_links_blocks() -> bool {
-        CHAIN_TAIL_CALLS
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -538,9 +529,8 @@ impl JitEngine {
                     chain_mask,
                     chain_budget,
                 );
-                if let Some(raw_return) = raw_return {
-                    let completed =
-                        completed_from_dispatch(budget_before, chain_budget, raw_return);
+                if raw_return.is_some() {
+                    let completed = completed_from_dispatch(budget_before, chain_budget);
                     if completed != 0 {
                         if DIAGNOSTICS {
                             self.counters.native_executions =
@@ -603,8 +593,8 @@ impl JitEngine {
                 chain_mask,
                 chain_budget,
             );
-            if let Some(raw_return) = raw_return {
-                let completed = completed_from_dispatch(budget_before, chain_budget, raw_return);
+            if raw_return.is_some() {
+                let completed = completed_from_dispatch(budget_before, chain_budget);
                 if completed == 0 {
                     if DIAGNOSTICS {
                         self.counters.zero_exit_fallbacks =
@@ -704,8 +694,7 @@ impl JitEngine {
                     chain_budget,
                 ) {
                     Some(raw_return) if raw_return != 0 => {
-                        let completed =
-                            completed_from_dispatch(budget_before, chain_budget, raw_return);
+                        let completed = completed_from_dispatch(budget_before, chain_budget);
                         if DIAGNOSTICS {
                             self.counters.native_executions =
                                 self.counters.native_executions.saturating_add(1);
@@ -754,22 +743,16 @@ impl JitEngine {
 /// Instructions executed by a chain: the budget slot starts at the dispatch
 /// allowance and every executed block subtracts its own length.
 ///
-/// Instructions executed by one dispatch. On tail-call hosts the chain settles
-/// the count through the budget slot; elsewhere the block's return value is
-/// the completed count.
+/// Instructions executed by one dispatch: the budget slot starts at the
+/// dispatch allowance and every executed block subtracts its own length.
 ///
 /// # Safety
 /// `chain_budget` must point at the live budget slot the block was invoked
 /// with, and only this thread touches it between the dispatch and this read.
-fn completed_from_dispatch(before: u32, chain_budget: *mut u32, raw_return: u64) -> u64 {
-    if CHAIN_TAIL_CALLS {
-        // SAFETY: see the contract above; the pointer stays valid for the
-        // dispatch.
-        let after = unsafe { *chain_budget };
-        u64::from(before.saturating_sub(after))
-    } else {
-        raw_return
-    }
+fn completed_from_dispatch(before: u32, chain_budget: *mut u32) -> u64 {
+    // SAFETY: see the contract above; the pointer stays valid for the dispatch.
+    let after = unsafe { *chain_budget };
+    u64::from(before.saturating_sub(after))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1810,12 +1793,6 @@ fn emit_chain_call(
     pc: Value,
     completed: Value,
 ) {
-    if !CHAIN_TAIL_CALLS {
-        // Without tail-call support the exit returns to the host loop, which
-        // performs the block-to-block dispatch itself.
-        let _ = completed;
-        return;
-    }
     let pointer_type = builder.func.signature.params[0].value_type;
     let call_signature = builder.func.signature.clone();
     let sig_ref = builder.func.import_signature(call_signature);
@@ -1837,20 +1814,33 @@ fn emit_chain_call(
         .ins()
         .load(types::I64, MemFlagsData::new(), entry_address, 16);
 
-    let start_matches = builder.ins().icmp(IntCC::Equal, entry_start, pc);
-    let block_present = builder.ins().icmp_imm_u(IntCC::NotEqual, entry_function, 0);
+    // The budget slot is the chain's instruction ledger: this block settles
+    // its own length before the exit decides whether to keep chaining. The
+    // subtraction saturates at zero so a block longer than the remaining
+    // budget cannot wrap the ledger into a runaway chain.
     let budget_left = builder
         .ins()
         .load(types::I32, MemFlagsData::new(), state.chain_budget, 0);
     let budget_wide = builder.ins().uextend(types::I64, budget_left);
-    // Strictly greater: the chained block must fit inside the remaining
-    // budget, so one dispatch never exceeds the slice's instruction limit.
-    let budget_ok = builder
+    let fits = builder
         .ins()
-        .icmp(IntCC::UnsignedGreaterThan, budget_wide, entry_len);
-    let budget_remaining = builder.ins().isub(budget_wide, entry_len);
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, budget_wide, completed);
+    let raw_remaining = builder.ins().isub(budget_wide, completed);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let budget_remaining = builder.ins().select(fits, raw_remaining, zero);
+
+    let start_matches = builder.ins().icmp(IntCC::Equal, entry_start, pc);
+    let block_present = builder.ins().icmp_imm_u(IntCC::NotEqual, entry_function, 0);
+    // Greater-or-equal: the chained block may consume the entire remaining
+    // budget, so one dispatch never exceeds the slice's instruction limit.
+    let budget_ok = builder.ins().icmp(
+        IntCC::UnsignedGreaterThanOrEqual,
+        budget_remaining,
+        entry_len,
+    );
     let linkable = builder.ins().band(start_matches, block_present);
     let can_chain = builder.ins().band(linkable, budget_ok);
+    let budget_next = builder.ins().ireduce(types::I32, budget_remaining);
 
     let chain_block = builder.create_block();
     let plain_block = builder.create_block();
@@ -1860,36 +1850,30 @@ fn emit_chain_call(
 
     builder.switch_to_block(chain_block);
     builder.seal_block(chain_block);
-    let budget_next = builder.ins().ireduce(types::I32, budget_remaining);
     builder
         .ins()
         .store(MemFlagsData::new(), budget_next, state.chain_budget, 0);
-    let chain_args = [
-        state.registers,
-        state.ram,
-        state.framebuffer,
-        state.chain_table,
-        state.chain_mask,
-        state.chain_budget,
-    ];
-    if CHAIN_TAIL_CALLS {
-        // Tail call: the chain grows as straight-line jumps, so chain depth
-        // costs no host stack and completed instructions are settled through
-        // the shared budget slot instead of nested return values.
-        builder
-            .ins()
-            .return_call_indirect(sig_ref, entry_function, &chain_args);
-    } else {
-        let call = builder
-            .ins()
-            .call_indirect(sig_ref, entry_function, &chain_args);
-        let chained_result = builder.inst_results(call)[0];
-        let total = builder.ins().iadd(completed, chained_result);
-        builder.ins().return_(&[total]);
-    }
+    let call = builder.ins().call_indirect(
+        sig_ref,
+        entry_function,
+        &[
+            state.registers,
+            state.ram,
+            state.framebuffer,
+            state.chain_table,
+            state.chain_mask,
+            state.chain_budget,
+        ],
+    );
+    let chained_result = builder.inst_results(call)[0];
+    let total = builder.ins().iadd(completed, chained_result);
+    builder.ins().return_(&[total]);
 
     builder.switch_to_block(plain_block);
     builder.seal_block(plain_block);
+    builder
+        .ins()
+        .store(MemFlagsData::new(), budget_next, state.chain_budget, 0);
 }
 
 fn iconst_u32(builder: &mut FunctionBuilder<'_>, value: u32) -> Value {

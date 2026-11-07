@@ -799,13 +799,17 @@ impl Runtime {
             let (chain_table, chain_mask) = self.jit.chain_parts();
             // The chain budget doubles as the instruction ledger for one
             // dispatch; tail-called blocks never grow the host stack.
-            let mut chain_budget = instruction_limit as u32;
+            let mut chain_budget = instruction_limit.min(super::jit::CHAIN_ALLOWANCE_CAP) as u32;
             let chain_budget_ptr = &mut chain_budget as *mut u32;
             let mut completed_total = 0u64;
             let mut block_start = start;
             let mut attempted = false;
             loop {
-                let block_limit = instruction_limit.saturating_sub(completed_total as usize);
+                // The dispatch limit also honors the chain ledger so the first
+                // block of a dispatch can never exceed the remaining budget.
+                let block_limit = instruction_limit
+                    .saturating_sub(completed_total as usize)
+                    .min(chain_budget as usize);
                 let completed = match self.jit.execute_compiled(
                     block_start,
                     block_limit,
@@ -853,7 +857,7 @@ impl Runtime {
             let ram = self.memory.jit_ram_ptr();
             let framebuffer = self.memory.jit_framebuffer_ptr();
             let (chain_table, chain_mask) = self.jit.chain_parts();
-            let mut chain_budget = instruction_limit as u32;
+            let mut chain_budget = instruction_limit.min(super::jit::CHAIN_ALLOWANCE_CAP) as u32;
             let chain_budget_ptr = &mut chain_budget as *mut u32;
             if let Some(completed) = self.jit.execute(
                 start,
@@ -2490,17 +2494,8 @@ mod tests {
         let native_before = emu.jit_diagnostics().native_executions;
         emu.cpu.regs.pc = first;
         assert_eq!(emu.run_cached_instruction_block(first, 64).unwrap(), 32);
-        // On tail-call hosts the alternating blocks run inside one host
-        // dispatch; other hosts dispatch each block separately.
-        let expected_dispatches = if JitEngine::chain_links_blocks() {
-            1
-        } else {
-            8
-        };
-        assert_eq!(
-            emu.jit_diagnostics().native_executions - native_before,
-            expected_dispatches
-        );
+        // Direct chaining runs the alternating blocks inside one host dispatch.
+        assert_eq!(emu.jit_diagnostics().native_executions - native_before, 1);
     }
 
     #[test]
