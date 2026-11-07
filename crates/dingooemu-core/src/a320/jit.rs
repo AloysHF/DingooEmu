@@ -11,14 +11,19 @@ use cranelift_module::{default_libcall_names, Linkage, Module};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::mem::{offset_of, transmute};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-const HOT_BLOCK_THRESHOLD: u16 = 256;
-const MIN_COMPILED_BLOCK_LEN: usize = 4;
+const HOT_BLOCK_THRESHOLD: u16 = 12;
+const MIN_COMPILED_BLOCK_LEN: usize = 1;
 const MAX_JIT_CACHE_ENTRIES: usize = 65_536;
-const FAST_JIT_CACHE_SLOTS: usize = 4_096;
+const FAST_JIT_CACHE_SLOTS: usize = 16_384;
 const MAX_ZERO_INSTRUCTION_EXITS: u8 = 4;
-const MAX_COMPILES_PER_FRAME: u8 = 4;
+const MAX_COMPILES_PER_FRAME: u8 = 8;
+/// Wall-clock ceiling for block compilation inside one guest frame. The count
+/// budget alone lets a burst of expensive compiles stall the frame; the time
+/// ceiling keeps the worst case bounded regardless of how expensive each
+/// individual block is to translate.
+const MAX_COMPILE_TIME_PER_FRAME: Duration = Duration::from_millis(4);
 const REGISTER_COUNT: usize = 34;
 const HI_INDEX: usize = 32;
 const LO_INDEX: usize = 33;
@@ -96,6 +101,8 @@ pub(crate) struct JitEngine {
     fast_entries: Box<[FastJitCacheEntry]>,
     enabled: bool,
     compile_budget: u8,
+    frame_compile_time: Duration,
+    compile_time_budget: Duration,
     compiled_block_count: u64,
     diagnostics_enabled: bool,
     counters: JitCounters,
@@ -126,6 +133,8 @@ impl JitEngine {
                 .into_boxed_slice(),
             enabled: true,
             compile_budget: MAX_COMPILES_PER_FRAME,
+            frame_compile_time: Duration::ZERO,
+            compile_time_budget: MAX_COMPILE_TIME_PER_FRAME,
             compiled_block_count: 0,
             diagnostics_enabled: false,
             counters: JitCounters::default(),
@@ -326,10 +335,12 @@ impl JitEngine {
             self.compiled_block_count = 0;
         }
         self.compile_budget = MAX_COMPILES_PER_FRAME;
+        self.frame_compile_time = Duration::ZERO;
     }
 
     pub(crate) fn begin_frame(&mut self) {
         self.compile_budget = MAX_COMPILES_PER_FRAME;
+        self.frame_compile_time = Duration::ZERO;
     }
 
     pub(crate) fn execute(
@@ -498,7 +509,10 @@ impl JitEngine {
         }
 
         entry.hits = entry.hits.saturating_add(1);
-        if entry.hits < HOT_BLOCK_THRESHOLD || self.compile_budget == 0 {
+        if entry.hits < HOT_BLOCK_THRESHOLD
+            || self.compile_budget == 0
+            || self.frame_compile_time >= self.compile_time_budget
+        {
             if DIAGNOSTICS {
                 self.counters.cold_fallbacks = self.counters.cold_fallbacks.saturating_add(1);
             }
@@ -520,6 +534,7 @@ impl JitEngine {
             .expect("compiler presence checked above")
             .compile(start, instructions);
         let compile_elapsed = compile_start.elapsed();
+        self.frame_compile_time += compile_elapsed;
         if DIAGNOSTICS {
             let elapsed_us = u64::try_from(compile_elapsed.as_micros()).unwrap_or(u64::MAX);
             self.counters.compilation_attempts =
@@ -1561,6 +1576,14 @@ mod tests {
     use crate::a320::cpu::Cpu;
     use crate::a320::memory::Memory;
 
+    /// Engine whose compile budget is bounded only by the per-frame count, so
+    /// budget tests stay deterministic regardless of host translation speed.
+    fn deterministic_test_engine() -> JitEngine {
+        let mut engine = JitEngine::new();
+        engine.compile_time_budget = Duration::from_secs(3_600);
+        engine
+    }
+
     #[test]
     fn register_layout_matches_jit_offsets() {
         assert_eq!(register_offset(0), offset_of!(Registers, gpr) as i32);
@@ -1577,11 +1600,14 @@ mod tests {
             (9 << 21) | (8 << 16) | (10 << 11) | 0x26,
         ];
         let first_start = 0x1000;
+        // Space the blocks so they all share one fast-cache slot; the entries
+        // map must keep the compiled blocks alive across collisions.
+        let stride = (FAST_JIT_CACHE_SLOTS as u32) * 4;
         let compiled_starts: Vec<u32> = (0..MAX_COMPILES_PER_FRAME)
-            .map(|index| first_start + index as u32 * 0x4000)
+            .map(|index| first_start + index as u32 * stride)
             .collect();
-        let deferred_start = first_start + MAX_COMPILES_PER_FRAME as u32 * 0x4000;
-        let mut engine = JitEngine::new();
+        let deferred_start = first_start + MAX_COMPILES_PER_FRAME as u32 * stride;
+        let mut engine = deterministic_test_engine();
         let mut registers = Registers::new(first_start);
         let mut memory = Memory::new();
         let ram = memory.jit_ram_ptr();
@@ -1643,7 +1669,7 @@ mod tests {
             (9 << 21) | (8 << 16) | (10 << 11) | 0x26,
         ];
         let start = 0x1000;
-        let mut engine = JitEngine::new();
+        let mut engine = deterministic_test_engine();
         let mut registers = Registers::new(start);
         let mut memory = Memory::new();
         let ram = memory.jit_ram_ptr();
