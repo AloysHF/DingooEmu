@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://AloysHF.github.io/DingooEmu/"><img src="https://img.shields.io/badge/Website-DingooEmu-E8553A?logo=githubpages&logoColor=white" alt="Website"></a>
   <a href="https://github.com/AloysHF/DingooEmu/actions/workflows/ci.yml"><img src="https://github.com/AloysHF/DingooEmu/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://git.libretro.com/libretro/dingooemu/-/pipelines"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgit.libretro.com%2Fapi%2Fv4%2Fprojects%2Flibretro%252Fdingooemu%2Fpipelines%2Flatest%3Fref%3Dmaster&query=%24.status&label=Pipeline%20Status&logo=gitlab&cacheSeconds=300" alt="Gitlab Pipeline Status" ></a>
+  <a href="https://git.libretro.com/libretro/dingooemu/-/pipelines"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgit.libretro.com%2Fapi%2Fv4%2Fprojects%2Flibretro%252Fdingooemu%2Fpipelines%3Fref%3Dmaster%26per_page%3D1&query=%24%5B0%5D.status&label=Pipeline%20Status&logo=gitlab&cacheSeconds=300" alt="Gitlab Pipeline Status" ></a>
   <a href="https://github.com/AloysHF/DingooEmu/releases/latest"><img src="https://img.shields.io/github/v/release/AloysHF/DingooEmu" alt="Release"></a>
   <a href="https://github.com/AloysHF/DingooEmu/releases"><img src="https://img.shields.io/github/downloads/AloysHF/DingooEmu/total" alt="Downloads"></a>
   <a href="https://sonarcloud.io/dashboard?id=AloysHF_DingooEmu"><img src="https://sonarcloud.io/api/project_badges/measure?project=AloysHF_DingooEmu&metric=alert_status" alt="Quality Gate Status"></a>
