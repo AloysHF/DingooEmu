@@ -18,7 +18,7 @@ const MIN_COMPILED_BLOCK_LEN: usize = 1;
 const MAX_JIT_CACHE_ENTRIES: usize = 65_536;
 const FAST_JIT_CACHE_SLOTS: usize = 16_384;
 const MAX_ZERO_INSTRUCTION_EXITS: u8 = 4;
-const MAX_COMPILES_PER_FRAME: u8 = 8;
+const MAX_COMPILES_PER_FRAME: u8 = 32;
 /// Wall-clock ceiling for block compilation inside one guest frame. The count
 /// budget alone lets a burst of expensive compiles stall the frame; the time
 /// ceiling keeps the worst case bounded regardless of how expensive each
@@ -774,7 +774,14 @@ fn lower_block(
             let Some(target) = lower_branch(builder, state, instruction, branch_pc) else {
                 break;
             };
-            if !lower_register_instruction(builder, state, instructions[index + 1]) {
+            let delay_pc = start.wrapping_add(((index as u32) + 1).wrapping_mul(4));
+            if !lower_delay_instruction(
+                builder,
+                state,
+                instructions[index + 1],
+                delay_pc,
+                (index + 1) as u64,
+            ) {
                 break;
             }
             index += 2;
@@ -807,8 +814,7 @@ fn is_control_flow(instruction: u32) -> bool {
 
 fn is_supported_delay_instruction(instruction: u32) -> bool {
     !is_control_flow(instruction)
-        && !is_memory_instruction(instruction)
-        && is_supported_register_instruction(instruction)
+        && (is_memory_instruction(instruction) || is_supported_register_instruction(instruction))
 }
 
 fn is_supported_register_instruction(instruction: u32) -> bool {
@@ -1255,6 +1261,22 @@ fn select_branch_target(
     let taken = iconst_u32(builder, taken);
     let fallthrough = iconst_u32(builder, fallthrough);
     builder.ins().select(condition, taken, fallthrough)
+}
+
+/// Lower the instruction occupying a branch delay slot. The delay slot always
+/// executes, so register and memory instructions are both valid there.
+fn lower_delay_instruction(
+    builder: &mut FunctionBuilder<'_>,
+    state: &mut LoweringState,
+    instruction: u32,
+    pc: u32,
+    completed: u64,
+) -> bool {
+    if is_memory_instruction(instruction) {
+        lower_memory_instruction(builder, state, instruction, pc, completed)
+    } else {
+        lower_register_instruction(builder, state, instruction)
+    }
 }
 
 fn lower_memory_instruction(
