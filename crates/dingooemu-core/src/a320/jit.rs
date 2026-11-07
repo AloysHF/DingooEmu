@@ -29,19 +29,49 @@ const HI_INDEX: usize = 32;
 const LO_INDEX: usize = 33;
 const KSEG_MASK: u32 = 0x1fff_ffff;
 
-type JitBlockFn = unsafe extern "C" fn(*mut Registers, *mut u8, *mut u8) -> u64;
+/// Whether the host calling convention supports Cranelift tail calls. Only
+/// such hosts link blocks directly; other hosts keep the host-loop dispatch.
+#[cfg(all(windows, target_arch = "x86_64"))]
+const CHAIN_TAIL_CALLS: bool = false;
+#[cfg(not(all(windows, target_arch = "x86_64")))]
+const CHAIN_TAIL_CALLS: bool = true;
 
+type JitBlockFn = unsafe extern "C" fn(
+    registers: *mut Registers,
+    ram: *mut u8,
+    framebuffer: *mut u8,
+    chain_table: *const FastJitCacheEntry,
+    chain_mask: u64,
+    chain_budget: *mut u32,
+) -> u64;
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 struct CompiledBlock {
     function: JitBlockFn,
     instruction_count: usize,
 }
 
+/// Direct-mapped cache entry shared with generated code. The generated block
+/// exits validate `entry.start == exit_pc` before calling `entry.block`, so a
+/// slot collision simply falls back to the host loop.
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
-struct FastJitCacheEntry {
+pub(super) struct FastJitCacheEntry {
     start: u32,
+    _padding: u32,
     block: Option<CompiledBlock>,
 }
+
+// The generated exit code dereferences FastJitCacheEntry through hardcoded
+// offsets, so the layout is part of the ABI and pinned here.
+const _: () = {
+    assert!(size_of::<FastJitCacheEntry>() == 24);
+    assert!(offset_of!(FastJitCacheEntry, start) == 0);
+    assert!(offset_of!(FastJitCacheEntry, block) == 8);
+    assert!(offset_of!(CompiledBlock, function) == 0);
+    assert!(offset_of!(CompiledBlock, instruction_count) == 8);
+};
 
 #[derive(Default)]
 struct JitCacheEntry {
@@ -193,6 +223,7 @@ impl JitEngine {
                 .is_some_and(|entry| entry.block.is_some())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_compiled(
         &mut self,
         start: u32,
@@ -200,6 +231,9 @@ impl JitEngine {
         registers: &mut Registers,
         ram: *mut u8,
         framebuffer: *mut u8,
+        chain_table: *const FastJitCacheEntry,
+        chain_mask: u64,
+        chain_budget: *mut u32,
     ) -> CompiledExecution {
         if self.diagnostics_enabled {
             return self.execute_compiled_with_diagnostics(
@@ -208,13 +242,26 @@ impl JitEngine {
                 registers,
                 ram,
                 framebuffer,
+                chain_table,
+                chain_mask,
+                chain_budget,
             );
         }
-        self.execute_compiled_inner::<false>(start, instruction_limit, registers, ram, framebuffer)
+        self.execute_compiled_inner::<false>(
+            start,
+            instruction_limit,
+            registers,
+            ram,
+            framebuffer,
+            chain_table,
+            chain_mask,
+            chain_budget,
+        )
     }
 
     #[cold]
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn execute_compiled_with_diagnostics(
         &mut self,
         start: u32,
@@ -222,11 +269,24 @@ impl JitEngine {
         registers: &mut Registers,
         ram: *mut u8,
         framebuffer: *mut u8,
+        chain_table: *const FastJitCacheEntry,
+        chain_mask: u64,
+        chain_budget: *mut u32,
     ) -> CompiledExecution {
-        self.execute_compiled_inner::<true>(start, instruction_limit, registers, ram, framebuffer)
+        self.execute_compiled_inner::<true>(
+            start,
+            instruction_limit,
+            registers,
+            ram,
+            framebuffer,
+            chain_table,
+            chain_mask,
+            chain_budget,
+        )
     }
 
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     fn execute_compiled_inner<const DIAGNOSTICS: bool>(
         &mut self,
         start: u32,
@@ -234,6 +294,9 @@ impl JitEngine {
         registers: &mut Registers,
         ram: *mut u8,
         framebuffer: *mut u8,
+        chain_table: *const FastJitCacheEntry,
+        chain_mask: u64,
+        chain_budget: *mut u32,
     ) -> CompiledExecution {
         if !self.enabled || self.compiler.is_none() {
             return CompiledExecution::Missing;
@@ -248,6 +311,7 @@ impl JitEngine {
             if let Some(block) = block {
                 self.fast_entries[fast_index] = FastJitCacheEntry {
                     start,
+                    _padding: 0,
                     block: Some(block),
                 };
             }
@@ -260,8 +324,19 @@ impl JitEngine {
         if DIAGNOSTICS {
             self.counters.execute_requests = self.counters.execute_requests.saturating_add(1);
         }
-        match execute_compiled_block(block, instruction_limit, registers, ram, framebuffer) {
-            Some(completed) if completed != 0 => {
+        let budget_before = unsafe { *chain_budget };
+        match execute_compiled_block(
+            block,
+            instruction_limit,
+            registers,
+            ram,
+            framebuffer,
+            chain_table,
+            chain_mask,
+            chain_budget,
+        ) {
+            Some(raw_return) if raw_return != 0 => {
+                let completed = completed_from_dispatch(budget_before, chain_budget, raw_return);
                 if let Some(entry) = self.entries.get_mut(&start) {
                     entry.zero_instruction_exits = 0;
                 }
@@ -343,6 +418,21 @@ impl JitEngine {
         self.frame_compile_time = Duration::ZERO;
     }
 
+    /// Chain table shared with generated code; stable for the engine lifetime.
+    pub(super) fn chain_parts(&self) -> (*const FastJitCacheEntry, u64) {
+        (
+            self.fast_entries.as_ptr(),
+            (FAST_JIT_CACHE_SLOTS - 1) as u64,
+        )
+    }
+
+    /// Whether generated exits chain directly into the next compiled block.
+    #[cfg(test)]
+    pub(super) fn chain_links_blocks() -> bool {
+        CHAIN_TAIL_CALLS
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute(
         &mut self,
         start: u32,
@@ -351,6 +441,9 @@ impl JitEngine {
         registers: &mut Registers,
         ram: *mut u8,
         framebuffer: *mut u8,
+        chain_table: *const FastJitCacheEntry,
+        chain_mask: u64,
+        chain_budget: *mut u32,
     ) -> Option<u64> {
         if self.diagnostics_enabled {
             return self.execute_with_diagnostics(
@@ -360,6 +453,9 @@ impl JitEngine {
                 registers,
                 ram,
                 framebuffer,
+                chain_table,
+                chain_mask,
+                chain_budget,
             );
         }
         self.execute_inner::<false>(
@@ -369,11 +465,15 @@ impl JitEngine {
             registers,
             ram,
             framebuffer,
+            chain_table,
+            chain_mask,
+            chain_budget,
         )
     }
 
     #[cold]
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn execute_with_diagnostics(
         &mut self,
         start: u32,
@@ -382,6 +482,9 @@ impl JitEngine {
         registers: &mut Registers,
         ram: *mut u8,
         framebuffer: *mut u8,
+        chain_table: *const FastJitCacheEntry,
+        chain_mask: u64,
+        chain_budget: *mut u32,
     ) -> Option<u64> {
         self.execute_inner::<true>(
             start,
@@ -390,10 +493,14 @@ impl JitEngine {
             registers,
             ram,
             framebuffer,
+            chain_table,
+            chain_mask,
+            chain_budget,
         )
     }
 
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     fn execute_inner<const DIAGNOSTICS: bool>(
         &mut self,
         start: u32,
@@ -402,6 +509,9 @@ impl JitEngine {
         registers: &mut Registers,
         ram: *mut u8,
         framebuffer: *mut u8,
+        chain_table: *const FastJitCacheEntry,
+        chain_mask: u64,
+        chain_budget: *mut u32,
     ) -> Option<u64> {
         if DIAGNOSTICS {
             self.counters.execute_requests = self.counters.execute_requests.saturating_add(1);
@@ -417,9 +527,20 @@ impl JitEngine {
         let fast_entry = self.fast_entries[fast_index];
         if fast_entry.start == start {
             if let Some(block) = fast_entry.block {
-                let completed =
-                    execute_compiled_block(block, instruction_limit, registers, ram, framebuffer);
-                if let Some(completed) = completed {
+                let budget_before = unsafe { *chain_budget };
+                let raw_return = execute_compiled_block(
+                    block,
+                    instruction_limit,
+                    registers,
+                    ram,
+                    framebuffer,
+                    chain_table,
+                    chain_mask,
+                    chain_budget,
+                );
+                if let Some(raw_return) = raw_return {
+                    let completed =
+                        completed_from_dispatch(budget_before, chain_budget, raw_return);
                     if completed != 0 {
                         if DIAGNOSTICS {
                             self.counters.native_executions =
@@ -468,11 +589,22 @@ impl JitEngine {
         if let Some(block) = entry.block {
             self.fast_entries[fast_index] = FastJitCacheEntry {
                 start,
+                _padding: 0,
                 block: Some(block),
             };
-            let completed =
-                execute_compiled_block(block, instruction_limit, registers, ram, framebuffer);
-            if let Some(completed) = completed {
+            let budget_before = unsafe { *chain_budget };
+            let raw_return = execute_compiled_block(
+                block,
+                instruction_limit,
+                registers,
+                ram,
+                framebuffer,
+                chain_table,
+                chain_mask,
+                chain_budget,
+            );
+            if let Some(raw_return) = raw_return {
+                let completed = completed_from_dispatch(budget_before, chain_budget, raw_return);
                 if completed == 0 {
                     if DIAGNOSTICS {
                         self.counters.zero_exit_fallbacks =
@@ -557,11 +689,23 @@ impl JitEngine {
                 entry.block = Some(block);
                 self.fast_entries[fast_index] = FastJitCacheEntry {
                     start,
+                    _padding: 0,
                     block: Some(block),
                 };
-                match execute_compiled_block(block, instruction_limit, registers, ram, framebuffer)
-                {
-                    Some(completed) if completed != 0 => {
+                let budget_before = unsafe { *chain_budget };
+                match execute_compiled_block(
+                    block,
+                    instruction_limit,
+                    registers,
+                    ram,
+                    framebuffer,
+                    chain_table,
+                    chain_mask,
+                    chain_budget,
+                ) {
+                    Some(raw_return) if raw_return != 0 => {
+                        let completed =
+                            completed_from_dispatch(budget_before, chain_budget, raw_return);
                         if DIAGNOSTICS {
                             self.counters.native_executions =
                                 self.counters.native_executions.saturating_add(1);
@@ -607,19 +751,54 @@ impl JitEngine {
     }
 }
 
+/// Instructions executed by a chain: the budget slot starts at the dispatch
+/// allowance and every executed block subtracts its own length.
+///
+/// Instructions executed by one dispatch. On tail-call hosts the chain settles
+/// the count through the budget slot; elsewhere the block's return value is
+/// the completed count.
+///
+/// # Safety
+/// `chain_budget` must point at the live budget slot the block was invoked
+/// with, and only this thread touches it between the dispatch and this read.
+fn completed_from_dispatch(before: u32, chain_budget: *mut u32, raw_return: u64) -> u64 {
+    if CHAIN_TAIL_CALLS {
+        // SAFETY: see the contract above; the pointer stays valid for the
+        // dispatch.
+        let after = unsafe { *chain_budget };
+        u64::from(before.saturating_sub(after))
+    } else {
+        raw_return
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_compiled_block(
     block: CompiledBlock,
     instruction_limit: usize,
     registers: &mut Registers,
     ram: *mut u8,
     framebuffer: *mut u8,
+    chain_table: *const FastJitCacheEntry,
+    chain_mask: u64,
+    chain_budget: *mut u32,
 ) -> Option<u64> {
     if block.instruction_count > instruction_limit {
         return None;
     }
     // SAFETY: Cranelift emitted this function with the exact signature below.
-    // Registers has a stable C layout and both pointers remain valid for the call.
-    let completed = unsafe { (block.function)(registers, ram, framebuffer) };
+    // Registers has a stable C layout, the chain table is engine-owned and
+    // stable, and all pointers remain valid for the call.
+    let completed = unsafe {
+        (block.function)(
+            registers,
+            ram,
+            framebuffer,
+            chain_table,
+            chain_mask,
+            chain_budget,
+        )
+    };
     Some(completed)
 }
 
@@ -688,6 +867,9 @@ impl Compiler {
         signature.params.push(AbiParam::new(pointer_type));
         signature.params.push(AbiParam::new(pointer_type));
         signature.params.push(AbiParam::new(pointer_type));
+        signature.params.push(AbiParam::new(pointer_type));
+        signature.params.push(AbiParam::new(types::I64));
+        signature.params.push(AbiParam::new(pointer_type));
         signature.returns.push(AbiParam::new(types::I64));
         self.context.func = Function::with_name_signature(
             cranelift::codegen::ir::UserFuncName::user(0, self.next_function_id as u32),
@@ -704,7 +886,17 @@ impl Compiler {
             let registers = builder.block_params(entry)[0];
             let ram = builder.block_params(entry)[1];
             let framebuffer = builder.block_params(entry)[2];
-            let mut state = LoweringState::new(registers, ram, framebuffer);
+            let chain_table = builder.block_params(entry)[3];
+            let chain_mask = builder.block_params(entry)[4];
+            let chain_budget = builder.block_params(entry)[5];
+            let mut state = LoweringState::new(
+                registers,
+                ram,
+                framebuffer,
+                chain_table,
+                chain_mask,
+                chain_budget,
+            );
             let count = lower_block(&mut builder, &mut state, start, instructions);
             if count != 0 {
                 builder.finalize(target_config);
@@ -739,16 +931,29 @@ struct LoweringState {
     registers: Value,
     ram: Value,
     framebuffer: Value,
+    chain_table: Value,
+    chain_mask: Value,
+    chain_budget: Value,
     values: [Option<Value>; REGISTER_COUNT],
     dirty: [bool; REGISTER_COUNT],
 }
 
 impl LoweringState {
-    fn new(registers: Value, ram: Value, framebuffer: Value) -> Self {
+    fn new(
+        registers: Value,
+        ram: Value,
+        framebuffer: Value,
+        chain_table: Value,
+        chain_mask: Value,
+        chain_budget: Value,
+    ) -> Self {
         Self {
             registers,
             ram,
             framebuffer,
+            chain_table,
+            chain_mask,
+            chain_budget,
             values: [None; REGISTER_COUNT],
             dirty: [false; REGISTER_COUNT],
         }
@@ -1585,7 +1790,106 @@ fn emit_exit(builder: &mut FunctionBuilder<'_>, state: &LoweringState, pc: Value
         offset_of!(Registers, pc) as i32,
     );
     let completed = builder.ins().iconst(types::I64, completed as i64);
+    emit_chain_call(builder, state, pc, completed);
     builder.ins().return_(&[completed]);
+}
+
+/// Emit a guarded tail call to the compiled block starting at `pc`.
+///
+/// Generated code consults the shared chain table at every exit: when the exit
+/// PC has a compiled block and the remaining chain budget covers it, the exit
+/// tail-calls that block instead of returning to the host loop. The entry must
+/// match the exact exit PC, so slot collisions, hooked addresses and
+/// invalidated entries all fall back to the host transparently. The chain
+/// budget slot doubles as the instruction ledger: every executed block
+/// subtracts its length, and the host recovers the total as
+/// `initial - remaining`.
+fn emit_chain_call(
+    builder: &mut FunctionBuilder<'_>,
+    state: &LoweringState,
+    pc: Value,
+    completed: Value,
+) {
+    if !CHAIN_TAIL_CALLS {
+        // Without tail-call support the exit returns to the host loop, which
+        // performs the block-to-block dispatch itself.
+        let _ = completed;
+        return;
+    }
+    let pointer_type = builder.func.signature.params[0].value_type;
+    let call_signature = builder.func.signature.clone();
+    let sig_ref = builder.func.import_signature(call_signature);
+
+    let pc_wide = builder.ins().uextend(pointer_type, pc);
+    let shifted = builder.ins().ushr_imm_u(pc_wide, 2);
+    let slot = builder.ins().band(shifted, state.chain_mask);
+    let offset = builder
+        .ins()
+        .imul_imm_u(slot, size_of::<FastJitCacheEntry>() as i64);
+    let entry_address = builder.ins().iadd(state.chain_table, offset);
+    let entry_start = builder
+        .ins()
+        .load(types::I32, MemFlagsData::new(), entry_address, 0);
+    let entry_function = builder
+        .ins()
+        .load(pointer_type, MemFlagsData::new(), entry_address, 8);
+    let entry_len = builder
+        .ins()
+        .load(types::I64, MemFlagsData::new(), entry_address, 16);
+
+    let start_matches = builder.ins().icmp(IntCC::Equal, entry_start, pc);
+    let block_present = builder.ins().icmp_imm_u(IntCC::NotEqual, entry_function, 0);
+    let budget_left = builder
+        .ins()
+        .load(types::I32, MemFlagsData::new(), state.chain_budget, 0);
+    let budget_wide = builder.ins().uextend(types::I64, budget_left);
+    // Strictly greater: the chained block must fit inside the remaining
+    // budget, so one dispatch never exceeds the slice's instruction limit.
+    let budget_ok = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThan, budget_wide, entry_len);
+    let budget_remaining = builder.ins().isub(budget_wide, entry_len);
+    let linkable = builder.ins().band(start_matches, block_present);
+    let can_chain = builder.ins().band(linkable, budget_ok);
+
+    let chain_block = builder.create_block();
+    let plain_block = builder.create_block();
+    builder
+        .ins()
+        .brif(can_chain, chain_block, &[], plain_block, &[]);
+
+    builder.switch_to_block(chain_block);
+    builder.seal_block(chain_block);
+    let budget_next = builder.ins().ireduce(types::I32, budget_remaining);
+    builder
+        .ins()
+        .store(MemFlagsData::new(), budget_next, state.chain_budget, 0);
+    let chain_args = [
+        state.registers,
+        state.ram,
+        state.framebuffer,
+        state.chain_table,
+        state.chain_mask,
+        state.chain_budget,
+    ];
+    if CHAIN_TAIL_CALLS {
+        // Tail call: the chain grows as straight-line jumps, so chain depth
+        // costs no host stack and completed instructions are settled through
+        // the shared budget slot instead of nested return values.
+        builder
+            .ins()
+            .return_call_indirect(sig_ref, entry_function, &chain_args);
+    } else {
+        let call = builder
+            .ins()
+            .call_indirect(sig_ref, entry_function, &chain_args);
+        let chained_result = builder.inst_results(call)[0];
+        let total = builder.ins().iadd(completed, chained_result);
+        builder.ins().return_(&[total]);
+    }
+
+    builder.switch_to_block(plain_block);
+    builder.seal_block(plain_block);
 }
 
 fn iconst_u32(builder: &mut FunctionBuilder<'_>, value: u32) -> Value {
@@ -1604,6 +1908,35 @@ mod tests {
         let mut engine = JitEngine::new();
         engine.compile_time_budget = Duration::from_secs(3_600);
         engine
+    }
+
+    /// Empty chain context for direct block invocations: no linkable successor
+    /// exists, so generated exits return to the caller immediately.
+    fn test_chain_context() -> (Box<[FastJitCacheEntry]>, u32) {
+        (
+            vec![FastJitCacheEntry::default(); FAST_JIT_CACHE_SLOTS].into_boxed_slice(),
+            0,
+        )
+    }
+
+    /// Invoke a compiled block through the full chain-aware ABI.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn call_block(
+        function: JitBlockFn,
+        registers: &mut Registers,
+        ram: *mut u8,
+        framebuffer: *mut u8,
+        table: &[FastJitCacheEntry],
+    ) -> u64 {
+        let mut budget = u32::MAX;
+        (function)(
+            registers,
+            ram,
+            framebuffer,
+            table.as_ptr(),
+            (table.len() - 1) as u64,
+            &mut budget,
+        )
     }
 
     #[test]
@@ -1630,6 +1963,8 @@ mod tests {
             .collect();
         let deferred_start = first_start + MAX_COMPILES_PER_FRAME as u32 * stride;
         let mut engine = deterministic_test_engine();
+        let (test_table, _) = test_chain_context();
+        let mut test_budget = 0u32;
         let mut registers = Registers::new(first_start);
         let mut memory = Memory::new();
         let ram = memory.jit_ram_ptr();
@@ -1645,6 +1980,9 @@ mod tests {
                     &mut registers,
                     ram,
                     framebuffer,
+                    test_table.as_ptr(),
+                    (FAST_JIT_CACHE_SLOTS - 1) as u64,
+                    &mut test_budget,
                 );
             }
             assert!(engine.entries[&start].block.is_some());
@@ -1660,6 +1998,9 @@ mod tests {
                     &mut registers,
                     ram,
                     framebuffer,
+                    test_table.as_ptr(),
+                    (FAST_JIT_CACHE_SLOTS - 1) as u64,
+                    &mut test_budget,
                 )
                 .is_none());
         }
@@ -1674,6 +2015,9 @@ mod tests {
                 &mut registers,
                 ram,
                 framebuffer,
+                test_table.as_ptr(),
+                (FAST_JIT_CACHE_SLOTS - 1) as u64,
+                &mut test_budget,
             )
             .is_some());
         for start in compiled_starts {
@@ -1692,6 +2036,8 @@ mod tests {
         ];
         let start = 0x1000;
         let mut engine = deterministic_test_engine();
+        let (test_table, _) = test_chain_context();
+        let mut test_budget = 0u32;
         let mut registers = Registers::new(start);
         let mut memory = Memory::new();
         let ram = memory.jit_ram_ptr();
@@ -1705,6 +2051,9 @@ mod tests {
                 &mut registers,
                 ram,
                 framebuffer,
+                test_table.as_ptr(),
+                (FAST_JIT_CACHE_SLOTS - 1) as u64,
+                &mut test_budget,
             );
         }
         assert_eq!(engine.compiled_block_count, 1);
@@ -1742,7 +2091,16 @@ mod tests {
         let mut jit_memory = Memory::new();
         let ram = jit_memory.jit_ram_ptr();
         let framebuffer = jit_memory.jit_framebuffer_ptr();
-        let completed = unsafe { (block.function)(&mut jit_registers, ram, framebuffer) };
+        let (test_table, _) = test_chain_context();
+        let completed = unsafe {
+            call_block(
+                block.function,
+                &mut jit_registers,
+                ram,
+                framebuffer,
+                &test_table,
+            )
+        };
         assert_eq!(completed, instructions.len() as u64);
 
         let mut interpreter = Cpu::new(start);
@@ -1805,7 +2163,16 @@ mod tests {
         }
         let ram = jit_memory.jit_ram_ptr();
         let framebuffer = jit_memory.jit_framebuffer_ptr();
-        let completed = unsafe { (block.function)(&mut jit_registers, ram, framebuffer) };
+        let (test_table, _) = test_chain_context();
+        let completed = unsafe {
+            call_block(
+                block.function,
+                &mut jit_registers,
+                ram,
+                framebuffer,
+                &test_table,
+            )
+        };
         for &instruction in &instructions {
             interpreter
                 .step_fetched_unaccounted(instruction, &mut interpreter_memory)
@@ -1839,7 +2206,9 @@ mod tests {
         let ram = memory.jit_ram_ptr();
         let framebuffer = memory.jit_framebuffer_ptr();
 
-        let completed = unsafe { (block.function)(&mut registers, ram, framebuffer) };
+        let (table, _) = test_chain_context();
+        let completed =
+            unsafe { call_block(block.function, &mut registers, ram, framebuffer, &table) };
 
         assert_eq!(completed, 0);
         assert_eq!(registers.pc, start);
@@ -1860,7 +2229,9 @@ mod tests {
         let ram = memory.jit_ram_ptr();
         let framebuffer = memory.jit_framebuffer_ptr();
 
-        let completed = unsafe { (block.function)(&mut registers, ram, framebuffer) };
+        let (table, _) = test_chain_context();
+        let completed =
+            unsafe { call_block(block.function, &mut registers, ram, framebuffer, &table) };
 
         assert_eq!(completed, 1);
         assert_eq!(registers.pc, start + 4);
@@ -1877,6 +2248,8 @@ mod tests {
         let start = 0x4000;
         let instructions = [0u32; MIN_COMPILED_BLOCK_LEN];
         let mut engine = JitEngine::new();
+        let (test_table, _) = test_chain_context();
+        let mut test_budget = 0u32;
         engine.set_enabled(false);
         let mut registers = Registers::new(start);
         let mut memory = Memory::new();
@@ -1891,6 +2264,9 @@ mod tests {
                 &mut registers,
                 ram,
                 framebuffer,
+                test_table.as_ptr(),
+                (FAST_JIT_CACHE_SLOTS - 1) as u64,
+                &mut test_budget,
             )
             .is_none());
         engine.record_interpreter_execution(4);
@@ -1906,6 +2282,9 @@ mod tests {
                 &mut registers,
                 ram,
                 framebuffer,
+                test_table.as_ptr(),
+                (FAST_JIT_CACHE_SLOTS - 1) as u64,
+                &mut test_budget,
             )
             .is_none());
         engine.record_interpreter_execution(4);
