@@ -10,7 +10,13 @@ pub const OUTPUT_SAMPLE_RATE: u32 = 22_050;
 #[cfg(not(feature = "standalone"))]
 const VIDEO_FRAMES_PER_SECOND: u32 = 60;
 #[cfg(not(feature = "standalone"))]
-const MAX_QUEUED_AUDIO_FRAMES: usize = OUTPUT_SAMPLE_RATE as usize / 2;
+/// Guest-side audio queue ceiling: how far ahead of playback the guest may
+/// buffer before `can_write` reports false. The guest's audio thread fills
+/// whatever the ceiling allows, so the heard audio lags the game by the queue
+/// depth. Keep this tight - around two guest write chunks - so sound tracks
+/// the on-screen action; the mixer still drains in FIFO order and the guest
+/// simply wakes a little more often.
+const MAX_QUEUED_AUDIO_FRAMES: usize = OUTPUT_SAMPLE_RATE as usize * 60 / 1000;
 #[cfg(feature = "standalone")]
 fn host_output_enabled_default() -> bool {
     true
