@@ -796,17 +796,29 @@ impl Runtime {
         let attempted_compiled_block = if !self.cpu.branch_delay {
             let ram = self.memory.jit_ram_ptr();
             let framebuffer = self.memory.jit_framebuffer_ptr();
+            let (chain_table, chain_mask) = self.jit.chain_parts();
+            // The chain budget doubles as the instruction ledger for one
+            // dispatch; tail-called blocks never grow the host stack.
+            let mut chain_budget = instruction_limit.min(super::jit::CHAIN_ALLOWANCE_CAP) as u32;
+            let chain_budget_ptr = &mut chain_budget as *mut u32;
             let mut completed_total = 0u64;
             let mut block_start = start;
             let mut attempted = false;
             loop {
-                let block_limit = instruction_limit.saturating_sub(completed_total as usize);
+                // The dispatch limit also honors the chain ledger so the first
+                // block of a dispatch can never exceed the remaining budget.
+                let block_limit = instruction_limit
+                    .saturating_sub(completed_total as usize)
+                    .min(chain_budget as usize);
                 let completed = match self.jit.execute_compiled(
                     block_start,
                     block_limit,
                     &mut self.cpu.regs,
                     ram,
                     framebuffer,
+                    chain_table,
+                    chain_mask,
+                    chain_budget_ptr,
                 ) {
                     CompiledExecution::Missing => break,
                     CompiledExecution::Fallback => {
@@ -844,6 +856,9 @@ impl Runtime {
             let block = &self.instruction_blocks[cache_index];
             let ram = self.memory.jit_ram_ptr();
             let framebuffer = self.memory.jit_framebuffer_ptr();
+            let (chain_table, chain_mask) = self.jit.chain_parts();
+            let mut chain_budget = instruction_limit.min(super::jit::CHAIN_ALLOWANCE_CAP) as u32;
+            let chain_budget_ptr = &mut chain_budget as *mut u32;
             if let Some(completed) = self.jit.execute(
                 start,
                 &block.instructions[..block.len as usize],
@@ -851,6 +866,9 @@ impl Runtime {
                 &mut self.cpu.regs,
                 ram,
                 framebuffer,
+                chain_table,
+                chain_mask,
+                chain_budget_ptr,
             ) {
                 self.cpu.account_instructions(completed);
                 return Ok(completed);
@@ -2403,12 +2421,23 @@ mod tests {
         emu.start();
         let one_block_cycles = instructions.len() as u64 * CPU_CYCLES_PER_INSTRUCTION;
 
+        // Warm-up runs the block on the interpreter until the JIT threshold is
+        // reached; once compiled, one dispatch chains the self-loop until the
+        // per-call budget is exhausted (two block executions here).
+        let block_len = instructions.len() as u64;
+        // A 64-cycle slice leaves room for eight chained self-jumps; on the
+        // interpreter the same dispatch runs exactly one block.
+        let _ = one_block_cycles;
+        let slice_cycles = block_len * CPU_CYCLES_PER_INSTRUCTION * 8;
+        let chained_len = block_len * 8;
         for _ in 0..300 {
             emu.cpu.regs.pc = start;
-            assert_eq!(
-                emu.run_cached_instruction_block(start, one_block_cycles)
-                    .unwrap(),
-                instructions.len() as u64
+            let completed = emu
+                .run_cached_instruction_block(start, slice_cycles)
+                .unwrap();
+            assert!(
+                completed == block_len || completed == chained_len,
+                "unexpected completed count {completed}"
             );
         }
         assert!(emu.jit.has_compiled_block(start));
@@ -2423,9 +2452,9 @@ mod tests {
 
         emu.cpu.regs.pc = start;
         assert_eq!(
-            emu.run_cached_instruction_block(start, one_block_cycles)
+            emu.run_cached_instruction_block(start, slice_cycles)
                 .unwrap(),
-            instructions.len() as u64
+            chained_len
         );
         assert_eq!(emu.instruction_blocks[cache_index].start, collision);
         assert!(emu.jit_diagnostics().native_executions > 0);
@@ -2465,7 +2494,8 @@ mod tests {
         let native_before = emu.jit_diagnostics().native_executions;
         emu.cpu.regs.pc = first;
         assert_eq!(emu.run_cached_instruction_block(first, 64).unwrap(), 32);
-        assert_eq!(emu.jit_diagnostics().native_executions - native_before, 8);
+        // Direct chaining runs the alternating blocks inside one host dispatch.
+        assert_eq!(emu.jit_diagnostics().native_executions - native_before, 1);
     }
 
     #[test]
