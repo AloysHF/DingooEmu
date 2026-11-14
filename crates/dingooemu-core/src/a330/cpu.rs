@@ -833,12 +833,12 @@ impl Cpu {
                 return Err(SimulatorError::InvalidInstruction { pc, instr: op });
             }
             let mut address = self.r[base];
-            for reg in 0..8 {
+            for (reg, reg_value) in self.r.iter_mut().enumerate().take(8) {
                 if list & (1 << reg) != 0 {
                     if load {
-                        self.r[reg] = bus.read32(address)?;
+                        *reg_value = bus.read32(address)?;
                     } else {
-                        bus.write32(address, self.r[reg])?;
+                        bus.write32(address, *reg_value)?;
                     }
                     address = address.wrapping_add(4);
                 }
