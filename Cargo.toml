@@ -28,7 +28,7 @@ crc32fast = "=1.5.5"
 bincode = "=1.3.3"
 lz4_flex = "=0.14.0"
 image = "=0.25.10"
-clap = { version = "=4.6.7", features = ["derive"] }
+clap = { version = "=4.6.8", features = ["derive"] }
 minifb = "=0.29.0"
 gilrs = "=0.11.2"
 rodio = { version = "=0.23.0", features = ["mp3"] }
