@@ -32,7 +32,7 @@ clap = { version = "=4.6.8", features = ["derive"] }
 minifb = "=0.29.0"
 gilrs = "=0.11.2"
 rodio = { version = "=0.23.0", features = ["mp3"] }
-env_logger = "=0.11.11"
+env_logger = "=0.11.12"
 # All cranelift crates are exact-pinned and must be upgraded in lockstep:
 # cranelift-jit pins its wasmtime-internal-* dependencies to exact versions
 # per release line, so a partial upgrade leaves two cranelift-codegen
