@@ -39,10 +39,10 @@ env_logger = "=0.11.12"
 # versions in the graph and breaks the JIT build with mismatched trait
 # errors. The `cranelift` group in .github/dependabot.yml keeps Dependabot
 # bumps aligned; keep all four lines in sync for manual bumps too.
-cranelift = "=0.137.0"
-cranelift-jit = "=0.137.0"
-cranelift-module = "=0.137.0"
-cranelift-native = "=0.137.0"
+cranelift = "=0.138.0"
+cranelift-jit = "=0.138.0"
+cranelift-module = "=0.138.0"
+cranelift-native = "=0.138.0"
 
 [profile.release]
 opt-level = 3
